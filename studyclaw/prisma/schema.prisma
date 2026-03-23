@@ -1,0 +1,204 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User model - each student
+model User {
+  id                String    @id @default(uuid())
+  email             String    @unique
+  passwordHash     String?
+  name              String
+  avatarUrl         String?
+  googleId          String?   @unique
+  emailVerified     Boolean   @default(false)
+  plan              Plan      @default(FREE)
+  aiQueriesUsed     Int       @default(0)
+  aiQueriesLimit    Int       @default(10)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  // Relations
+  agent             Agent?
+  flashcardDecks    FlashcardDeck[]
+  tasks             Task[]
+  events            Event[]
+  studySessions     StudySession[]
+  aiRequests        AiRequest[]
+}
+
+enum Plan {
+  FREE
+  PRO
+  CAMPUS
+}
+
+// Agent configuration for each user
+model Agent {
+  id              String    @id @default(uuid())
+  userId          String    @unique
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Agent configuration
+  name            String
+  preset          Preset?   // CHILL_VIC, SGT_STRICT, CUSTOM
+  personality     Json?     // Custom personality settings
+  systemPrompt    String?   // Custom system prompt
+  
+  // Memory/Context
+  memory          Json?     @default("[]") // Previous conversation context
+  
+  // Preferences
+  studyFocus      String[]  @default([]) // Subjects they're focusing on
+  notificationPrefs Json?  @default("{}")
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+enum Preset {
+  CHILL_VIC
+  SGT_STRICT
+  CUSTOM
+}
+
+// Flashcard decks
+model FlashcardDeck {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  title       String
+  description String?
+  tags        String[]
+  isPublic    Boolean   @default(false)
+  
+  cards       Flashcard[]
+  sessions    StudySession[]
+  
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// Individual flashcards
+model Flashcard {
+  id            String    @id @default(uuid())
+  deckId        String
+  deck          FlashcardDeck @relation(fields: [deckId], references: [id], onDelete: Cascade)
+  
+  front         String    // Question
+  back         String    // Answer
+  type          CardType  @default(BASIC)
+  difficulty    Int       @default(1)
+  
+  // Spaced repetition fields
+  timesReviewed Int       @default(0)
+  timesCorrect  Int       @default(0)
+  nextReview    DateTime?
+  intervalDays  Int       @default(1)
+  easeFactor    Float     @default(2.5)
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+enum CardType {
+  BASIC
+  CLOZE
+  MULTIPLE_CHOICE
+}
+
+// Tasks/Assignments
+model Task {
+  id              String    @id @default(uuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  title           String
+  description     String?
+  dueDate         DateTime?
+  priority        Priority  @default(MEDIUM)
+  status          TaskStatus @default(PENDING)
+  category        String?   // homework, project, reading, exam
+  estimatedMinutes Int?
+  completedAt     DateTime?
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  OVERDUE
+}
+
+// Calendar events
+model Event {
+  id              String    @id @default(uuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  title           String
+  description     String?
+  startTime       DateTime
+  endTime         DateTime?
+  location        String?
+  eventType       EventType @default(EVENT)
+  recurrenceRule  String?   // iCal recurrence rule
+  externalId      String?   // Google Calendar ID
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+enum EventType {
+  CLASS
+  STUDY
+  EXAM
+  ASSIGNMENT
+  OFFICE_HOURS
+  EVENT
+}
+
+// Study sessions
+model StudySession {
+  id            String    @id @default(uuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deckId        String?
+  deck          FlashcardDeck? @relation(fields: [deckId], references: [id])
+  
+  startedAt     DateTime  @default(now())
+  endedAt       DateTime?
+  cardsReviewed Int       @default(0)
+  cardsCorrect  Int       @default(0)
+  durationMinutes Int?
+}
+
+// AI Request logging
+model AiRequest {
+  id            String    @id @default(uuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  requestType   String    // flashcard, quiz, explain, etc.
+  prompt        String
+  response      String?
+  tokensUsed    Int?
+  costUsd       Float?
+  
+  createdAt     DateTime  @default(now())
+}

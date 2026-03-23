@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  # StudyClaw API Server
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - JWT_SECRET=${JWT_SECRET}
+      - OPENCLAW_URL=${OPENCLAW_URL}
+      - OPENCLAW_TOKEN=${OPENCLAW_TOKEN}
+      - ADMIN_KEY=${ADMIN_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=studyclaw
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-studyclaw_db_pass_2026}
+      - POSTGRES_DB=studyclaw
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U studyclaw"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # OpenClaw Gateway - UNCOMMENT after you set up OpenClaw
+  # openclaw:
+  #   image: openclaw/gateway:latest
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     - API_TOKEN=${OPENCLAW_TOKEN}
+  #   volumes:
+  #     - openclaw_data:/data
+  #   restart: unless-stopped
+
+volumes:
+  postgres_data:

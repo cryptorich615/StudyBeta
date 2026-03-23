@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "profiles": {
+    "minimax:default": {
+      "type": "api_key",
+      "provider": "minimax",
+      "key": "#####################################"
+    }
+  },
+  "usageStats": {
+    "minimax:default": {
+      "errorCount": 0
+    }
+  }
+}

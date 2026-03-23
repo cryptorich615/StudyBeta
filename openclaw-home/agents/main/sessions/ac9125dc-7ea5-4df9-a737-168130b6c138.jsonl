@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"ac9125dc-7ea5-4df9-a737-168130b6c138","timestamp":"2026-03-08T01:37:32.471Z","cwd":"/home/ubuntu/.openclaw/workspace"}
+{"type":"model_change","id":"c6229062","parentId":null,"timestamp":"2026-03-08T01:37:32.475Z","provider":"openrouter","modelId":"openrouter/auto"}
+{"type":"thinking_level_change","id":"43338bc3","parentId":"c6229062","timestamp":"2026-03-08T01:37:32.475Z","thinkingLevel":"low"}
+{"type":"custom","customType":"model-snapshot","data":{"timestamp":1772933852479,"provider":"openrouter","modelApi":"openai-completions","modelId":"openrouter/auto"},"id":"73438658","parentId":"43338bc3","timestamp":"2026-03-08T01:37:32.479Z"}
+{"type":"message","id":"44166d22","parentId":"73438658","timestamp":"2026-03-08T01:37:32.488Z","message":{"role":"user","content":[{"type":"text","text":"hello, reply with the word working"}],"timestamp":1772933852483}}
+{"type":"message","id":"6428706d","parentId":"44166d22","timestamp":"2026-03-08T01:37:34.115Z","message":{"role":"assistant","content":[{"type":"text","text":"working"}],"api":"openai-completions","provider":"openrouter","model":"openrouter/auto","usage":{"input":6609,"output":55,"cacheRead":0,"cacheWrite":0,"totalTokens":6664,"cost":{"input":-6609,"output":-55,"cacheRead":0,"cacheWrite":0,"total":-6664}},"stopReason":"stop","timestamp":1772933852486}}

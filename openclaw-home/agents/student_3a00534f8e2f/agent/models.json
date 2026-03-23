@@ -1,0 +1,141 @@
+{
+  "providers": {
+    "minimax": {
+      "baseUrl": "https://api.minimax.io/anthropic",
+      "api": "anthropic-messages",
+      "authHeader": true,
+      "models": [
+        {
+          "id": "MiniMax-M2.5",
+          "name": "MiniMax M2.5",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0.3,
+            "output": 1.2,
+            "cacheRead": 0.03,
+            "cacheWrite": 0.12
+          },
+          "contextWindow": 200000,
+          "maxTokens": 8192
+        },
+        {
+          "id": "MiniMax-VL-01",
+          "name": "MiniMax VL 01",
+          "reasoning": false,
+          "input": [
+            "text",
+            "image"
+          ],
+          "cost": {
+            "input": 0.3,
+            "output": 1.2,
+            "cacheRead": 0.03,
+            "cacheWrite": 0.12
+          },
+          "contextWindow": 200000,
+          "maxTokens": 8192
+        },
+        {
+          "id": "MiniMax-M2.5-highspeed",
+          "name": "MiniMax M2.5 Highspeed",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0.3,
+            "output": 1.2,
+            "cacheRead": 0.03,
+            "cacheWrite": 0.12
+          },
+          "contextWindow": 200000,
+          "maxTokens": 8192
+        }
+      ],
+      "apiKey": "sk-cp-_mtlQ2x0I0Jk-idQPQbaf7l1q5bY4ID9KHKNAj7JUgOMjiCDxTBlXN0TLrK8pIyHTwwgG3LsLBSm_vRFMU4W55aFcA_PnkaE8gPMQZb9iifIAMdinD7OL5U"
+    },
+    "openrouter": {
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "auto",
+          "name": "OpenRouter Auto",
+          "reasoning": false,
+          "input": [
+            "text",
+            "image"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 200000,
+          "maxTokens": 8192
+        },
+        {
+          "id": "openrouter/hunter-alpha",
+          "name": "Hunter Alpha",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 1048576,
+          "maxTokens": 65536
+        },
+        {
+          "id": "openrouter/healer-alpha",
+          "name": "Healer Alpha",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 262144,
+          "maxTokens": 65536
+        }
+      ],
+      "apiKey": "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"
+    },
+    "ollama": {
+      "baseUrl": "http://127.0.0.1:11434",
+      "api": "ollama",
+      "models": [
+        {
+          "id": "lfm2.5-thinking:latest",
+          "name": "lfm2.5-thinking:latest",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 128000,
+          "maxTokens": 8192
+        }
+      ],
+      "apiKey": "API_KEY"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+openapi: 3.1.0
+info: { title: StudyClaw API, version: 0.2.0 }
+servers: [{ url: https://api.studyclaw.com }]
+components:
+  securitySchemes: { bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT } }
+security: [{ bearerAuth: [] }]
+paths:
+  /api/auth/signup: { post: { summary: Create account } }
+  /api/auth/login: { post: { summary: Login } }
+  /api/onboarding/complete: { post: { summary: Complete onboarding and create agent } }
+  /api/agent/me: { get: { summary: Get agent }, patch: { summary: Update agent } }
+  /api/chat/send: { post: { summary: Send a chat message through OpenClaw /v1/responses } }
+  /api/chat/threads: { get: { summary: List threads } }
+  /api/chat/threads/{threadId}: { get: { summary: Get one thread } }
+  /api/study/flashcards: { post: { summary: Generate flashcards } }
+  /api/study/quiz: { post: { summary: Generate quiz } }
+  /api/reminders: { get: { summary: List reminders }, post: { summary: Create reminder } }

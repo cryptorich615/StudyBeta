@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "profiles": {
+    "ollama:default": {
+      "type": "api_key",
+      "provider": "ollama",
+      "key": "local-ollama-no-key-required"
+    }
+  },
+  "usageStats": {
+    "ollama:default": {
+      "errorCount": 0
+    }
+  }
+}

@@ -1,0 +1,5 @@
+.DS_Store
+*.log
+studyclaw/node_modules/
+studyclaw/apps/web/.next/
+studyclaw/.next/

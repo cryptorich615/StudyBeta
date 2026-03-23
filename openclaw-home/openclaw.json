@@ -1,0 +1,570 @@
+{
+  "meta": {
+    "lastTouchedVersion": "2026.3.13",
+    "lastTouchedAt": "2026-03-23T23:12:28.099Z"
+  },
+  "wizard": {
+    "lastRunAt": "2026-03-12T00:13:43.154Z",
+    "lastRunVersion": "2026.3.2",
+    "lastRunCommand": "configure",
+    "lastRunMode": "local"
+  },
+  "auth": {
+    "profiles": {
+      "openrouter:default": {
+        "provider": "openrouter",
+        "mode": "api_key"
+      },
+      "minimax:default": {
+        "provider": "minimax",
+        "mode": "api_key"
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "minimax": {
+        "baseUrl": "https://api.minimax.io/anthropic",
+        "api": "anthropic-messages",
+        "authHeader": true,
+        "models": [
+          {
+            "id": "MiniMax-M2.5",
+            "name": "MiniMax M2.5",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0.3,
+              "output": 1.2,
+              "cacheRead": 0.03,
+              "cacheWrite": 0.12
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "minimax/MiniMax-M2.5",
+        "fallbacks": [
+          "ollama/lfm2.5-thinking:latest",
+          "openrouter/auto",
+          "openrouter/openrouter/auto",
+          "openai-codex/gpt-5.3-codex"
+        ]
+      },
+      "models": {
+        "openrouter/auto": {
+          "alias": "OpenRouter"
+        },
+        "openrouter/openrouter/auto": {},
+        "openai-codex/gpt-5.3-codex": {},
+        "minimax/MiniMax-M2.5": {
+          "alias": "Minimax"
+        },
+        "ollama/lfm2.5-thinking:latest": {
+          "alias": "LFM 2.5 Thinking (Free)"
+        }
+      },
+      "workspace": "/home/ubuntu/.openclaw/workspace",
+      "compaction": {
+        "mode": "safeguard"
+      },
+      "maxConcurrent": 4,
+      "subagents": {
+        "maxConcurrent": 8
+      }
+    },
+    "list": [
+      {
+        "id": "main",
+        "model": "minimax/MiniMax-M2.5",
+        "tools": {
+          "alsoAllow": [
+            "read",
+            "write",
+            "edit",
+            "apply_patch",
+            "exec",
+            "process",
+            "web_search",
+            "web_fetch",
+            "memory_search",
+            "memory_get",
+            "sessions_spawn",
+            "subagents",
+            "browser",
+            "canvas",
+            "cron",
+            "gateway",
+            "nodes",
+            "agents_list",
+            "image",
+            "tts"
+          ]
+        }
+      },
+      {
+        "id": "student_010fcce970e8",
+        "name": "student_010fcce970e8",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_010fcce970e8",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_010fcce970e8/agent",
+        "model": "openrouter/auto",
+        "skills": [
+          "1password",
+          "apple-",
+          "apple-notes",
+          "bear-notes",
+          "blogwatcher",
+          "blucli",
+          "bluebubbles",
+          "camsnap",
+          "clawhub",
+          "coding-agent",
+          "discord",
+          "eightctl",
+          "gemini",
+          "gh-issues",
+          "gifgrep",
+          "github",
+          "gog",
+          "goplaces",
+          "healthcheck",
+          "himalaya",
+          "imsg",
+          "mcporter",
+          "model-usage",
+          "nano-banana-",
+          "nano-pdf",
+          "notion",
+          "obsidian",
+          "openai-",
+          "openai-image-",
+          "openhue",
+          "oracle",
+          "ordercli",
+          "peekaboo",
+          "sag",
+          "session-logs",
+          "sherpa-onnx-",
+          "skill-creator",
+          "slack",
+          "songsee",
+          "sonoscli",
+          "spotify-player",
+          "summarize",
+          "things-mac",
+          "tmux",
+          "trello",
+          "video-frames",
+          "voice-call",
+          "wacli",
+          "weather",
+          "xurl"
+        ]
+      },
+      {
+        "id": "student_730f56fd0e33",
+        "name": "student_730f56fd0e33",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_730f56fd0e33",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_730f56fd0e33/agent",
+        "model": "openrouter/auto",
+        "skills": [
+          "apple-",
+          "apple-notes",
+          "bear-notes",
+          "blogwatcher",
+          "blucli",
+          "bluebubbles",
+          "camsnap",
+          "clawhub",
+          "coding-agent",
+          "discord",
+          "eightctl",
+          "gemini",
+          "gh-issues",
+          "gifgrep",
+          "github",
+          "gog",
+          "goplaces",
+          "healthcheck",
+          "himalaya",
+          "imsg",
+          "mcporter",
+          "model-usage",
+          "nano-banana-",
+          "nano-pdf",
+          "notion",
+          "obsidian",
+          "openai-",
+          "openai-image-",
+          "openhue",
+          "oracle",
+          "ordercli",
+          "peekaboo",
+          "sag",
+          "session-logs",
+          "sherpa-onnx-",
+          "skill-creator",
+          "slack",
+          "songsee",
+          "sonoscli",
+          "spotify-player",
+          "summarize",
+          "things-mac",
+          "tmux",
+          "trello",
+          "video-frames",
+          "voice-call",
+          "wacli",
+          "weather",
+          "xurl"
+        ]
+      },
+      {
+        "id": "student_0f2222de773b",
+        "name": "student_0f2222de773b",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_0f2222de773b",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_0f2222de773b/agent",
+        "model": "openrouter/auto",
+        "skills": [
+          "apple-",
+          "apple-notes",
+          "bear-notes",
+          "blogwatcher",
+          "blucli",
+          "bluebubbles",
+          "camsnap",
+          "clawhub",
+          "coding-agent",
+          "discord",
+          "eightctl",
+          "gemini",
+          "gh-issues",
+          "gifgrep",
+          "github",
+          "gog",
+          "goplaces",
+          "healthcheck",
+          "himalaya",
+          "imsg",
+          "mcporter",
+          "model-usage",
+          "nano-banana-",
+          "nano-pdf",
+          "notion",
+          "obsidian",
+          "openai-",
+          "openai-",
+          "openai-image-",
+          "openhue",
+          "oracle",
+          "ordercli",
+          "peekaboo",
+          "sag",
+          "session-logs",
+          "sherpa-onnx-",
+          "skill-creator",
+          "slack",
+          "songsee",
+          "sonoscli",
+          "spotify-player",
+          "summarize",
+          "things-mac",
+          "tmux",
+          "trello",
+          "video-frames",
+          "voice-call",
+          "wacli",
+          "weather",
+          "xurl"
+        ]
+      },
+      {
+        "id": "student_3d928e506009",
+        "name": "student_3d928e506009",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_3d928e506009",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_3d928e506009/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_b438f974efa6",
+        "name": "student_b438f974efa6",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_b438f974efa6",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_b438f974efa6/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_10e54ea8bc60",
+        "name": "student_10e54ea8bc60",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_10e54ea8bc60",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_10e54ea8bc60/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_5ff3e0c99f09",
+        "name": "student_5ff3e0c99f09",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_5ff3e0c99f09",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_5ff3e0c99f09/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_9105a7c269dc",
+        "name": "student_9105a7c269dc",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_9105a7c269dc",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_9105a7c269dc/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_5eecc6a040b7",
+        "name": "student_5eecc6a040b7",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_5eecc6a040b7",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_5eecc6a040b7/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_f22df9f03010",
+        "name": "student_f22df9f03010",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_f22df9f03010",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_f22df9f03010/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_3a00534f8e2f",
+        "name": "student_3a00534f8e2f",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_3a00534f8e2f",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_3a00534f8e2f/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_27420b8bb290",
+        "name": "student_27420b8bb290",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_27420b8bb290",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_27420b8bb290/agent",
+        "model": "minimax/MiniMax-M2.5"
+      },
+      {
+        "id": "student_79425bf3a520",
+        "name": "student_79425bf3a520",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_79425bf3a520",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_79425bf3a520/agent",
+        "model": "minimax/MiniMax-M2.5"
+      },
+      {
+        "id": "student_a6755d23ab10",
+        "name": "student_a6755d23ab10",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_a6755d23ab10",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_a6755d23ab10/agent",
+        "model": "minimax/MiniMax-M2.5"
+      },
+      {
+        "id": "student_c6545d0347fa",
+        "name": "student_c6545d0347fa",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_c6545d0347fa",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_c6545d0347fa/agent",
+        "model": "ollama/lfm2.5-thinking:latest"
+      },
+      {
+        "id": "student_31bdeccaf993",
+        "name": "student_31bdeccaf993",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_31bdeccaf993",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_31bdeccaf993/agent",
+        "model": "minimax/MiniMax-M2.5"
+      },
+      {
+        "id": "student_e970a0293c7e",
+        "name": "student_e970a0293c7e",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_e970a0293c7e",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_e970a0293c7e/agent",
+        "model": "minimax/MiniMax-M2.5"
+      },
+      {
+        "id": "student_be01fd2b3016",
+        "name": "student_be01fd2b3016",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_be01fd2b3016",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_be01fd2b3016/agent",
+        "model": "ollama/lfm2.5-thinking:latest"
+      },
+      {
+        "id": "student_730c738b8497",
+        "name": "student_730c738b8497",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_730c738b8497",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_730c738b8497/agent",
+        "model": "ollama/lfm2.5-thinking:latest"
+      },
+      {
+        "id": "student_e7d53dcde3a2",
+        "name": "student_e7d53dcde3a2",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_e7d53dcde3a2",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_e7d53dcde3a2/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_b33790071a0c",
+        "name": "student_b33790071a0c",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_b33790071a0c",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_b33790071a0c/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_dfd6ab94c099",
+        "name": "student_dfd6ab94c099",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_dfd6ab94c099",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_dfd6ab94c099/agent",
+        "model": "minimax/MiniMax-M2.5"
+      },
+      {
+        "id": "student_ce230912d059",
+        "name": "student_ce230912d059",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_ce230912d059",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_ce230912d059/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_b901f616c099",
+        "name": "student_b901f616c099",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_b901f616c099",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_b901f616c099/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_9689f974351f",
+        "name": "student_9689f974351f",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_9689f974351f",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_9689f974351f/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_77ef6290e31e",
+        "name": "student_77ef6290e31e",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_77ef6290e31e",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_77ef6290e31e/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_40cbf88695ea",
+        "name": "student_40cbf88695ea",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_40cbf88695ea",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_40cbf88695ea/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_727e3e3756c6",
+        "name": "student_727e3e3756c6",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_727e3e3756c6",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_727e3e3756c6/agent",
+        "model": "openrouter/auto"
+      },
+      {
+        "id": "student_a63560d89877",
+        "name": "student_a63560d89877",
+        "workspace": "/home/ubuntu/.openclaw/workspace-student_a63560d89877",
+        "agentDir": "/home/ubuntu/.openclaw/agents/student_a63560d89877/agent",
+        "model": "openrouter/auto"
+      }
+    ]
+  },
+  "tools": {
+    "profile": "messaging"
+  },
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "hooks": {
+    "internal": {
+      "enabled": true,
+      "entries": {
+        "boot-md": {
+          "enabled": true
+        },
+        "bootstrap-extra-files": {
+          "enabled": true
+        },
+        "command-logger": {
+          "enabled": true
+        },
+        "session-memory": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "dmPolicy": "pairing",
+      "botToken": "1924234585:AAHJ1whQdLwl2rZ-e6v9En0_el0RevFiQVg",
+      "groupPolicy": "allowlist",
+      "streaming": "partial"
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "lan",
+    "controlUi": {
+      "allowedOrigins": [
+        "https://3.144.253.238",
+        "http://3.148.233.46",
+        "*"
+      ]
+    },
+    "auth": {
+      "mode": "token",
+      "token": "cea9b28f983583ff00bd47697a7ed20f833dd4e39cbb2099"
+    },
+    "trustedProxies": [
+      "127.0.0.1"
+    ],
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "http": {
+      "endpoints": {
+        "responses": {
+          "enabled": true
+        }
+      }
+    },
+    "nodes": {
+      "denyCommands": [
+        "camera.snap",
+        "camera.clip",
+        "screen.record",
+        "contacts.add",
+        "calendar.add",
+        "reminders.add",
+        "sms.send"
+      ]
+    }
+  },
+  "skills": {
+    "install": {
+      "nodeManager": "npm"
+    }
+  },
+  "plugins": {
+    "entries": {
+      "telegram": {
+        "enabled": true
+      }
+    }
+  }
+}

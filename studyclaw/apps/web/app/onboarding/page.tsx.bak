@@ -1,0 +1,460 @@
+'use client';
+
+import Link from 'next/link';
+import { FormEvent, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import PageHero from '../components/page-hero';
+import StatusBanner from '../components/status-banner';
+import { apiFetch } from '../../lib/api';
+import { readStoredSession, writeStoredSession } from '../../lib/session';
+
+type ModelOption = {
+  key: string;
+  name: string;
+  provider: string;
+  oauthAvailable: boolean;
+  available: boolean;
+};
+
+const providerGuides = [
+  {
+    provider: 'openrouter',
+    title: 'OpenRouter',
+    helper: 'Best default if you want one API key that can route across many models.',
+    steps: [
+      'Create or sign in to your OpenRouter account.',
+      'Open the API keys page and create a key.',
+      'Copy the key here, then choose the OpenRouter-backed model you want.',
+    ],
+    links: [
+      { label: 'OpenRouter Quickstart', href: 'https://openrouter.ai/docs/quickstart' },
+      { label: 'OpenRouter API Keys', href: 'https://openrouter.ai/settings/keys' },
+    ],
+  },
+  {
+    provider: 'nvidia',
+    title: 'NVIDIA',
+    helper: 'Good option if you want free inference through NVIDIA Build / API Catalog.',
+    steps: [
+      'Open the NVIDIA API Catalog and sign in to the free NVIDIA Developer Program.',
+      'Open a model page, switch to Deploy, and click Get API key.',
+      'Paste that key here and select an NVIDIA-backed model.',
+    ],
+    links: [
+      { label: 'NVIDIA API Catalog', href: 'https://build.nvidia.com/' },
+      { label: 'NVIDIA NIM Getting Started', href: 'https://docs.nvidia.com/nim/large-language-models/latest/getting-started.html' },
+    ],
+  },
+  {
+    provider: 'ollama',
+    title: 'Ollama',
+    helper: 'Runs locally on your machine. No cloud API key is required.',
+    steps: [
+      'Install Ollama on your machine.',
+      'Start Ollama and pull a model locally.',
+      'Use the local Ollama API endpoint instead of a paid provider key when your setup supports it.',
+    ],
+    links: [
+      { label: 'Download Ollama', href: 'https://ollama.com/download' },
+      { label: 'Ollama API Docs', href: 'https://docs.ollama.com/api' },
+    ],
+  },
+];
+
+type AgentPreset = {
+  key: string;
+  name: string;
+  description: string;
+};
+
+type OnboardingStatus = {
+  agent?: { model_key?: string; preset_key?: string } | null;
+  google?: { connected: boolean; googleEmail?: string | null } | null;
+  profile?: {
+    school_name?: string | null;
+    grade_year?: string | null;
+    major?: string | null;
+  } | null;
+};
+
+export default function OnboardingPage() {
+  const router = useRouter();
+  const [status, setStatus] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [step, setStep] = useState<1 | 2>(1);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [savedUser, setSavedUser] = useState<{ email: string; full_name?: string } | null>(null);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [agentPresets, setAgentPresets] = useState<AgentPreset[]>([]);
+  const [oauthAvailable, setOauthAvailable] = useState(false);
+  const [modelKey, setModelKey] = useState('');
+  const [agentPreset, setAgentPreset] = useState('custom');
+  const [customModelKey, setCustomModelKey] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [googleStatus, setGoogleStatus] = useState<OnboardingStatus['google']>(null);
+  const [studentName, setStudentName] = useState('');
+  const [schoolName, setSchoolName] = useState('');
+  const [graduationYear, setGraduationYear] = useState('');
+  const [major, setMajor] = useState('');
+  const effectiveModelKey = customModelKey.trim() || modelKey;
+  const selectedModel = models.find((model) => model.key === effectiveModelKey) ?? null;
+  const selectedProvider = selectedModel?.provider?.toLowerCase() ?? '';
+  const prioritizedGuides = [
+    ...providerGuides.filter((guide) => selectedProvider.includes(guide.provider)),
+    ...providerGuides.filter((guide) => !selectedProvider.includes(guide.provider)),
+  ];
+
+  useEffect(() => {
+    const parsed = readStoredSession();
+    setUserId(parsed?.user?.id ?? null);
+    setSavedUser(parsed?.user ?? null);
+    setStudentName(parsed?.user?.full_name ?? '');
+  }, []);
+
+  useEffect(() => {
+    if (!userId) return;
+
+    void (async () => {
+      const [optionsRes, statusRes] = await Promise.all([
+        apiFetch('/api/onboarding/options'),
+        apiFetch('/api/onboarding/status'),
+      ]);
+
+      const optionsData = await optionsRes.json();
+      const statusData = await statusRes.json() as OnboardingStatus;
+
+      if (optionsRes.ok) {
+        const nextModels = optionsData.models ?? [];
+        setModels(nextModels);
+        setAgentPresets(optionsData.agentPresets ?? []);
+        setOauthAvailable(!!optionsData.oauthAvailable);
+        const currentModelKey = statusData.agent?.model_key;
+        const currentPreset = statusData.agent?.preset_key;
+        if (currentPreset) setAgentPreset(currentPreset);
+        setGoogleStatus(statusData.google ?? null);
+        setSchoolName(statusData.profile?.school_name ?? '');
+        setGraduationYear(statusData.profile?.grade_year ?? '');
+        setMajor(statusData.profile?.major ?? '');
+        const matchingModel =
+          nextModels.find((model: ModelOption) => model.key === currentModelKey) ??
+          nextModels.find((model: ModelOption) => model.key.endsWith(`/${currentModelKey}`));
+        setModelKey(matchingModel?.key ?? nextModels[0]?.key ?? '');
+      }
+    })();
+  }, [userId]);
+
+  function goToProfileStep() {
+    if (!effectiveModelKey || !apiKey) {
+      setStatus('Choose a model and add an API key before continuing.');
+      return;
+    }
+
+    setStatus('');
+    setStep(2);
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!userId) {
+      setStatus('Create an account or sign in before finishing onboarding.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    setStatus('Saving your setup...');
+
+    try {
+      const modelResponse = await apiFetch('/api/onboarding/model-config', {
+        method: 'POST',
+        body: JSON.stringify({
+          modelKey: effectiveModelKey,
+          apiKey,
+          agentPreset,
+        }),
+      });
+      const modelData = await modelResponse.json();
+
+      if (!modelResponse.ok) {
+        throw new Error(modelData?.message ?? 'Onboarding failed');
+      }
+
+      const profileResponse = await apiFetch('/api/user/profile', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: studentName,
+          school: schoolName,
+          graduationYear: Number(graduationYear),
+          major,
+        }),
+      });
+      const profileData = await profileResponse.json();
+
+      if (!profileResponse.ok) {
+        throw new Error(profileData?.message ?? 'Failed to save profile');
+      }
+
+      const session = readStoredSession();
+      if (session) {
+        writeStoredSession({
+          ...session,
+          user: {
+            ...session.user,
+            full_name: profileData.user?.full_name ?? studentName.trim(),
+          },
+        });
+      }
+
+      setStatus('Model saved. Opening your dashboard...');
+      router.replace('/dashboard?welcome=1');
+    } catch (error: any) {
+      setStatus(error.message ?? 'Onboarding failed');
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <>
+      <PageHero
+        badge="Onboarding"
+        title="Set up the engine behind your student workspace."
+        description="Finish model access once, then StudyClaw can generate your dashboard recommendations, study sets, and coach summaries with real continuity."
+        meta={
+          <>
+            <span className="insight-chip">{models.length} models available</span>
+            <span className="insight-chip">Profile step included</span>
+            <span className="insight-chip">{savedUser ? savedUser.email : 'Guest session'}</span>
+          </>
+        }
+      />
+
+      {!userId ? (
+        <StatusBanner tone="warning">
+          Sign in first. This onboarding flow only saves when a user session already exists.
+        </StatusBanner>
+      ) : null}
+
+      <section className="auth-shell">
+        <section className="auth-form">
+          <form onSubmit={handleSubmit}>
+            <div className="secondary-card" style={{ marginBottom: 16 }}>
+              <p className="eyebrow">Setup progress</p>
+              <p className="muted-copy" style={{ margin: 0 }}>Step {step} of 2</p>
+            </div>
+
+            {step === 1 ? (
+              <>
+                <div className="form-grid">
+                  <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+                    <label>Agent Personality</label>
+                    <p className="muted-copy" style={{ marginTop: 0 }}>
+                      Two quick-start agents are preconfigured. `Custom Build` still keeps the locked StudyClaw core traits.
+                    </p>
+                    <div className="persona-cards">
+                      {agentPresets.map((preset) => (
+                        <button
+                          key={preset.key}
+                          type="button"
+                          className={`persona-card ${agentPreset === preset.key ? 'active' : ''}`}
+                          onClick={() => setAgentPreset(preset.key)}
+                        >
+                          <strong>{preset.name}</strong>
+                          <p>{preset.description}</p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="form-field">
+                    <label htmlFor="modelKey">OpenClaw model</label>
+                    <select id="modelKey" value={modelKey} onChange={(event) => setModelKey(event.target.value)}>
+                      {models.map((model) => (
+                        <option key={model.key} value={model.key}>
+                          {model.name} ({model.provider}){model.available ? '' : ' - requires provider auth'}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="form-field">
+                    <label htmlFor="customModelKey">Custom model key (optional)</label>
+                    <input
+                      id="customModelKey"
+                      type="text"
+                      value={customModelKey}
+                      onChange={(event) => setCustomModelKey(event.target.value)}
+                      placeholder="Example: openrouter/auto"
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label htmlFor="apiKey">Provider API key</label>
+                    <input
+                      id="apiKey"
+                      type="password"
+                      value={apiKey}
+                      onChange={(event) => setApiKey(event.target.value)}
+                      placeholder="Paste the API key for the selected provider"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="secondary-card" style={{ marginTop: 16 }}>
+                  <p className="eyebrow">Provider access</p>
+                  <p className="muted-copy" style={{ margin: 0 }}>
+                    {oauthAvailable
+                      ? 'OAuth-capable providers can be connected here once provider-specific credentials are configured on the server.'
+                      : 'The currently configured OpenClaw providers on this VPS are API-key based, so OAuth is not available for this model set.'}
+                  </p>
+                  <p className="muted-copy" style={{ marginTop: 10, marginBottom: 0 }}>
+                    If your preferred model is not listed, enter it in the optional custom model box above. Example: <code>openrouter/auto</code>.
+                  </p>
+                  <p className="muted-copy" style={{ marginTop: 10, marginBottom: 0 }}>
+                    {googleStatus?.connected
+                      ? `Google Drive and Calendar are connected for ${googleStatus.googleEmail ?? 'this account'}.`
+                      : 'Google Drive and Calendar will connect through the same Google OAuth flow after sign-in.'}
+                  </p>
+                </div>
+
+                <div className="form-actions" style={{ justifyContent: 'flex-end', alignItems: 'center' }}>
+                  <button type="button" onClick={goToProfileStep} disabled={isSubmitting || !effectiveModelKey || !apiKey}>
+                    Continue
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="form-grid">
+                  <div className="form-field">
+                    <label htmlFor="studentName">What should I call you?</label>
+                    <input
+                      id="studentName"
+                      type="text"
+                      value={studentName}
+                      onChange={(event) => setStudentName(event.target.value)}
+                      required
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label htmlFor="schoolName">What school do you go to?</label>
+                    <input
+                      id="schoolName"
+                      type="text"
+                      value={schoolName}
+                      onChange={(event) => setSchoolName(event.target.value)}
+                      required
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label htmlFor="graduationYear">What is your graduation year?</label>
+                    <input
+                      id="graduationYear"
+                      type="number"
+                      inputMode="numeric"
+                      value={graduationYear}
+                      onChange={(event) => setGraduationYear(event.target.value)}
+                      required
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label htmlFor="major">What is your major?</label>
+                    <input
+                      id="major"
+                      type="text"
+                      value={major}
+                      onChange={(event) => setMajor(event.target.value)}
+                      placeholder="Optional"
+                    />
+                  </div>
+                </div>
+
+                <div className="form-actions" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                  <button type="button" onClick={() => setStep(1)} disabled={isSubmitting}>
+                    Back
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmitting || !studentName.trim() || !schoolName.trim() || !graduationYear.trim()}
+                  >
+                    {isSubmitting ? 'Saving...' : 'Finish onboarding'}
+                  </button>
+                </div>
+              </>
+            )}
+          </form>
+
+          {status ? (
+            <div style={{ marginTop: 16 }}>
+              <StatusBanner tone={status.toLowerCase().includes('failed') ? 'danger' : 'neutral'}>
+                {status}
+              </StatusBanner>
+            </div>
+          ) : null}
+
+          {savedUser ? (
+            <p className="form-status">
+              Model setup for {savedUser.full_name || savedUser.email} ({savedUser.email})
+            </p>
+          ) : (
+            <p className="form-status">
+              This flow needs an active session. <Link href="/signup">Create an account</Link> or <Link href="/login">log in</Link>.
+            </p>
+          )}
+        </section>
+
+        <aside className="auth-panel">
+          <p className="eyebrow">What unlocks next</p>
+          <h3 style={{ margin: '0 0 8px' }}>Your board, coach, and study library all depend on one clean setup.</h3>
+          <div className="auth-panel-grid">
+            <div className="mini-card">
+              <strong style={{ display: 'block', marginBottom: 6 }}>Dashboard ranking</strong>
+              <span className="muted-copy">Priorities and heartbeat swaps become personalized instead of generic.</span>
+            </div>
+            <div className="mini-card">
+              <strong style={{ display: 'block', marginBottom: 6 }}>Coach summaries</strong>
+              <span className="muted-copy">Uploaded notes can be summarized and saved as reusable student knowledge.</span>
+            </div>
+            <div className="mini-card">
+              <strong style={{ display: 'block', marginBottom: 6 }}>Study generation</strong>
+              <span className="muted-copy">Flashcards and quizzes stay connected to the same student context.</span>
+            </div>
+          </div>
+
+          <div style={{ marginTop: 20 }}>
+            <p className="eyebrow">Get A Provider Key</p>
+            <div className="auth-panel-grid">
+              {prioritizedGuides.map((guide) => (
+                <div key={guide.provider} className="mini-card">
+                  <strong style={{ display: 'block', marginBottom: 6 }}>
+                    {guide.title}
+                    {selectedProvider.includes(guide.provider) ? ' · recommended for current selection' : ''}
+                  </strong>
+                  <p className="muted-copy" style={{ marginTop: 0 }}>{guide.helper}</p>
+                  <div className="timeline" style={{ marginTop: 10 }}>
+                    {guide.steps.map((item) => (
+                      <div key={item} className="timeline-item">
+                        <p className="muted-copy" style={{ margin: 0 }}>{item}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="actions">
+                    {guide.links.map((link) => (
+                      <Link key={link.href} href={link.href} target="_blank" rel="noreferrer" className="ghost-button">
+                        {link.label}
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </aside>
+      </section>
+    </>
+  );
+}
