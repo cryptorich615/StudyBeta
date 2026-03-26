@@ -3,8 +3,11 @@ export type StoredSession = {
     id: string;
     email: string;
     full_name?: string;
+    role?: string;
+    agent_type?: string | null;
   };
   accessToken: string;
+  onboardingComplete?: boolean;
 };
 
 const SESSION_KEY = 'studyclaw-user';
@@ -31,4 +34,12 @@ export function writeStoredSession(session: StoredSession) {
 export function clearStoredSession() {
   if (typeof window === 'undefined') return;
   window.localStorage.removeItem(SESSION_KEY);
+}
+
+export function isOnboardingComplete(session: StoredSession | null) {
+  if (!session?.user?.id) {
+    return false;
+  }
+
+  return Boolean(session.onboardingComplete || session.user.agent_type);
 }

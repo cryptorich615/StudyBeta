@@ -6,10 +6,10 @@ const GOOGLE_SCOPES = [
   'openid',
   'email',
   'profile',
-  'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/documents',
-  'https://www.googleapis.com/auth/spreadsheets',
   'https://www.googleapis.com/auth/calendar.readonly',
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/userinfo.email',
 ];
 
 type StoredGoogleToken = {
@@ -36,43 +36,6 @@ function getGoogleClient() {
 async function getStoredGoogleToken(userId: string) {
   const result = await db.query(`select * from user_google_tokens where user_id = $1`, [userId]);
   return (result.rows[0] as StoredGoogleToken | undefined) ?? null;
-}
-
-async function getAccessToken(userId: string) {
-  const stored = await getStoredGoogleToken(userId);
-  if (!stored) {
-    return null;
-  }
-
-  const client = getGoogleClient();
-  client.setCredentials({
-    access_token: decryptToken(stored.access_token) ?? undefined,
-    refresh_token: decryptToken(stored.refresh_token) ?? undefined,
-    expiry_date: new Date(stored.expires_at).getTime(),
-  });
-
-  const result = await client.getAccessToken();
-  const token = result.token ?? stored.access_token;
-  const { access_token, refresh_token, expiry_date, token_type } = client.credentials;
-
-  await db.query(
-    `update user_google_tokens
-     set access_token = $2,
-         refresh_token = coalesce($3, refresh_token),
-         token_type = coalesce($4, token_type),
-         expires_at = $5,
-         updated_at = now()
-     where user_id = $1`,
-    [
-      userId,
-      access_token ? encryptToken(access_token) : stored.access_token,
-      refresh_token ? encryptToken(refresh_token) : null,
-      token_type ?? stored.token_type,
-      expiry_date ? new Date(expiry_date) : new Date(stored.expires_at),
-    ]
-  );
-
-  return token;
 }
 
 async function googleApiFetch<T>(userId: string, url: string, init?: RequestInit) {
@@ -164,6 +127,51 @@ export async function getGoogleConnectionStatus(userId: string) {
     googleEmail: stored?.google_email ?? null,
     scopes: stored?.scope?.split(/\s+/).filter(Boolean) ?? [],
   };
+}
+
+export async function getAccessToken(userId: string) {
+  const stored = await getStoredGoogleToken(userId);
+  if (!stored) {
+    return null;
+  }
+
+  const client = getGoogleClient();
+  client.setCredentials({
+    access_token: decryptToken(stored.access_token) ?? undefined,
+    refresh_token: decryptToken(stored.refresh_token) ?? undefined,
+    expiry_date: new Date(stored.expires_at).getTime(),
+  });
+
+  // Check if token is expired
+  const now = Date.now();
+  const expiry = new Date(stored.expires_at).getTime();
+  
+  if (expiry <= now && stored.refresh_token) {
+    // Refresh the token
+    const refreshed = await client.refreshAccessToken();
+    const { access_token, refresh_token, expiry_date, token_type } = client.credentials;
+    
+    await db.query(
+      `update user_google_tokens
+       set access_token = $2,
+           refresh_token = coalesce($3, refresh_token),
+           token_type = coalesce($4, token_type),
+           expires_at = $5,
+           updated_at = now()
+       where user_id = $1`,
+      [
+        userId,
+        access_token ? encryptToken(access_token) : stored.access_token,
+        refresh_token ? encryptToken(refresh_token) : null,
+        token_type ?? stored.token_type,
+        expiry_date ? new Date(expiry_date) : new Date(stored.expires_at),
+      ]
+    );
+    
+    return access_token ?? stored.access_token;
+  }
+
+  return decryptToken(stored.access_token);
 }
 
 export async function listUpcomingCalendarEvents(userId: string, maxResults = 5) {

@@ -1,9 +1,11 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { apiFetch } from '../../lib/api';
 import { readStoredSession } from '../../lib/session';
+import { consumePayloadFromUrl } from '../../lib/consumePayload';
 import StatusBanner from '../components/status-banner';
 
 type DashboardTask = {
@@ -91,13 +93,16 @@ function buildUpcomingExams(data: DashboardData | null) {
   return items;
 }
 
-export default function DashboardPage() {
+function DashboardPageContent() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [status, setStatus] = useState('');
   const [hasSession, setHasSession] = useState(false);
+  const searchParams = useSearchParams();
   const upcomingExams = buildUpcomingExams(data);
 
   useEffect(() => {
+    // Consume payload from URL if present (e.g., from OAuth redirect)
+    consumePayloadFromUrl(searchParams);
     setHasSession(!!readStoredSession()?.user?.id);
   }, []);
 
@@ -182,7 +187,7 @@ export default function DashboardPage() {
       {status ? <StatusBanner tone="danger">{status}</StatusBanner> : null}
       {data && !data.integrations.calendarConnected ? (
         <StatusBanner tone="warning">
-          Connect Google Calendar to see upcoming events alongside your study priorities.
+          <a href="/api/auth/google">Connect Google Calendar</a> to see upcoming events alongside your study priorities.
         </StatusBanner>
       ) : null}
 
@@ -246,6 +251,35 @@ export default function DashboardPage() {
               <p className="muted-copy">No priority messages yet. Add more study inputs to sharpen your board.</p>
             )}
           </div>
+        </section>
+
+        <section className="secondary-card">
+          <p className="eyebrow">Upcoming Events</p>
+          {data?.integrations.googleEmail ? (
+            data.calendarEvents.length ? (
+              <div className="stack-list">
+                {data.calendarEvents.slice(0, 3).map((event) => (
+                  <article key={event.id} className="stack-item">
+                    <div>
+                      <strong>{event.title}</strong>
+                      <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                        {event.startsAt ? formatDate(event.startsAt) : 'Date unavailable'}
+                      </p>
+                    </div>
+                  </article>
+                ))}
+                <Link href="/calendar" className="ghost-button text-sm mt-2">
+                  View Calendar →
+                </Link>
+              </div>
+            ) : (
+              <p className="muted-copy">No upcoming events in the next 3 days</p>
+            )
+          ) : (
+            <a href="/api/auth/google" className="ghost-button">
+              Connect Google Calendar →
+            </a>
+          )}
         </section>
       </section>
 
@@ -318,5 +352,13 @@ export default function DashboardPage() {
         </section>
       </section>
     </>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <Suspense fallback={<section className="hero-card"><h1>Loading...</h1></section>}>
+      <DashboardPageContent />
+    </Suspense>
   );
 }

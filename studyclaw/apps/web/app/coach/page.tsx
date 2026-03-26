@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { type ChangeEvent, type Dispatch, type SetStateAction, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiFetch } from '../../lib/api';
+import { extractDocumentText } from '../../lib/document-text';
 import { readStoredSession } from '../../lib/session';
 import StatusBanner from '../components/status-banner';
 
@@ -20,6 +21,26 @@ type KnowledgeItem = {
   detail: string;
   source_type: string;
   created_at: string;
+};
+
+type SavedNote = {
+  id: string;
+  title: string;
+  originalText: string;
+  processedText: string;
+  assetType: string;
+  metadata: {
+    summary?: string;
+    actionItems?: string[];
+    knowledge?: Array<{ title: string; detail: string; kind: string }>;
+    attachments?: Array<{ name?: string; type?: string }>;
+    sectionName?: string;
+    sourceType?: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+  subjectId: string | null;
+  sectionName: string;
 };
 
 const prompts = [
@@ -105,9 +126,11 @@ export default function CoachPage() {
   const [processing, setProcessing] = useState(false);
   const [coachSummary, setCoachSummary] = useState('');
   const [coachTranscript, setCoachTranscript] = useState('');
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [actionItems, setActionItems] = useState<string[]>([]);
   const [knowledgeDrafts, setKnowledgeDrafts] = useState<Array<{ title: string; detail: string; kind: string }>>([]);
   const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeItem[]>([]);
+  const [savedNotes, setSavedNotes] = useState<SavedNote[]>([]);
 
   useEffect(() => {
     setHasSession(!!readStoredSession()?.user?.id);
@@ -123,6 +146,7 @@ export default function CoachPage() {
     }
 
     void loadKnowledge();
+    void loadSavedNotes();
   }, [hasSession, isIntroFlow]);
 
   async function loadKnowledge() {
@@ -131,6 +155,19 @@ export default function CoachPage() {
     if (response.ok) {
       setKnowledgeItems(data);
     }
+  }
+
+  async function loadSavedNotes(preferredDocumentId?: string) {
+    const response = await apiFetch('/api/coach/assets');
+    const data = await response.json();
+    if (!response.ok) {
+      setFeedback(data.message || 'Failed to load saved notes');
+      return;
+    }
+
+    setSavedNotes(data);
+    const nextSelectedId = preferredDocumentId ?? selectedDocumentId ?? data[0]?.id ?? null;
+    setSelectedDocumentId(nextSelectedId);
   }
 
   const matchingCommands = message.trim().startsWith('/')
@@ -239,21 +276,19 @@ export default function CoachPage() {
     const selectedFiles = Array.from(event.target.files ?? []);
     const nextAssets = await Promise.all(
       selectedFiles.map(async (file) => {
-        let extractedText = '';
-        if (file.type.startsWith('text/') || /\.(txt|md|json|csv)$/i.test(file.name)) {
-          extractedText = await file.text();
-        }
-
         return {
           id: createAssetId(file),
           name: file.name,
           type: file.type || 'application/octet-stream',
-          extractedText,
+          extractedText: await extractDocumentText(file),
         };
       })
     );
 
     setAssets((current) => [...current, ...nextAssets]);
+    if (!selectedDocumentId && nextAssets[0]) {
+      setSelectedDocumentId(nextAssets[0].id);
+    }
     if (!coachText.trim()) {
       setCoachText(nextAssets.map((asset) => asset.extractedText).filter(Boolean).join('\n\n'));
     }
@@ -269,7 +304,7 @@ export default function CoachPage() {
   }, [assets, coachText]);
 
   async function processCoachNotes() {
-    if (!coachPayloadText) {
+    if (!coachPayloadText && !assets.length) {
       setFeedback('Upload a note or add transcript/extracted text first.');
       return;
     }
@@ -282,7 +317,11 @@ export default function CoachPage() {
         method: 'POST',
         body: JSON.stringify({
           title: coachTitle,
-          text: coachPayloadText,
+          text:
+            coachPayloadText ||
+            `Uploaded document metadata:\n${assets
+              .map((asset) => `- ${asset.name} (${asset.type})`)
+              .join('\n')}\n\nNo extracted text was available. Summarize what can be inferred from the document names and ask for pasted transcript or extracted text where needed.`,
           sourceType: assets[0]?.type?.startsWith('audio/') ? 'audio' : assets[0]?.type?.startsWith('image/') ? 'photo' : 'document',
           attachments: assets.map((asset) => ({ name: asset.name, type: asset.type })),
         }),
@@ -297,12 +336,31 @@ export default function CoachPage() {
       setCoachSummary(data.summary || '');
       setActionItems(data.actionItems || []);
       setKnowledgeDrafts(data.knowledge || []);
+      await loadSavedNotes(data.assetId || undefined);
     } catch (error: any) {
       setFeedback(error.message || 'Failed to process note');
     } finally {
       setProcessing(false);
     }
   }
+
+  const selectedDocument = savedNotes.find((asset) => asset.id === selectedDocumentId) ?? savedNotes[0] ?? null;
+  const selectedDocumentText = selectedDocument?.processedText || selectedDocument?.originalText || coachTranscript;
+  const groupedSavedNotes = useMemo(() => {
+    const groups = new Map<string, SavedNote[]>();
+
+    for (const note of savedNotes) {
+      const key = note.sectionName || 'Unsorted';
+      const existing = groups.get(key) ?? [];
+      existing.push(note);
+      groups.set(key, existing);
+    }
+
+    return Array.from(groups.entries()).map(([sectionName, notes]) => ({
+      sectionName,
+      notes,
+    }));
+  }, [savedNotes]);
 
   async function saveKnowledgeItem(item: { title: string; detail: string; kind: string }) {
     const response = await apiFetch('/api/coach/knowledge', {
@@ -348,7 +406,7 @@ export default function CoachPage() {
           <h1 className="hero-title">{isIntroFlow ? 'Meet your Backpack workflow.' : 'Drop in notes, files, photos, and audio, then turn them into something usable.'}</h1>
           <p className="hero-description">
             Backpack is the structured intake workspace. Upload material, attach transcripts or extracted text, summarize it,
-            save the important logistics, and carry the cleaned result into one ongoing study conversation.
+            save the important logistics, and turn the cleaned result into flashcards, quizzes, and a focused study conversation.
           </p>
         </div>
       </section>
@@ -356,7 +414,7 @@ export default function CoachPage() {
       {feedback ? <StatusBanner tone="warning">{feedback}</StatusBanner> : null}
       {!assets.length ? (
         <StatusBanner tone="neutral">
-          Automatic OCR and audio transcription are not wired in this workspace yet. Uploads are supported now, and you can attach transcript or extracted text for summarization.
+          Text files and PDFs can be processed directly here. Scanned images, image-only PDFs, and audio still need pasted OCR or transcript text before Backpack can summarize them reliably.
         </StatusBanner>
       ) : null}
 
@@ -438,6 +496,30 @@ export default function CoachPage() {
         </aside>
 
         <div className="chat-main">
+          <section className="backpack-feature-grid">
+            <article className="summary-card backpack-feature-card">
+              <p className="eyebrow">Capture notes</p>
+              <strong>Drop in class materials fast</strong>
+              <p className="muted-copy">
+                Add notes, PDFs, transcripts, and cleaned text so Backpack can organize the material into something usable.
+              </p>
+            </article>
+            <article className="summary-card backpack-feature-card">
+              <p className="eyebrow">Generate flashcards</p>
+              <strong>Turn summaries into recall prompts</strong>
+              <p className="muted-copy">
+                Use the cleaned summary to build flashcards for definitions, vocab, formulas, and key concepts.
+              </p>
+            </article>
+            <article className="summary-card backpack-feature-card">
+              <p className="eyebrow">Build quizzes</p>
+              <strong>Create a quick practice check</strong>
+              <p className="muted-copy">
+                Ask Backpack to turn your uploaded material into a quiz or short study sprint once the notes are processed.
+              </p>
+            </article>
+          </section>
+
           <section className="backpack-room">
             <div className="chat-prompt-strip">
               {prompts.map((prompt) => (
@@ -450,13 +532,26 @@ export default function CoachPage() {
                   Use latest summary
                 </button>
               ) : null}
+              {coachSummary ? (
+                <button type="button" className="chat-prompt-chip" onClick={() => setMessage(`Turn this summary into flashcards:\n${coachSummary}`)}>
+                  Make flashcards
+                </button>
+              ) : null}
+              {coachSummary ? (
+                <button type="button" className="chat-prompt-chip" onClick={() => setMessage(`Turn this summary into a quiz with answer key:\n${coachSummary}`)}>
+                  Make quiz
+                </button>
+              ) : null}
             </div>
 
-            <div className="chat-room">
+            <div className="chat-room backpack-chat-room">
               <div className="chat-room-header">
                 <div>
-                  <p className="eyebrow">Backpack conversation</p>
-                  <h3 style={{ margin: 0 }}>StudyClaw Backpack</h3>
+                  <p className="eyebrow">Backpack assistant</p>
+                  <h3 style={{ margin: 0 }}>Quick workspace chat</h3>
+                  <p className="muted-copy" style={{ margin: '6px 0 0' }}>
+                    Use this smaller chat box after processing notes to ask for summaries, flashcards, quizzes, or a study plan.
+                  </p>
                 </div>
                 <span className="chat-room-badge">{activeThreadId ? 'Ongoing' : 'Ready'}</span>
               </div>
@@ -548,10 +643,62 @@ export default function CoachPage() {
         </div>
       </section>
 
-      {coachTranscript ? (
+      {savedNotes.length ? (
         <section className="secondary-card">
-          <p className="eyebrow">Transcript</p>
-          <p className="muted-copy" style={{ whiteSpace: 'pre-wrap' }}>{coachTranscript}</p>
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">Notes</p>
+              <h2 className="section-title">Saved by section</h2>
+            </div>
+          </div>
+
+          {groupedSavedNotes.map((group) => (
+            <div key={group.sectionName} style={{ marginBottom: '1rem' }}>
+              <p className="eyebrow" style={{ marginBottom: '0.5rem' }}>{group.sectionName}</p>
+              <div className="thread-ribbon">
+                {group.notes.map((asset) => (
+                  <button
+                    key={asset.id}
+                    type="button"
+                    onClick={() => setSelectedDocumentId(asset.id)}
+                    className={asset.id === selectedDocument?.id ? 'chat-thread-card active' : 'chat-thread-card'}
+                  >
+                    <strong>{asset.title}</strong>
+                    <span>{asset.processedText ? 'Processed note' : 'Saved note'}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {selectedDocument ? (
+            <div className="summary-card">
+              <p className="eyebrow">Open note</p>
+              <strong>{selectedDocument.title}</strong>
+              <p className="muted-copy" style={{ margin: '6px 0 0' }}>
+                Section: {selectedDocument.sectionName}
+              </p>
+              <div className="actions">
+                <button type="button" onClick={() => setMessage(`Create flashcards from these notes:\n${selectedDocumentText}`)}>
+                  Create flashcards
+                </button>
+                <button type="button" onClick={() => setMessage(`Create a quiz with answers from these notes:\n${selectedDocumentText}`)}>
+                  Create quiz
+                </button>
+                <button type="button" onClick={() => setMessage(`Summarize these notes for me:\n${selectedDocumentText}`)}>
+                  Summarize
+                </button>
+              </div>
+              {selectedDocument.metadata.summary ? (
+                <p className="muted-copy" style={{ marginTop: '1rem' }}>
+                  {selectedDocument.metadata.summary}
+                </p>
+              ) : null}
+              <p className="muted-copy" style={{ whiteSpace: 'pre-wrap' }}>
+                {selectedDocumentText || 'This document does not have extracted text yet.'}
+              </p>
+            </div>
+          ) : null}
         </section>
       ) : null}
     </>

@@ -39,6 +39,16 @@ type CronJobsFile = {
   jobs?: Array<Record<string, unknown>>;
 };
 
+type CronJobRecord = Record<string, any> & {
+  id?: string;
+  jobId?: string;
+  agentId?: string;
+};
+
+type CronListResponse = {
+  jobs?: CronJobRecord[];
+};
+
 function stripAnsi(value: string) {
   return value.replace(
     // eslint-disable-next-line no-control-regex
@@ -106,6 +116,15 @@ async function runOpenClaw(args: string[]) {
       stderr: stripAnsi(error?.stderr ?? error?.message ?? 'Unknown error').trim(),
     };
   }
+}
+
+async function runOpenClawOrThrow(args: string[]) {
+  const result = await runOpenClaw(args);
+  if (!result.ok) {
+    throw new Error(result.stderr || result.stdout || 'OpenClaw command failed');
+  }
+
+  return result;
 }
 
 async function readJsonFile<T>(path: string, fallback: T): Promise<T> {
@@ -273,14 +292,22 @@ export async function getOpenClawSettingsSnapshot(userId: string) {
     })),
   };
 
+  const ownCronJobs = (cronFile.jobs ?? []).filter((job: CronJobRecord) => {
+    if (!job?.agentId) {
+      return true;
+    }
+
+    return job.agentId === agentId;
+  });
+
   return {
     generatedAt: new Date().toISOString(),
     channels,
     sessions: ownSessions,
     usage,
     cron: {
-      jobs: cronFile.jobs ?? [],
-      status: (cronFile.jobs ?? []).length ? 'Configured' : 'No jobs configured',
+      jobs: ownCronJobs,
+      status: ownCronJobs.length ? 'Configured' : 'No jobs configured',
     },
     skills,
     logs: {
@@ -293,6 +320,54 @@ export async function getOpenClawSettingsSnapshot(userId: string) {
       channelsProbe: capabilitiesResult.ok ? capabilities.probe : capabilitiesResult.stderr || 'Unavailable',
     },
   };
+}
+
+export async function createOpenClawCronJob(input: {
+  userId: string;
+  name: string;
+  message: string;
+  scheduleKind: 'at' | 'cron' | 'every';
+  scheduleValue: string;
+  timezone?: string;
+}) {
+  const args = ['cron', 'add', '--json', '--agent', buildUserAgentId(input.userId), '--session', 'isolated', '--no-deliver', '--name', input.name, '--message', input.message];
+
+  if (input.scheduleKind === 'at') {
+    args.push('--at', input.scheduleValue);
+  } else if (input.scheduleKind === 'every') {
+    args.push('--every', input.scheduleValue);
+  } else {
+    args.push('--cron', input.scheduleValue);
+    if (input.timezone?.trim()) {
+      args.push('--tz', input.timezone.trim());
+    }
+  }
+
+  await runOpenClawOrThrow(args);
+
+  return getOpenClawSettingsSnapshot(input.userId);
+}
+
+export async function deleteOpenClawCronJob(input: { userId: string; jobId: string }) {
+  const listResult = await runOpenClawOrThrow(['cron', 'list', '--json']);
+  const parsed = JSON.parse(listResult.stdout || '{}') as CronListResponse;
+  const ownAgentId = buildUserAgentId(input.userId);
+  const targetJob = (parsed.jobs ?? []).find((job) => {
+    const jobId = String(job.jobId ?? job.id ?? '');
+    if (jobId !== input.jobId) {
+      return false;
+    }
+
+    return !job.agentId || job.agentId === ownAgentId;
+  });
+
+  if (!targetJob) {
+    throw new Error(`Cron job ${input.jobId} not found for this user`);
+  }
+
+  await runOpenClawOrThrow(['cron', 'rm', '--json', input.jobId]);
+
+  return getOpenClawSettingsSnapshot(input.userId);
 }
 
 export async function updateOpenClawSkillToggle(input: {

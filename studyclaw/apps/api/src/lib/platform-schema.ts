@@ -18,6 +18,11 @@ const statements = [
       add column if not exists major text
   `,
   `
+    alter table reminders
+      add column if not exists delivered boolean not null default false,
+      add column if not exists delivered_at timestamptz
+  `,
+  `
     create table if not exists agents (
       id uuid primary key default gen_random_uuid(),
       user_id uuid not null unique references users(id) on delete cascade,
@@ -79,6 +84,9 @@ const statements = [
   `,
   `
     create index if not exists idx_agent_actions_created_at on agent_actions(created_at desc)
+  `,
+  `
+    create index if not exists idx_reminders_due_delivery on reminders(delivered, status, reminder_at)
   `,
   `
     do $$

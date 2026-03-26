@@ -1,4 +1,4 @@
-import { readStoredSession } from './session';
+import { clearStoredSession, readStoredSession } from './session';
 
 const FALLBACK_API_BASE = 'http://localhost:4000';
 
@@ -31,8 +31,14 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
     headers.set('Authorization', `Bearer ${session.accessToken}`);
   }
 
-  return fetch(resolveApiUrl(path), {
+  const response = await fetch(resolveApiUrl(path), {
     ...init,
     headers,
   });
+
+  if (response.status === 401) {
+    clearStoredSession();
+  }
+
+  return response;
 }

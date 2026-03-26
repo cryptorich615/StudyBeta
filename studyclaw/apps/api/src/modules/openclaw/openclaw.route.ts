@@ -1,6 +1,11 @@
 import { Router } from 'express';
 import { requireAuth, type AuthedRequest } from '../../lib/auth';
-import { getOpenClawSettingsSnapshot, updateOpenClawSkillToggle } from '../../lib/openclaw-control';
+import {
+  createOpenClawCronJob,
+  deleteOpenClawCronJob,
+  getOpenClawSettingsSnapshot,
+  updateOpenClawSkillToggle,
+} from '../../lib/openclaw-control';
 
 export const openclawRouter = Router();
 
@@ -41,6 +46,67 @@ openclawRouter.patch('/skills/:skillName', async (req: AuthedRequest, res) => {
     res.status(400).json({
       error: 'openclaw_skill_update_failed',
       message: error instanceof Error ? error.message : 'Failed to update skill',
+    });
+  }
+});
+
+openclawRouter.post('/cron', async (req: AuthedRequest, res) => {
+  const { name, message, scheduleKind, scheduleValue, timezone } = req.body as {
+    name?: string;
+    message?: string;
+    scheduleKind?: 'at' | 'cron' | 'every';
+    scheduleValue?: string;
+    timezone?: string;
+  };
+
+  if (!name?.trim() || !message?.trim() || !scheduleKind || !scheduleValue?.trim()) {
+    return res.status(400).json({
+      error: 'bad_request',
+      message: 'name, message, scheduleKind, and scheduleValue are required',
+    });
+  }
+
+  if (!['at', 'cron', 'every'].includes(scheduleKind)) {
+    return res.status(400).json({
+      error: 'bad_request',
+      message: 'scheduleKind must be one of: at, cron, every',
+    });
+  }
+
+  try {
+    const snapshot = await createOpenClawCronJob({
+      userId: req.user!.id,
+      name: name.trim(),
+      message: message.trim(),
+      scheduleKind,
+      scheduleValue: scheduleValue.trim(),
+      timezone: timezone?.trim(),
+    });
+    res.status(201).json(snapshot);
+  } catch (error) {
+    res.status(400).json({
+      error: 'openclaw_cron_create_failed',
+      message: error instanceof Error ? error.message : 'Failed to create cron job',
+    });
+  }
+});
+
+openclawRouter.delete('/cron/:jobId', async (req: AuthedRequest, res) => {
+  const jobId = String(req.params.jobId || '').trim();
+  if (!jobId) {
+    return res.status(400).json({ error: 'bad_request', message: 'jobId is required' });
+  }
+
+  try {
+    const snapshot = await deleteOpenClawCronJob({
+      userId: req.user!.id,
+      jobId,
+    });
+    res.json(snapshot);
+  } catch (error) {
+    res.status(400).json({
+      error: 'openclaw_cron_delete_failed',
+      message: error instanceof Error ? error.message : 'Failed to delete cron job',
     });
   }
 });

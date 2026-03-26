@@ -4,7 +4,7 @@ import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import AuthForm from '../components/auth-form';
-import { readStoredSession } from '../../lib/session';
+import { isOnboardingComplete, readStoredSession } from '../../lib/session';
 
 export default function AuthPage() {
   const router = useRouter();
@@ -16,7 +16,7 @@ export default function AuthPage() {
   useEffect(() => {
     const session = readStoredSession();
     if (session?.user?.id) {
-      router.replace('/dashboard');
+      router.replace(isOnboardingComplete(session) ? '/dashboard' : '/onboarding');
     }
   }, [router]);
 

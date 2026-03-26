@@ -14,7 +14,9 @@ import { dashboardRouter } from './modules/dashboard/dashboard.route';
 import { coachRouter } from './modules/coach/coach.route';
 import { adminRouter } from './modules/admin/admin.route';
 import { userRouter } from './modules/user/user.route';
+import { googleRouter } from './modules/google/google.route.js';
 import { ensurePlatformSchema } from './lib/platform-schema';
+import { startReminderWorker } from './jobs/reminderWorker';
 
 process.loadEnvFile?.(resolve(process.cwd(), '../../.env'));
 
@@ -38,9 +40,11 @@ app.use(
 );
 app.use(json({ limit: '10mb' }));
 app.use('/api/health', healthRouter); app.use('/api/auth', authRouter); app.use('/api/onboarding', onboardingRouter); app.use('/api/agent', agentRouter); app.use('/api/chat', chatRouter); app.use('/api/study', studyToolsRouter); app.use('/api/reminders', remindersRouter); app.use('/api/openclaw', openclawRouter); app.use('/api/dashboard', dashboardRouter); app.use('/api/coach', coachRouter); app.use('/api/admin', adminRouter); app.use('/api/user', userRouter);
+app.use('/api/google', googleRouter);
 
 async function start() {
   await ensurePlatformSchema();
+  startReminderWorker();
   app.listen(port, () => console.log(`StudyClaw API listening on http://localhost:${port}`));
 }
 

@@ -1,9 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from 'react';
+import { type ChangeEvent, type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiFetch } from '../../lib/api';
+import { extractDocumentText } from '../../lib/document-text';
 import { readStoredSession } from '../../lib/session';
 import StatusBanner from '../components/status-banner';
 
@@ -19,6 +20,13 @@ type UserProfile = {
   school: string;
   graduationYear: number | null;
   major: string;
+};
+
+type PendingDocument = {
+  id: string;
+  name: string;
+  type: string;
+  extractedText: string;
 };
 
 type CommandHelpers = {
@@ -40,6 +48,9 @@ const prompts = [
 
 const LAST_KNOWN_MODEL_KEY = 'studyclaw-last-model-key';
 const LAST_KNOWN_AGENT_NAME = 'studyclaw-last-agent-name';
+function createDocumentId(file: File) {
+  return `${file.name}-${file.size}-${file.lastModified}`;
+}
 
 export default function ChatPage() {
   const router = useRouter();
@@ -64,6 +75,8 @@ export default function ChatPage() {
   const [loadingModels, setLoadingModels] = useState(false);
   const [agentName, setAgentName] = useState('StudyClaw');
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [pendingDocuments, setPendingDocuments] = useState<PendingDocument[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setHasSession(!!readStoredSession()?.user?.id);
@@ -113,6 +126,22 @@ export default function ChatPage() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
+
+  useEffect(() => {
+    if (!hasSession || !activeThreadId) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (!sending) {
+        void loadThread(activeThreadId);
+        void loadThreads(activeThreadId);
+      }
+    }, 15000);
+
+    return () => window.clearInterval(intervalId);
+  }, [activeThreadId, hasSession, sending]);
+
   const slashCommands = useMemo(() => ([
     {
       name: '/new',
@@ -231,6 +260,40 @@ export default function ChatPage() {
     setUserProfile(data.profile ?? null);
   }
 
+  async function handleDocumentInput(event: ChangeEvent<HTMLInputElement>) {
+    const selectedFiles = Array.from(event.target.files ?? []);
+    if (!selectedFiles.length) {
+      return;
+    }
+
+    const nextDocuments = await Promise.all(
+      selectedFiles.map(async (file) => {
+        return {
+          id: createDocumentId(file),
+          name: file.name,
+          type: file.type || 'application/octet-stream',
+          extractedText: await extractDocumentText(file),
+        };
+      })
+    );
+
+    const readyDocuments = nextDocuments.filter((document) => document.extractedText.trim());
+    const skippedCount = nextDocuments.length - readyDocuments.length;
+
+    if (readyDocuments.length) {
+      setPendingDocuments((current) => [...current, ...readyDocuments]);
+      setFeedback(
+        skippedCount
+          ? `Attached ${readyDocuments.length} text-based document${readyDocuments.length === 1 ? '' : 's'}. ${skippedCount} file${skippedCount === 1 ? '' : 's'} need pasted extracted text first.`
+          : `Attached ${readyDocuments.length} document${readyDocuments.length === 1 ? '' : 's'} for summarization.`
+      );
+    } else {
+      setFeedback('Only text-based documents are ready here right now. For PDFs or DOCX, paste extracted text first.');
+    }
+
+    event.target.value = '';
+  }
+
   async function switchModel(modelKey: string) {
     const response = await apiFetch('/api/onboarding/model-config', {
       method: 'POST',
@@ -342,16 +405,21 @@ export default function ChatPage() {
       return;
     }
 
-    if (!trimmed) {
-      setFeedback('Write a prompt or use a suggested prompt.');
+    if (!trimmed && !pendingDocuments.length) {
+      setFeedback('Write a prompt, or attach a text-based document to summarize.');
       return;
     }
+
+    const effectivePrompt = trimmed || 'Please summarize the attached document and pull out the most important study points.';
+    const attachmentLabel = pendingDocuments.length
+      ? `Attached ${pendingDocuments.length} document${pendingDocuments.length === 1 ? '' : 's'}: ${pendingDocuments.map((document) => document.name).join(', ')}`
+      : '';
 
     // Optimistically add user message immediately
     const userMsg = {
       id: `temp-${Date.now()}`,
       role: 'user' as const,
-      content: trimmed,
+      content: [effectivePrompt, attachmentLabel].filter(Boolean).join('\n\n'),
     };
     setMessages((prev: any[]) => [...prev, userMsg]);
     setMessage('');
@@ -367,7 +435,15 @@ export default function ChatPage() {
     try {
       const res = await apiFetch('/api/chat/send', {
         method: 'POST',
-        body: JSON.stringify({ threadId: activeThreadId, message: trimmed }),
+        body: JSON.stringify({
+          threadId: activeThreadId,
+          message: effectivePrompt,
+          attachments: pendingDocuments.map((document) => ({
+            name: document.name,
+            type: document.type,
+            extractedText: document.extractedText,
+          })),
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -376,6 +452,7 @@ export default function ChatPage() {
         throw new Error(data.message || 'Failed to send message');
       }
 
+      setPendingDocuments([]);
       await loadThreads(data.threadId);
     } catch (error: any) {
       setFeedback(error.message || 'Failed to send message');
@@ -409,7 +486,7 @@ export default function ChatPage() {
           <p className="insight-chip">Chat box</p>
           <h1 className="hero-title">Talk directly to the agent without the Coach workflow around it.</h1>
           <p className="hero-description">
-            This is the clean conversation page between Backpack and Settings. Use slash commands to move fast, including model switching.
+            This is the clean conversation page between Backpack and Settings. Use slash commands to move fast, switch models, or attach a document and have your agent summarize it.
           </p>
         </div>
         <div className="hero-actions">
@@ -494,6 +571,21 @@ export default function ChatPage() {
                   /
                 </button>
                 <span className="chat-composer-hint">Try `/models` then `/model openrouter/auto`.</span>
+                <button
+                  type="button"
+                  className="chat-mini-button"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  Add document
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".txt,.md,.markdown,.csv,.json,.log,text/*"
+                  multiple
+                  hidden
+                  onChange={handleDocumentInput}
+                />
               </div>
 
               {commandOpen || matchingCommands.length ? (
@@ -515,6 +607,17 @@ export default function ChatPage() {
                 </div>
               ) : null}
 
+              {pendingDocuments.length ? (
+                <div className="chat-command-menu">
+                  {pendingDocuments.map((document) => (
+                    <div key={document.id} className="chat-command-item">
+                      <strong>{document.name}</strong>
+                      <span>{document.type} · ready to summarize</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
               <div className="chat-composer-input">
                 <textarea
                   value={message}
@@ -532,7 +635,7 @@ export default function ChatPage() {
                     }
                   }}
                   rows={4}
-                  placeholder="Message the agent or type / for commands..."
+                  placeholder="Message the agent, or attach a text-based document and press Send to summarize it..."
                   className="chat-textarea"
                 />
                 <button onClick={send} disabled={sending} className="chat-send-button">

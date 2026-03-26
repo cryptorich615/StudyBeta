@@ -1,8 +1,9 @@
 'use client';
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { apiFetch } from '../../lib/api';
-import { readStoredSession, writeStoredSession } from '../../lib/session';
+import { isOnboardingComplete, readStoredSession, writeStoredSession } from '../../lib/session';
+import { consumePayloadFromUrl } from '../../lib/consumePayload';
 
 const AGENTS = [
   {
@@ -29,7 +30,7 @@ const AGENTS = [
   },
 ];
 
-export default function OnboardingPage() {
+function OnboardingPageContent() {
   const router = useRouter();
   const [step, setStep] = useState<1 | 2>(1);
   const [selectedAgent, setSelectedAgent] = useState<string>('');
@@ -39,18 +40,29 @@ export default function OnboardingPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [userId, setUserId] = useState<string | null>(null);
+  const searchParams = useSearchParams();
   const [modelSearch, setModelSearch] = useState('');
 
   useEffect(() => {
+    // First, try to consume any payload from URL (e.g., from OAuth redirect)
+    const payloadSession = consumePayloadFromUrl(searchParams);
+    
     const parsed = readStoredSession();
     if (!parsed?.user) { router.push('/auth?mode=login'); return; }
     setUserId(parsed.user.id);
     // If already onboarded, go to dashboard
-    if (parsed.user.agent_type) { router.push('/dashboard'); return; }
+    if (isOnboardingComplete(parsed)) { router.push('/dashboard'); return; }
     // Load models
     apiFetch('/api/onboarding/options').then(res => res.json()).then(data => {
-      setModels(data.models ?? []);
-      if (data.models?.[0]) setModelKey(data.models[0].key);
+      const nextModels = data.models ?? [];
+      setModels(nextModels);
+      const preferredModel =
+        nextModels.find((model: { key: string }) => model.key === 'openrouter/auto') ??
+        nextModels.find((model: { provider: string }) => model.provider === 'openrouter') ??
+        nextModels[0];
+      if (preferredModel) {
+        setModelKey(preferredModel.key);
+      }
     }).catch(() => {});
   }, []);
 
@@ -87,8 +99,8 @@ export default function OnboardingPage() {
             user: {
               ...session.user,
               agent_type: status.agent?.agent_type ?? selectedAgent,
-              onboarding_complete: true,
             },
+            onboardingComplete: true,
           });
         }
       }
@@ -101,6 +113,10 @@ export default function OnboardingPage() {
   };
 
   const selectedModel = models.find(m => m.key === modelKey);
+  const preferredOpenRouterModel =
+    models.find((model) => model.key === 'openrouter/auto') ??
+    models.find((model) => model.provider === 'openrouter') ??
+    null;
   const requiresApiKey = selectedModel?.provider !== 'ollama';
   const filteredModels = models.filter((m: any) => 
     modelSearch === '' || 
@@ -108,6 +124,14 @@ export default function OnboardingPage() {
     m.provider.toLowerCase().includes(modelSearch.toLowerCase()) ||
     m.key.toLowerCase().includes(modelSearch.toLowerCase())
   );
+
+  const handleOpenRouterConnect = () => {
+    if (preferredOpenRouterModel) {
+      setModelKey(preferredOpenRouterModel.key);
+    }
+    setError('');
+    window.open('https://openrouter.ai/keys', '_blank', 'noopener,noreferrer');
+  };
 
   return (
     <div className="min-h-screen bg-background flex flex-col items-center justify-center px-4 py-12">
@@ -187,6 +211,28 @@ export default function OnboardingPage() {
           </div>
 
           <div className="space-y-5">
+            <div className="rounded-2xl border border-border bg-card p-5">
+              <p className="text-sm font-semibold text-foreground">Connect OpenRouter for the fastest setup</p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                StudyClaw needs a provider connection so your agent can actually generate responses, save your model choice,
+                and run chats, coaching, and study tools on your own account. Connect OpenRouter to StudyClaw to use it
+                as your main provider and model source.
+              </p>
+              <button
+                type="button"
+                onClick={handleOpenRouterConnect}
+                className="mt-4 inline-flex items-center rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 text-sm font-medium text-primary hover:bg-primary/15"
+              >
+                Connect OpenRouter
+              </button>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className="h-px flex-1 bg-border" />
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">OR BYOK (Bring Your Own Key)</p>
+              <div className="h-px flex-1 bg-border" />
+            </div>
+
             {/* Model selector */}
             <div>
               <label className="block text-sm font-medium mb-2">AI Provider &amp; Model</label>
@@ -240,5 +286,14 @@ export default function OnboardingPage() {
         </div>
       )}
     </div>
+  );
+}
+
+
+export default function OnboardingPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center">Loading...</div>}>
+      <OnboardingPageContent />
+    </Suspense>
   );
 }

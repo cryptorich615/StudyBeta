@@ -5,14 +5,15 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import ThemeToggle from './theme-toggle';
 import { Button } from './ui/button';
-import { readStoredSession, clearStoredSession, type StoredSession } from '../../lib/session';
+import { readStoredSession, clearStoredSession, isOnboardingComplete, type StoredSession } from '../../lib/session';
 import { cn } from '../../lib/utils';
-import { LayoutDashboard, Brain, MessageSquare, Settings, LogOut } from 'lucide-react';
+import { LayoutDashboard, Brain, MessageSquare, Calendar, Settings, LogOut } from 'lucide-react';
 
 const navLinks = [
   { href: '/dashboard', label: 'Dashboard', shortLabel: 'Board', icon: LayoutDashboard },
   { href: '/coach', label: 'Backpack', shortLabel: 'Pack', icon: Brain },
   { href: '/chat', label: 'Chat', shortLabel: 'Chat', icon: MessageSquare },
+  { href: '/calendar', label: 'Calendar', shortLabel: 'Calendar', icon: Calendar },
   { href: '/settings', label: 'Settings', shortLabel: 'Settings', icon: Settings },
 ];
 
@@ -48,14 +49,12 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
   // Mandatory onboarding gate: redirect if logged in but no agent set up
   useEffect(() => {
     if (!session) return;
-    const isPublic = ['/login', '/auth', '/onboarding', '/'].some(p => pathname.startsWith(p));
-    if (isPublic) return;
-    // Check if onboarding is complete (agent_type is set in session user)
-    const user = (session as any)?.user;
-    if (user && !user.agent_type) {
-      router.push('/onboarding');
+    const isPublic = pathname === '/' || pathname === '/login' || pathname === '/auth' || pathname === '/signup';
+    if (isPublic || pathname === '/onboarding') return;
+    if (!isOnboardingComplete(session)) {
+      router.replace('/onboarding');
     }
-  }, [session, pathname]);
+  }, [pathname, router, session]);
 
   return (
     <div className="min-h-screen transition-colors duration-500 bg-background">

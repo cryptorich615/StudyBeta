@@ -78,6 +78,12 @@ export default function SettingsPage() {
   const [snapshot, setSnapshot] = useState<SettingsSnapshot | null>(null);
   const [skillQuery, setSkillQuery] = useState('');
   const [updatingSkill, setUpdatingSkill] = useState('');
+  const [cronName, setCronName] = useState('');
+  const [cronMessage, setCronMessage] = useState('');
+  const [cronScheduleKind, setCronScheduleKind] = useState<'at' | 'cron' | 'every'>('at');
+  const [cronScheduleValue, setCronScheduleValue] = useState('');
+  const [cronTimezone, setCronTimezone] = useState('America/New_York');
+  const [updatingCron, setUpdatingCron] = useState('');
 
   useEffect(() => {
     void loadSettings();
@@ -118,6 +124,57 @@ export default function SettingsPage() {
     setUpdatingSkill('');
   }
 
+  async function createCronJob() {
+    if (!cronName.trim() || !cronMessage.trim() || !cronScheduleValue.trim()) {
+      setStatus('Cron name, prompt, and schedule are required.');
+      return;
+    }
+
+    setUpdatingCron('create');
+    const response = await apiFetch('/api/openclaw/cron', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: cronName.trim(),
+        message: cronMessage.trim(),
+        scheduleKind: cronScheduleKind,
+        scheduleValue: cronScheduleValue.trim(),
+        timezone: cronScheduleKind === 'cron' ? cronTimezone.trim() : undefined,
+      }),
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      setStatus(data.message || 'Failed to create cron job');
+      setUpdatingCron('');
+      return;
+    }
+
+    setSnapshot(data);
+    setStatus('');
+    setCronName('');
+    setCronMessage('');
+    setCronScheduleValue('');
+    setUpdatingCron('');
+  }
+
+  async function deleteCronJob(jobId: string) {
+    setUpdatingCron(jobId);
+    const response = await apiFetch(`/api/openclaw/cron/${encodeURIComponent(jobId)}`, {
+      method: 'DELETE',
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      setStatus(data.message || 'Failed to delete cron job');
+      setUpdatingCron('');
+      return;
+    }
+
+    setSnapshot(data);
+    setStatus('');
+    setUpdatingCron('');
+  }
+
   const filteredSkills = (snapshot?.skills.items ?? []).filter((skill) => {
     const query = skillQuery.trim().toLowerCase();
     if (!query) {
@@ -154,6 +211,52 @@ export default function SettingsPage() {
       ) : null}
 
       <div className="card-grid">
+        <section className="secondary-card">
+          <p className="eyebrow">Cron jobs</p>
+          <div className="form-field">
+            <label htmlFor="cron-name">Job name</label>
+            <input id="cron-name" value={cronName} onChange={(event) => setCronName(event.target.value)} placeholder="Daily study check-in" />
+          </div>
+          <div className="form-field">
+            <label htmlFor="cron-message">Job prompt</label>
+            <textarea
+              id="cron-message"
+              rows={4}
+              value={cronMessage}
+              onChange={(event) => setCronMessage(event.target.value)}
+              placeholder="Tell your agent what to do when this cron job runs."
+            />
+          </div>
+          <div className="form-field">
+            <label htmlFor="cron-kind">Schedule type</label>
+            <select id="cron-kind" value={cronScheduleKind} onChange={(event) => setCronScheduleKind(event.target.value as 'at' | 'cron' | 'every')}>
+              <option value="at">Run once</option>
+              <option value="cron">Cron expression</option>
+              <option value="every">Repeat every</option>
+            </select>
+          </div>
+          <div className="form-field">
+            <label htmlFor="cron-value">{cronScheduleKind === 'at' ? 'When (ISO or +duration)' : cronScheduleKind === 'cron' ? 'Cron expression' : 'Repeat every duration'}</label>
+            <input
+              id="cron-value"
+              value={cronScheduleValue}
+              onChange={(event) => setCronScheduleValue(event.target.value)}
+              placeholder={cronScheduleKind === 'at' ? '2026-03-25T13:03:00-04:00 or +20m' : cronScheduleKind === 'cron' ? '0 13 * * *' : '1h'}
+            />
+          </div>
+          {cronScheduleKind === 'cron' ? (
+            <div className="form-field">
+              <label htmlFor="cron-timezone">Timezone</label>
+              <input id="cron-timezone" value={cronTimezone} onChange={(event) => setCronTimezone(event.target.value)} placeholder="America/New_York" />
+            </div>
+          ) : null}
+          <div className="actions">
+            <button type="button" onClick={() => void createCronJob()} disabled={updatingCron === 'create'}>
+              {updatingCron === 'create' ? 'Creating...' : 'Create cron job'}
+            </button>
+          </div>
+        </section>
+
         <section className="secondary-card">
           <p className="eyebrow">Usage</p>
           <div className="metrics-grid" style={{ marginTop: 12 }}>
@@ -307,6 +410,42 @@ export default function SettingsPage() {
           </div>
         </section>
       </div>
+
+      <section className="secondary-card">
+        <p className="eyebrow">Your cron jobs</p>
+        <div className="settings-stack" style={{ marginTop: 14 }}>
+          {(snapshot?.cron.jobs ?? []).length ? (
+            snapshot?.cron.jobs.map((job: any) => {
+              const jobId = String(job.jobId ?? job.id ?? '');
+              const scheduleLabel =
+                job.schedule?.kind === 'at'
+                  ? job.schedule?.at
+                  : job.schedule?.kind === 'every'
+                    ? `${job.schedule?.everyMs ?? 'unknown'} ms`
+                    : job.schedule?.expr ?? 'Unknown schedule';
+
+              return (
+                <div className="settings-row" key={jobId}>
+                  <div>
+                    <strong>{job.name ?? jobId}</strong>
+                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>{scheduleLabel}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="chat-mini-button"
+                    onClick={() => void deleteCronJob(jobId)}
+                    disabled={updatingCron === jobId}
+                  >
+                    {updatingCron === jobId ? 'Deleting...' : 'Delete'}
+                  </button>
+                </div>
+              );
+            })
+          ) : (
+            <p className="muted-copy">No cron jobs created for this StudyClaw user yet.</p>
+          )}
+        </div>
+      </section>
     </>
   );
 }

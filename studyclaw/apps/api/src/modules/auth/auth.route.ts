@@ -34,7 +34,7 @@ authRouter.get('/google/callback', async (req, res) => {
     );
 
     let user;
-    let existingUser = true;
+    let isNewUser = false;
 
     if (!userResult.rows[0]) {
       const created = await db.query(
@@ -44,7 +44,7 @@ authRouter.get('/google/callback', async (req, res) => {
         [email, name, 'google', googleId, isAdmin ? 'admin' : 'student']
       );
       user = created.rows[0];
-      existingUser = false;
+      isNewUser = true;
     } else {
       user = userResult.rows[0];
       await db.query(
@@ -111,7 +111,11 @@ authRouter.get('/google/callback', async (req, res) => {
 
     const frontendUrl = process.env.CLIENT_URL || process.env.FRONTEND_URL || 'http://localhost:3000';
     const encodedSession = Buffer.from(JSON.stringify(session), 'utf8').toString('base64url');
-    res.redirect(`${frontendUrl}/auth/callback?payload=${encodeURIComponent(encodedSession)}`);
+    
+    // New users go to onboarding, returning users go to dashboard
+    const targetPath = isNewUser ? '/onboarding' : '/dashboard';
+    const connectedParam = 'connected=true';
+    res.redirect(`${frontendUrl}${targetPath}?${connectedParam}&payload=${encodeURIComponent(encodedSession)}`);
   } catch (error) {
     console.error('Google Auth Error:', error);
     res.status(500).send('Authentication failed');
