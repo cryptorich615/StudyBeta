@@ -1,8 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { type ChangeEvent, type Dispatch, type SetStateAction, useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { type ChangeEvent, useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '../../lib/api';
 import { extractDocumentText } from '../../lib/document-text';
 import { readStoredSession } from '../../lib/session';
@@ -43,61 +42,24 @@ type SavedNote = {
   sectionName: string;
 };
 
-const prompts = [
-  'Summarize today’s notes into the key ideas.',
-  'Summarize today’s notes into action steps.',
-  'Summarize today’s notes into a study sprint.',
-];
+type FlashcardSet = {
+  id: string;
+  title: string;
+  created_at: string;
+  cards: Array<{ id?: string; front: string; back: string }>;
+};
 
-const slashCommands = [
-  {
-    name: '/new',
-    description: 'Start a fresh conversation',
-    run: async (helpers: CommandHelpers) => {
-      helpers.setActiveThreadId(null);
-      helpers.setMessages([]);
-      helpers.setThreads((current) => current);
-      helpers.setMessage('');
-      helpers.setFeedback('Started a new chat. Send a message when you are ready.');
-    },
-  },
-  {
-    name: '/planner',
-    description: 'Open the dashboard',
-    run: async (helpers: CommandHelpers) => {
-      helpers.router.push('/dashboard');
-    },
-  },
-  {
-    name: '/study',
-    description: 'Open study tools',
-    run: async (helpers: CommandHelpers) => {
-      helpers.router.push('/study');
-    },
-  },
-  {
-    name: '/chat',
-    description: 'Open the direct chat page',
-    run: async (helpers: CommandHelpers) => {
-      helpers.router.push('/chat');
-    },
-  },
-  {
-    name: '/settings',
-    description: 'Open settings',
-    run: async (helpers: CommandHelpers) => {
-      helpers.router.push('/settings');
-    },
-  },
-];
+type Quiz = {
+  id: string;
+  title: string;
+  mode: string;
+  created_at: string;
+  questions: Array<{ id?: string; question_text: string; explanation: string }>;
+};
 
-type CommandHelpers = {
-  router: ReturnType<typeof useRouter>;
-  setActiveThreadId: (value: string | null) => void;
-  setMessages: (value: any[]) => void;
-  setThreads: Dispatch<SetStateAction<any[]>>;
-  setMessage: (value: string) => void;
-  setFeedback: (value: string) => void;
+type StudyLibrary = {
+  flashcardSets: FlashcardSet[];
+  quizzes: Quiz[];
 };
 
 function createAssetId(file: File) {
@@ -105,21 +67,9 @@ function createAssetId(file: File) {
 }
 
 export default function CoachPage() {
-  const router = useRouter();
-  const isIntroFlow =
-    typeof window !== 'undefined' &&
-    (() => {
-      const searchParams = new URLSearchParams(window.location.search);
-      return searchParams.get('intro') === '1' || searchParams.get('bootstrap') === '1';
-    })();
-  const [message, setMessage] = useState('');
-  const [sending, setSending] = useState(false);
+  const [isIntroFlow, setIsIntroFlow] = useState(false);
   const [hasSession, setHasSession] = useState(false);
-  const [threads, setThreads] = useState<any[]>([]);
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<any[]>([]);
   const [feedback, setFeedback] = useState('');
-  const [commandOpen, setCommandOpen] = useState(false);
   const [assets, setAssets] = useState<UploadedAsset[]>([]);
   const [coachTitle, setCoachTitle] = useState('Lecture note capture');
   const [coachText, setCoachText] = useState('');
@@ -131,6 +81,19 @@ export default function CoachPage() {
   const [knowledgeDrafts, setKnowledgeDrafts] = useState<Array<{ title: string; detail: string; kind: string }>>([]);
   const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeItem[]>([]);
   const [savedNotes, setSavedNotes] = useState<SavedNote[]>([]);
+  const [studyLibrary, setStudyLibrary] = useState<StudyLibrary>({ flashcardSets: [], quizzes: [] });
+  const [generatingAsset, setGeneratingAsset] = useState<'flashcards' | 'quiz' | null>(null);
+  const [noteActionStatus, setNoteActionStatus] = useState<{ tone: 'neutral' | 'warning'; message: string } | null>(null);
+  const [showFullSelectedNote, setShowFullSelectedNote] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    setIsIntroFlow(params.get('intro') === '1' || params.get('bootstrap') === '1');
+  }, []);
 
   useEffect(() => {
     setHasSession(!!readStoredSession()?.user?.id);
@@ -138,16 +101,15 @@ export default function CoachPage() {
 
   useEffect(() => {
     if (!hasSession) return;
-
-    if (isIntroFlow) {
-      void startBootstrapConversation();
-    } else {
-      void loadThreads();
-    }
-
     void loadKnowledge();
     void loadSavedNotes();
+    void loadStudyLibrary();
   }, [hasSession, isIntroFlow]);
+
+  useEffect(() => {
+    setShowFullSelectedNote(false);
+    setNoteActionStatus(null);
+  }, [selectedDocumentId]);
 
   async function loadKnowledge() {
     const response = await apiFetch('/api/coach/knowledge');
@@ -170,136 +132,60 @@ export default function CoachPage() {
     setSelectedDocumentId(nextSelectedId);
   }
 
-  const matchingCommands = message.trim().startsWith('/')
-    ? slashCommands.filter((command) => command.name.startsWith(message.trim().toLowerCase()))
-    : [];
-
-  async function startBootstrapConversation() {
-    const response = await apiFetch('/api/onboarding/bootstrap/start', { method: 'POST' });
+  async function loadStudyLibrary() {
+    const response = await apiFetch('/api/study/library');
     const data = await response.json();
-
     if (!response.ok) {
-      setFeedback(data.message || 'Failed to start bootstrap conversation');
+      setFeedback(data.message || 'Failed to load study library');
       return;
     }
 
-    setThreads([data.thread]);
-    setActiveThreadId(data.thread.id);
-    setMessages(data.messages ?? []);
-  }
-
-  async function loadThreads(preferredThreadId?: string) {
-    const res = await apiFetch('/api/chat/threads');
-    const data = await res.json();
-
-    if (!res.ok) {
-      setFeedback(data.message || 'Failed to load threads');
-      return;
-    }
-
-    setThreads(data);
-    const nextThreadId = preferredThreadId ?? activeThreadId ?? data[0]?.id ?? null;
-
-    if (nextThreadId) {
-      await loadThread(nextThreadId);
-    } else {
-      setActiveThreadId(null);
-      setMessages([]);
-    }
-  }
-
-  async function loadThread(threadId: string) {
-    const res = await apiFetch(`/api/chat/threads/${threadId}`);
-    const data = await res.json();
-
-    if (!res.ok) {
-      setFeedback(data.message || 'Failed to load thread');
-      return;
-    }
-
-    setActiveThreadId(threadId);
-    setMessages(data.messages ?? []);
-  }
-
-  async function send() {
-    if (!hasSession) {
-      setFeedback('Sign in and complete onboarding before using the assistant.');
-      return;
-    }
-
-    if (message.trim().startsWith('/')) {
-      const selectedCommand = slashCommands.find((command) => command.name === message.trim().toLowerCase());
-      if (!selectedCommand) {
-        setFeedback('Unknown command.');
-        return;
-      }
-
-      setSending(true);
-      try {
-        await selectedCommand.run({ router, setActiveThreadId, setMessages, setThreads, setMessage, setFeedback });
-      } finally {
-        setSending(false);
-        setCommandOpen(false);
-      }
-      return;
-    }
-
-    if (!message.trim()) {
-      setFeedback('Write a prompt or use a suggested prompt.');
-      return;
-    }
-
-    setSending(true);
-    setFeedback('');
-
-    try {
-      const res = await apiFetch('/api/chat/send', {
-        method: 'POST',
-        body: JSON.stringify({ threadId: activeThreadId, message }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.message || 'Failed to send message');
-      }
-
-      setMessage('');
-      await loadThreads(data.threadId);
-    } catch (error: any) {
-      setFeedback(error.message || 'Failed to send message');
-    } finally {
-      setSending(false);
-    }
+    setStudyLibrary({
+      flashcardSets: data.flashcardSets ?? [],
+      quizzes: data.quizzes ?? [],
+    });
   }
 
   async function handleFileInput(event: ChangeEvent<HTMLInputElement>) {
     const selectedFiles = Array.from(event.target.files ?? []);
     const nextAssets = await Promise.all(
       selectedFiles.map(async (file) => {
-        return {
-          id: createAssetId(file),
-          name: file.name,
-          type: file.type || 'application/octet-stream',
-          extractedText: await extractDocumentText(file),
-        };
+        try {
+          return {
+            id: createAssetId(file),
+            name: file.name,
+            type: file.type || 'application/octet-stream',
+            extractedText: await extractDocumentText(file),
+          };
+        } catch {
+          return {
+            id: createAssetId(file),
+            name: file.name,
+            type: file.type || 'application/octet-stream',
+            extractedText: '',
+          };
+        }
       })
     );
 
     setAssets((current) => [...current, ...nextAssets]);
+    if (nextAssets.some((asset) => !asset.extractedText.trim())) {
+      setFeedback('One or more files were attached without extractable text. You can still submit them, but paste OCR or transcript text for the best summary.');
+    } else {
+      setFeedback('');
+    }
     if (!selectedDocumentId && nextAssets[0]) {
       setSelectedDocumentId(nextAssets[0].id);
     }
     if (!coachText.trim()) {
       setCoachText(nextAssets.map((asset) => asset.extractedText).filter(Boolean).join('\n\n'));
     }
+
+    event.target.value = '';
   }
 
   const coachPayloadText = useMemo(() => {
-    const fromAssets = assets
-      .map((asset) => asset.extractedText.trim())
-      .filter(Boolean)
-      .join('\n\n');
-
+    const fromAssets = assets.map((asset) => asset.extractedText.trim()).filter(Boolean).join('\n\n');
     return [fromAssets, coachText].filter(Boolean).join('\n\n').trim();
   }, [assets, coachText]);
 
@@ -322,7 +208,11 @@ export default function CoachPage() {
             `Uploaded document metadata:\n${assets
               .map((asset) => `- ${asset.name} (${asset.type})`)
               .join('\n')}\n\nNo extracted text was available. Summarize what can be inferred from the document names and ask for pasted transcript or extracted text where needed.`,
-          sourceType: assets[0]?.type?.startsWith('audio/') ? 'audio' : assets[0]?.type?.startsWith('image/') ? 'photo' : 'document',
+          sourceType: assets[0]?.type?.startsWith('audio/')
+            ? 'audio'
+            : assets[0]?.type?.startsWith('image/')
+              ? 'photo'
+              : 'document',
           attachments: assets.map((asset) => ({ name: asset.name, type: asset.type })),
         }),
       });
@@ -343,24 +233,6 @@ export default function CoachPage() {
       setProcessing(false);
     }
   }
-
-  const selectedDocument = savedNotes.find((asset) => asset.id === selectedDocumentId) ?? savedNotes[0] ?? null;
-  const selectedDocumentText = selectedDocument?.processedText || selectedDocument?.originalText || coachTranscript;
-  const groupedSavedNotes = useMemo(() => {
-    const groups = new Map<string, SavedNote[]>();
-
-    for (const note of savedNotes) {
-      const key = note.sectionName || 'Unsorted';
-      const existing = groups.get(key) ?? [];
-      existing.push(note);
-      groups.set(key, existing);
-    }
-
-    return Array.from(groups.entries()).map(([sectionName, notes]) => ({
-      sectionName,
-      notes,
-    }));
-  }, [savedNotes]);
 
   async function saveKnowledgeItem(item: { title: string; detail: string; kind: string }) {
     const response = await apiFetch('/api/coach/knowledge', {
@@ -384,6 +256,85 @@ export default function CoachPage() {
     setKnowledgeItems((current) => [data, ...current]);
   }
 
+  const selectedDocument = savedNotes.find((asset) => asset.id === selectedDocumentId) ?? savedNotes[0] ?? null;
+  const selectedDocumentText = selectedDocument?.processedText || selectedDocument?.originalText || coachTranscript;
+
+  const groupedSavedNotes = useMemo(() => {
+    const groups = new Map<string, SavedNote[]>();
+    for (const note of savedNotes) {
+      const key = note.sectionName || 'Unsorted';
+      const existing = groups.get(key) ?? [];
+      existing.push(note);
+      groups.set(key, existing);
+    }
+
+    return Array.from(groups.entries()).map(([sectionName, notes]) => ({
+      sectionName,
+      notes,
+    }));
+  }, [savedNotes]);
+
+  const recentFlashcardSets = studyLibrary.flashcardSets.slice(0, 4);
+  const recentQuizzes = studyLibrary.quizzes.slice(0, 4);
+
+  async function generateStudyAsset(kind: 'flashcards' | 'quiz') {
+    if (!selectedDocumentText?.trim()) {
+      setNoteActionStatus({
+        tone: 'warning',
+        message: 'Open a processed note first so Backpack has something usable to turn into study assets.',
+      });
+      return;
+    }
+
+    setGeneratingAsset(kind);
+    setFeedback('');
+    setNoteActionStatus({
+      tone: 'neutral',
+      message: kind === 'flashcards' ? 'Creating flashcards from this note...' : 'Creating a quiz from this note...',
+    });
+
+    try {
+      const response = await apiFetch(kind === 'flashcards' ? '/api/study/flashcards' : '/api/study/quiz', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: kind === 'flashcards' ? selectedDocument?.title ?? coachTitle : `${selectedDocument?.title ?? coachTitle} Quiz`,
+          text: selectedDocumentText,
+          sourceAssetId: selectedDocument?.id,
+          audienceLevel: 'Use onboarding profile',
+          ...(kind === 'quiz' ? { questionCount: 6 } : {}),
+        }),
+      });
+      const raw = await response.text();
+      let data: Record<string, any> = {};
+      if (raw) {
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          data = { message: raw };
+        }
+      }
+      if (!response.ok) {
+        throw new Error(data.message || `Failed to generate ${kind}`);
+      }
+
+      await loadStudyLibrary();
+      setNoteActionStatus({
+        tone: 'neutral',
+        message:
+          kind === 'flashcards'
+            ? `Created ${data.cards?.length ?? 0} flashcards from ${selectedDocument?.title ?? 'this note'}.`
+            : `Created ${data.questions?.length ?? 0} quiz questions from ${selectedDocument?.title ?? 'this note'}.`,
+      });
+    } catch (error: any) {
+      setNoteActionStatus({
+        tone: 'warning',
+        message: error.message || `Failed to generate ${kind}`,
+      });
+    } finally {
+      setGeneratingAsset(null);
+    }
+  }
+
   if (!hasSession) {
     return (
       <section className="hero-card">
@@ -403,10 +354,14 @@ export default function CoachPage() {
       <section className="hero-card hero-card-featured">
         <div className="hero-copy">
           <p className="insight-chip">{isIntroFlow ? 'First-time Backpack' : 'Backpack workspace'}</p>
-          <h1 className="hero-title">{isIntroFlow ? 'Meet your Backpack workflow.' : 'Drop in notes, files, photos, and audio, then turn them into something usable.'}</h1>
+          <h1 className="hero-title">
+            {isIntroFlow
+              ? 'Meet your Backpack workflow.'
+              : 'Input notes, organize saved material, and turn it into usable flashcards and quizzes.'}
+          </h1>
           <p className="hero-description">
-            Backpack is the structured intake workspace. Upload material, attach transcripts or extracted text, summarize it,
-            save the important logistics, and turn the cleaned result into flashcards, quizzes, and a focused study conversation.
+            Backpack is now a dedicated note workspace. Capture raw material, process it into organized notes, save reusable knowledge,
+            and generate study outputs directly from the notes that matter.
           </p>
         </div>
       </section>
@@ -505,122 +460,48 @@ export default function CoachPage() {
               </p>
             </article>
             <article className="summary-card backpack-feature-card">
-              <p className="eyebrow">Generate flashcards</p>
-              <strong>Turn summaries into recall prompts</strong>
+              <p className="eyebrow">Organize notes</p>
+              <strong>Keep saved notes grouped by section</strong>
               <p className="muted-copy">
-                Use the cleaned summary to build flashcards for definitions, vocab, formulas, and key concepts.
+                Processed notes stay grouped into sections so students can reopen the right lecture, worksheet, or transcript quickly.
               </p>
             </article>
             <article className="summary-card backpack-feature-card">
-              <p className="eyebrow">Build quizzes</p>
-              <strong>Create a quick practice check</strong>
+              <p className="eyebrow">Study outputs</p>
+              <strong>Generate flashcards and quizzes from saved notes</strong>
               <p className="muted-copy">
-                Ask Backpack to turn your uploaded material into a quiz or short study sprint once the notes are processed.
+                Backpack now feeds directly into your study library so processed material turns into active recall tools, not another chat thread.
               </p>
             </article>
           </section>
 
           <section className="backpack-room">
-            <div className="chat-prompt-strip">
-              {prompts.map((prompt) => (
-                <button key={prompt} type="button" className="chat-prompt-chip" onClick={() => setMessage(prompt)}>
-                  {prompt}
-                </button>
-              ))}
-              {coachSummary ? (
-                <button type="button" className="chat-prompt-chip" onClick={() => setMessage(`Use this note summary in your answer:\n${coachSummary}`)}>
-                  Use latest summary
-                </button>
-              ) : null}
-              {coachSummary ? (
-                <button type="button" className="chat-prompt-chip" onClick={() => setMessage(`Turn this summary into flashcards:\n${coachSummary}`)}>
-                  Make flashcards
-                </button>
-              ) : null}
-              {coachSummary ? (
-                <button type="button" className="chat-prompt-chip" onClick={() => setMessage(`Turn this summary into a quiz with answer key:\n${coachSummary}`)}>
-                  Make quiz
-                </button>
-              ) : null}
-            </div>
-
-            <div className="chat-room backpack-chat-room">
-              <div className="chat-room-header">
+            <div className="secondary-card">
+              <div className="section-head">
                 <div>
-                  <p className="eyebrow">Backpack assistant</p>
-                  <h3 style={{ margin: 0 }}>Quick workspace chat</h3>
+                  <p className="eyebrow">Workspace overview</p>
+                  <h3 style={{ margin: 0 }}>Backpack at a glance</h3>
                   <p className="muted-copy" style={{ margin: '6px 0 0' }}>
-                    Use this smaller chat box after processing notes to ask for summaries, flashcards, quizzes, or a study plan.
+                    Capture raw material here, keep the cleaned notes organized, then push the best material into flashcards and quizzes.
                   </p>
                 </div>
-                <span className="chat-room-badge">{activeThreadId ? 'Ongoing' : 'Ready'}</span>
               </div>
-
-              <div className="chat-messages">
-                {messages.length ? (
-                  messages.map((entry) => (
-                    <div key={entry.id} className={entry.role === 'assistant' ? 'chat-bubble assistant' : 'chat-bubble user'}>
-                      <strong>{entry.role === 'assistant' ? 'Backpack' : 'You'}</strong>
-                      <div>{entry.content}</div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="chat-empty-state">
-                    <strong>No messages yet</strong>
-                    <p>Upload material, process it, then ask Backpack for a plan, summary, or next study block.</p>
-                  </div>
-                )}
-              </div>
-
-              <div className="chat-composer">
-                <div className="chat-composer-toolbar">
-                  <button
-                    type="button"
-                    className="chat-mini-button"
-                    onClick={() => {
-                      setCommandOpen((current) => !current);
-                      if (!message.trim()) setMessage('/');
-                    }}
-                  >
-                    /
-                  </button>
-                  <span className="chat-composer-hint">Commands and note summaries can both seed the next prompt.</span>
+              <div className="metric-grid">
+                <div className="metric-tile">
+                  <strong>{savedNotes.length}</strong>
+                  <span>saved notes</span>
                 </div>
-
-                {commandOpen || matchingCommands.length ? (
-                  <div className="chat-command-menu">
-                    {(matchingCommands.length ? matchingCommands : slashCommands).map((command) => (
-                      <button
-                        key={command.name}
-                        type="button"
-                        className="chat-command-item"
-                        onClick={() => {
-                          setMessage(command.name);
-                          setCommandOpen(false);
-                        }}
-                      >
-                        <strong>{command.name}</strong>
-                        <span>{command.description}</span>
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-
-                <div className="chat-composer-input">
-                  <textarea
-                    value={message}
-                    onChange={(event) => {
-                      const nextValue = event.target.value;
-                      setMessage(nextValue);
-                      setCommandOpen(nextValue.trim().startsWith('/'));
-                    }}
-                    rows={4}
-                    placeholder="Ask Backpack to summarize, organize, or turn this material into a study plan..."
-                    className="chat-textarea"
-                  />
-                  <button onClick={send} disabled={sending} className="chat-send-button">
-                    {sending ? 'Sending...' : 'Send'}
-                  </button>
+                <div className="metric-tile">
+                  <strong>{groupedSavedNotes.length}</strong>
+                  <span>note sections</span>
+                </div>
+                <div className="metric-tile">
+                  <strong>{studyLibrary.flashcardSets.length}</strong>
+                  <span>flashcard sets</span>
+                </div>
+                <div className="metric-tile">
+                  <strong>{studyLibrary.quizzes.length}</strong>
+                  <span>quizzes</span>
                 </div>
               </div>
             </div>
@@ -637,6 +518,44 @@ export default function CoachPage() {
                   </article>
                 ))}
                 {!knowledgeItems.length ? <p className="muted-copy">Save knowledge to keep logistics and preferences reusable.</p> : null}
+              </div>
+            </section>
+
+            <section className="secondary-card">
+              <div className="section-head">
+                <div>
+                  <p className="eyebrow">Study outputs</p>
+                  <h3 style={{ margin: 0 }}>Created from Backpack</h3>
+                </div>
+                <Link href="/study" className="ghost-button">Open full library</Link>
+              </div>
+              <div className="backpack-output-grid">
+                <div className="summary-card">
+                  <p className="eyebrow">Recent flashcards</p>
+                  <div className="stack-list">
+                    {recentFlashcardSets.length ? recentFlashcardSets.map((set) => (
+                      <article key={set.id} className="stack-item">
+                        <div>
+                          <strong>{set.title}</strong>
+                          <p className="muted-copy" style={{ margin: '4px 0 0' }}>{set.cards.length} cards</p>
+                        </div>
+                      </article>
+                    )) : <p className="muted-copy">No flashcard sets yet. Open a note and generate one here.</p>}
+                  </div>
+                </div>
+                <div className="summary-card">
+                  <p className="eyebrow">Recent quizzes</p>
+                  <div className="stack-list">
+                    {recentQuizzes.length ? recentQuizzes.map((quiz) => (
+                      <article key={quiz.id} className="stack-item">
+                        <div>
+                          <strong>{quiz.title}</strong>
+                          <p className="muted-copy" style={{ margin: '4px 0 0' }}>{quiz.questions.length} questions</p>
+                        </div>
+                      </article>
+                    )) : <p className="muted-copy">No quizzes yet. Process a note and generate one from Backpack.</p>}
+                  </div>
+                </div>
               </div>
             </section>
           </section>
@@ -679,24 +598,35 @@ export default function CoachPage() {
                 Section: {selectedDocument.sectionName}
               </p>
               <div className="actions">
-                <button type="button" onClick={() => setMessage(`Create flashcards from these notes:\n${selectedDocumentText}`)}>
-                  Create flashcards
+                <button type="button" onClick={() => void generateStudyAsset('flashcards')} disabled={generatingAsset !== null}>
+                  {generatingAsset === 'flashcards' ? 'Creating flashcards...' : 'Create flashcards'}
                 </button>
-                <button type="button" onClick={() => setMessage(`Create a quiz with answers from these notes:\n${selectedDocumentText}`)}>
-                  Create quiz
+                <button type="button" onClick={() => void generateStudyAsset('quiz')} disabled={generatingAsset !== null}>
+                  {generatingAsset === 'quiz' ? 'Creating quiz...' : 'Create quiz'}
                 </button>
-                <button type="button" onClick={() => setMessage(`Summarize these notes for me:\n${selectedDocumentText}`)}>
-                  Summarize
-                </button>
+                <Link href="/study" className="ghost-button">Open study library</Link>
               </div>
+              {noteActionStatus ? <StatusBanner tone={noteActionStatus.tone}>{noteActionStatus.message}</StatusBanner> : null}
               {selectedDocument.metadata.summary ? (
                 <p className="muted-copy" style={{ marginTop: '1rem' }}>
                   {selectedDocument.metadata.summary}
                 </p>
               ) : null}
-              <p className="muted-copy" style={{ whiteSpace: 'pre-wrap' }}>
+              <p
+                className={`muted-copy backpack-note-preview${showFullSelectedNote ? ' expanded' : ''}`}
+                style={{ whiteSpace: 'pre-wrap' }}
+              >
                 {selectedDocumentText || 'This document does not have extracted text yet.'}
               </p>
+              {selectedDocumentText?.trim() ? (
+                <button
+                  type="button"
+                  className="ghost-button backpack-note-toggle"
+                  onClick={() => setShowFullSelectedNote((current) => !current)}
+                >
+                  {showFullSelectedNote ? 'Show less' : 'Show more'}
+                </button>
+              ) : null}
             </div>
           ) : null}
         </section>

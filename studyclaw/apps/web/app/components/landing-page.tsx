@@ -7,7 +7,7 @@ import { motion } from 'framer-motion';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import FeatureCard from './feature-card';
-import { readStoredSession } from '../../lib/session';
+import { isOnboardingComplete, readStoredSession } from '../../lib/session';
 import {
   AudioLines,
   BrainCircuit,
@@ -69,7 +69,7 @@ export default function LandingPage() {
   useEffect(() => {
     const session = readStoredSession();
     if (session?.user?.id) {
-      router.replace('/dashboard');
+      router.replace(isOnboardingComplete(session) ? '/dashboard' : '/onboarding');
       return;
     }
 

@@ -58,6 +58,10 @@ model Agent {
   
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
+  // OCMT Container
+  containerUrl    String?  // Per-user container URL
+  containerToken  String?  // Container gateway token
+  containerStatus String?  @default("none") // none|provisioning|running|stopped
 }
 
 enum Preset {

@@ -1,14 +1,30 @@
 import { Router } from 'express';
 import { hashPassword, issueAccessToken, verifyPassword } from '../../lib/auth';
 import { db } from '../../lib/db';
-import { ensurePersonalAgent, ensureAdminAgent } from '../../lib/user-agent';
-import { buildGoogleAuthUrl, exchangeGoogleCode, saveUserGoogleTokens } from '../../lib/google-service';
+import { ensureAdminAgent } from '../../lib/user-agent';
+import { buildGoogleAuthUrl, decodeGoogleAuthState, exchangeGoogleCode, saveUserGoogleTokens } from '../../lib/google-service';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
 
 export const authRouter = Router();
 
+function resolveOnboardingComplete(user: { role?: string | null }, onboardingComplete?: boolean | null) {
+  if (user.role === 'admin') {
+    return true;
+  }
+
+  return !!onboardingComplete;
+}
+
+function sanitizeFrontendPath(value: string | undefined, fallbackPath: string) {
+  if (!value || !value.startsWith('/')) {
+    return fallbackPath;
+  }
+
+  return value;
+}
+
 authRouter.get('/google', (req, res) => {
-  const url = buildGoogleAuthUrl();
+  const url = buildGoogleAuthUrl({ purpose: 'signin' });
   console.log('Initiating Google OAuth redirect to:', url);
   res.redirect(url);
 });
@@ -21,14 +37,42 @@ authRouter.get('/google/callback', async (req, res) => {
 
   try {
     await ensurePlatformSchema();
+    const state = decodeGoogleAuthState(typeof req.query.state === 'string' ? req.query.state : undefined);
     const { tokens, userInfo } = await exchangeGoogleCode(code as string);
     const { email, name, sub: googleId } = userInfo;
+    const frontendUrl = process.env.CLIENT_URL || process.env.FRONTEND_URL || 'http://localhost:3000';
+
+    if (state?.purpose === 'connect') {
+      if (!state.userId) {
+        return res.status(400).send('Missing user context');
+      }
+
+      if (!tokens.access_token || !tokens.expiry_date) {
+        return res.status(500).send('Google connection did not return access tokens');
+      }
+
+      await saveUserGoogleTokens({
+        userId: state.userId,
+        googleSubject: googleId,
+        googleEmail: email,
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token ?? null,
+        scope: tokens.scope ?? '',
+        tokenType: tokens.token_type ?? 'Bearer',
+        expiresAt: new Date(tokens.expiry_date),
+      });
+
+      const returnTo = sanitizeFrontendPath(state.returnTo, '/settings');
+      const separator = returnTo.includes('?') ? '&' : '?';
+      return res.redirect(`${frontendUrl}${returnTo}${separator}google=connected`);
+    }
+
     const isAdmin = email === process.env.STUDYCLAW_ADMIN_EMAIL;
 
     let userResult = await db.query(
-      `select u.id, u.email, u.full_name, u.auth_provider, u.role, a.agent_type
+      `select u.id, u.email, u.full_name, u.auth_provider, u.role, sp.onboarding_complete
        from users u 
-       left join agents a on a.user_id = u.id 
+       left join student_profiles sp on sp.user_id = u.id
        where u.email = $1`,
       [email]
     );
@@ -59,29 +103,6 @@ authRouter.get('/google/callback', async (req, res) => {
       user.role = isAdmin ? 'admin' : user.role ?? 'student';
     }
 
-    if (!isAdmin) {
-      await ensurePersonalAgent({ userId: user.id, email: user.email });
-      await db.query(
-        `insert into agents (user_id, openclaw_agent_id, name, agent_type, config)
-         values ($1, $2, $3, $4, $5)
-         on conflict (user_id) do nothing`,
-        [user.id, `student_${user.id.replace(/-/g, '').slice(0, 12)}`, 'My Study Agent', 'custom', JSON.stringify({})]
-      );
-    }
-
-    if (tokens.access_token && tokens.expiry_date) {
-      await saveUserGoogleTokens({
-        userId: user.id,
-        googleSubject: googleId,
-        googleEmail: email,
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token ?? null,
-        scope: tokens.scope ?? '',
-        tokenType: tokens.token_type ?? 'Bearer',
-        expiresAt: new Date(tokens.expiry_date),
-      });
-    }
-
     if (isAdmin) {
       const adminAgent = await ensureAdminAgent({ ownerUserId: user.id, email: user.email });
       await db.query(
@@ -96,26 +117,31 @@ authRouter.get('/google/callback', async (req, res) => {
           adminAgent.openclawAgentId,
           JSON.stringify({
             role: 'master_admin',
-            permissions: ['manage_templates', 'manage_policy', 'debug_agents'],
+            permissions: [
+              'manage_templates',
+              'manage_policy',
+              'manage_rules',
+              'manage_runtime',
+              'debug_agents',
+              'reset_agents',
+              'inspect_platform',
+            ],
           }),
         ]
       );
     }
 
     const accessToken = issueAccessToken(user);
+    const onboardingComplete = resolveOnboardingComplete(user, user.onboarding_complete);
     const session = {
       user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role ?? 'student' },
       accessToken,
-      onboardingComplete: !!user.agent_type
+      onboardingComplete,
     };
 
-    const frontendUrl = process.env.CLIENT_URL || process.env.FRONTEND_URL || 'http://localhost:3000';
     const encodedSession = Buffer.from(JSON.stringify(session), 'utf8').toString('base64url');
-    
-    // New users go to onboarding, returning users go to dashboard
-    const targetPath = isNewUser ? '/onboarding' : '/dashboard';
-    const connectedParam = 'connected=true';
-    res.redirect(`${frontendUrl}${targetPath}?${connectedParam}&payload=${encodeURIComponent(encodedSession)}`);
+    const targetPath = onboardingComplete ? '/dashboard' : '/onboarding';
+    res.redirect(`${frontendUrl}${targetPath}?payload=${encodeURIComponent(encodedSession)}`);
   } catch (error) {
     console.error('Google Auth Error:', error);
     res.status(500).send('Authentication failed');
@@ -129,7 +155,13 @@ authRouter.post('/signup', async (req, res) => {
     return res.status(400).json({ error: 'bad_request', message: 'email and password are required' });
   }
 
-  const existing = await db.query(`select u.id, u.email, u.full_name, u.password_hash, u.role, a.agent_type from users u left join agents a on a.user_id = u.id where u.email = $1`, [email]);
+  const existing = await db.query(
+    `select u.id, u.email, u.full_name, u.password_hash, u.role, sp.onboarding_complete
+     from users u
+     left join student_profiles sp on sp.user_id = u.id
+     where u.email = $1`,
+    [email]
+  );
 
   if (existing.rows[0]) {
     const user = existing.rows[0];
@@ -141,18 +173,11 @@ authRouter.post('/signup', async (req, res) => {
       await db.query(`update users set password_hash = $2 where id = $1`, [user.id, hashPassword(password)]);
     }
 
-    await ensurePersonalAgent({ userId: user.id, email: user.email });
-    await db.query(
-      `insert into agents (user_id, openclaw_agent_id, name, agent_type, config)
-       values ($1, $2, $3, $4, $5)
-       on conflict (user_id) do nothing`,
-      [user.id, `student_${user.id.replace(/-/g, '').slice(0, 12)}`, 'My Study Agent', 'custom', JSON.stringify({})]
-    );
     return res.json({ 
       user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role ?? 'student' }, 
       accessToken: issueAccessToken(user), 
       existingUser: true,
-      onboardingComplete: !!user.agent_type
+      onboardingComplete: resolveOnboardingComplete(user, user.onboarding_complete)
     });
   }
 
@@ -164,17 +189,11 @@ authRouter.post('/signup', async (req, res) => {
   );
 
   const user = created.rows[0];
-  await ensurePersonalAgent({ userId: user.id, email: user.email });
-  await db.query(
-    `insert into agents (user_id, openclaw_agent_id, name, agent_type, config)
-     values ($1, $2, $3, $4, $5)`,
-    [user.id, `student_${user.id.replace(/-/g, '').slice(0, 12)}`, 'My Study Agent', 'custom', JSON.stringify({})]
-  );
   res.status(201).json({ 
     user, 
     accessToken: issueAccessToken(user), 
     existingUser: false,
-    onboardingComplete: false
+    onboardingComplete: resolveOnboardingComplete(user, false)
   });
 });
 
@@ -185,7 +204,13 @@ authRouter.post('/login', async (req, res) => {
     return res.status(400).json({ error: 'bad_request', message: 'email and password are required' });
   }
 
-  const result = await db.query(`select u.id, u.email, u.full_name, u.password_hash, u.role, a.agent_type from users u left join agents a on a.user_id = u.id where u.email = $1`, [email]);
+  const result = await db.query(
+    `select u.id, u.email, u.full_name, u.password_hash, u.role, sp.onboarding_complete
+     from users u
+     left join student_profiles sp on sp.user_id = u.id
+     where u.email = $1`,
+    [email]
+  );
   if (!result.rows[0]) {
     return res.status(404).json({ error: 'not_found', message: 'User not found' });
   }
@@ -195,16 +220,9 @@ authRouter.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'invalid_credentials', message: 'Invalid email or password' });
   }
 
-  await ensurePersonalAgent({ userId: user.id, email: user.email });
-  await db.query(
-    `insert into agents (user_id, openclaw_agent_id, name, agent_type, config)
-     values ($1, $2, $3, $4, $5)
-     on conflict (user_id) do nothing`,
-    [user.id, `student_${user.id.replace(/-/g, '').slice(0, 12)}`, 'My Study Agent', 'custom', JSON.stringify({})]
-  );
   res.json({ 
     user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role ?? 'student' }, 
     accessToken: issueAccessToken(user),
-    onboardingComplete: !!user.agent_type
+    onboardingComplete: resolveOnboardingComplete(user, user.onboarding_complete)
   });
 });

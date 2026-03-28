@@ -10,20 +10,16 @@ import {
 import { ensurePlatformSchema } from '../../lib/platform-schema';
 
 const openclaw = new OpenClawClient();
-
-async function ensureCoachKnowledgeTable() {
-  await db.query(`
-    create table if not exists coach_knowledge_items (
-      id uuid primary key default gen_random_uuid(),
-      user_id uuid not null references users(id) on delete cascade,
-      title text not null,
-      detail text not null,
-      source_type text not null default 'note',
-      metadata_json jsonb not null default '{}'::jsonb,
-      created_at timestamptz not null default now()
-    )
-  `);
-}
+const ADMIN_COACH_PROFILE = {
+  openclaw_agent_id: 'main',
+  model_key: 'minimax/MiniMax-M2.7',
+  system_prompt: [
+    'You are StudyClaw Admin, the platform administrator agent.',
+    'Help organize, summarize, and process uploaded materials with operational clarity.',
+    'Prefer structured outputs and do not act like an unconfigured assistant.',
+  ].join(' '),
+  persona_name: 'StudyClaw Admin',
+} as const;
 
 function normalizeSectionName(value: unknown) {
   const cleaned = String(value ?? '').trim();
@@ -126,7 +122,6 @@ coachRouter.use(requireAuth);
 
 coachRouter.get('/knowledge', async (req: AuthedRequest, res) => {
   await ensurePlatformSchema();
-  await ensureCoachKnowledgeTable();
   const result = await db.query(
     `select id, title, detail, source_type, metadata_json, created_at
      from coach_knowledge_items
@@ -141,7 +136,6 @@ coachRouter.get('/knowledge', async (req: AuthedRequest, res) => {
 
 coachRouter.post('/knowledge', async (req: AuthedRequest, res) => {
   await ensurePlatformSchema();
-  await ensureCoachKnowledgeTable();
   const { title, detail, sourceType = 'note', metadata = {} } = req.body as {
     title?: string;
     detail?: string;
@@ -214,9 +208,10 @@ coachRouter.post('/process', async (req: AuthedRequest, res) => {
     return res.status(400).json({ error: 'bad_request', message: 'title and text are required' });
   }
 
-  const agent = await loadAgentProfile(req.user!.id);
-  const studentAgent = await getStudentAgentRecord(req.user!.id);
-  if (!agent || !studentAgent) {
+  const isAdmin = req.user?.role === 'admin';
+  const agent = isAdmin ? ADMIN_COACH_PROFILE : await loadAgentProfile(req.user!.id);
+  const studentAgent = isAdmin ? null : await getStudentAgentRecord(req.user!.id);
+  if (!agent || (!isAdmin && !studentAgent)) {
     return res.status(400).json({ error: 'missing_agent', message: 'Complete onboarding first' });
   }
 
@@ -246,7 +241,9 @@ Student content:
 ${text}
 `;
 
-  const context = await buildStudyContext(req.user!.id);
+  const context = isAdmin
+    ? { profile: null, subjects: [], reminders: [] }
+    : await buildStudyContext(req.user!.id);
 
   try {
     const reply = await openclaw.sendMessage({
@@ -291,21 +288,23 @@ ${text}
         }),
       ]
     );
-    await db.query(
-      `insert into agent_actions (agent_id, action_type, summary, payload)
-       values ($1, $2, $3, $4)`,
-      [
-        studentAgent.id,
-        'coach_processed_note',
-        `Processed coach note ${title}.`,
-        JSON.stringify({
-          sourceType,
-          attachmentCount: attachments.length,
-          sectionName,
-          assetId: savedAsset.rows[0]?.id ?? null,
-        }),
-      ]
-    );
+    if (studentAgent) {
+      await db.query(
+        `insert into agent_actions (agent_id, action_type, summary, payload)
+         values ($1, $2, $3, $4)`,
+        [
+          studentAgent.id,
+          'coach_processed_note',
+          `Processed coach note ${title}.`,
+          JSON.stringify({
+            sourceType,
+            attachmentCount: attachments.length,
+            sectionName,
+            assetId: savedAsset.rows[0]?.id ?? null,
+          }),
+        ]
+      );
+    }
     res.json({
       assetId: savedAsset.rows[0]?.id ?? null,
       sectionName,
@@ -344,21 +343,23 @@ ${text}
         }),
       ]
     );
-    await db.query(
-      `insert into agent_actions (agent_id, action_type, summary, payload)
-       values ($1, $2, $3, $4)`,
-      [
-        studentAgent.id,
-        'coach_process_fallback',
-        `Coach processing fell back for ${title}.`,
-        JSON.stringify({
-          sourceType,
-          attachmentCount: attachments.length,
-          sectionName,
-          assetId: savedAsset.rows[0]?.id ?? null,
-        }),
-      ]
-    );
+    if (studentAgent) {
+      await db.query(
+        `insert into agent_actions (agent_id, action_type, summary, payload)
+         values ($1, $2, $3, $4)`,
+        [
+          studentAgent.id,
+          'coach_process_fallback',
+          `Coach processing fell back for ${title}.`,
+          JSON.stringify({
+            sourceType,
+            attachmentCount: attachments.length,
+            sectionName,
+            assetId: savedAsset.rows[0]?.id ?? null,
+          }),
+        ]
+      );
+    }
     res.json({
       assetId: savedAsset.rows[0]?.id ?? null,
       sectionName,

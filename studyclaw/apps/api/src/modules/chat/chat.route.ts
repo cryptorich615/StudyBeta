@@ -11,6 +11,7 @@ import {
 import { buildBootstrapExtractionPrompt } from '../../lib/bootstrap';
 import { syncUserWorkspaceProfile } from '../../lib/user-agent';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
+import { syncUserModelRuntimeConfig } from '../../lib/model-settings';
 
 export const chatRouter = Router();
 chatRouter.use(requireAuth);
@@ -40,6 +41,22 @@ const TIMEZONE_ABBREVIATION_TO_OFFSET_MINUTES: Record<string, number> = {
   PST: -8 * 60,
   PDT: -7 * 60,
 };
+
+const ADMIN_CHAT_PROFILE = {
+  openclaw_agent_id: 'main',
+  model_key: 'minimax/MiniMax-M2.7',
+  system_prompt: [
+    'You are StudyClaw Admin, the platform administrator agent.',
+    'You have full administrative authority within StudyClaw and OpenClaw operations.',
+    'Focus on diagnosis, repair, verification, safety, and clear operational reporting.',
+    'Do not behave like a student tutor unless directly helping inspect the tutoring stack.',
+  ].join(' '),
+  persona_name: 'StudyClaw Admin',
+  tone: 'precise',
+  verbosity: 'concise',
+  teaching_style: 'operational',
+  reminder_style: 'n/a',
+} as const;
 
 function parseJsonBlock(value: string) {
   const cleaned = value
@@ -165,10 +182,32 @@ function zonedLocalTimeToUtc(input: {
 
 function inferReminderTitle(message: string) {
   const normalized = message.toLowerCase();
-  if (normalized.includes('study')) return 'Study reminder';
-  if (normalized.includes('exam')) return 'Exam reminder';
-  if (normalized.includes('assignment') || normalized.includes('homework')) return 'Assignment reminder';
-  if (normalized.includes('meeting')) return 'Meeting reminder';
+
+  const roomMatch = message.match(/\broom\s+([a-z0-9-]+)/i);
+  const roomSuffix = roomMatch ? ` Room ${roomMatch[1].toUpperCase()}` : '';
+
+  const subjectTestMatch = message.match(
+    /\b(?:a|an|my)\s+([a-z][a-z0-9&/+\-\s]{0,30}?)\s+(test|exam|quiz)\b/i
+  );
+  if (subjectTestMatch) {
+    const subject = subjectTestMatch[1]
+      .trim()
+      .replace(/\b(math|english|history|biology|chemistry|physics|science)\b/gi, (part) => part[0]!.toUpperCase() + part.slice(1).toLowerCase());
+    const eventType = subjectTestMatch[2][0]!.toUpperCase() + subjectTestMatch[2].slice(1).toLowerCase();
+    return `${subject} ${eventType}${roomSuffix}`;
+  }
+
+  const simpleEventMatch = message.match(/\b(test|exam|quiz|assignment|homework|meeting|study session)\b/i);
+  if (simpleEventMatch) {
+    const eventType = simpleEventMatch[1]
+      .replace(/\bstudy session\b/i, 'Study Session')
+      .replace(/\b\w/g, (part) => part.toUpperCase());
+    return `${eventType}${roomSuffix}`;
+  }
+
+  if (normalized.includes('study')) return 'Study Reminder';
+  if (normalized.includes('assignment') || normalized.includes('homework')) return 'Assignment Reminder';
+  if (normalized.includes('meeting')) return 'Meeting Reminder';
   return 'Reminder';
 }
 
@@ -605,40 +644,56 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
     return res.status(400).json({ error: 'bad_request', message: 'message or document text is required' });
   }
 
-  // Guard: block chat until onboarding is complete
-  const credentialCheck = await db.query(
-    `select api_key
-     from user_model_credentials
-     where user_id = $1
-     limit 1`,
-    [req.user!.id]
-  );
-  if (!credentialCheck.rows[0]?.api_key) {
-    return res.status(403).json({ error: 'onboarding_required', message: 'Complete onboarding first: choose Dixie or Willow and enter your API key.' });
+  const isAdmin = req.user?.role === 'admin';
+
+  if (!isAdmin) {
+    const credentialCheck = await db.query(
+      `select api_key
+       from user_model_credentials
+       where user_id = $1
+       limit 1`,
+      [req.user!.id]
+    );
+    if (!credentialCheck.rows[0]?.api_key) {
+      return res.status(403).json({ error: 'onboarding_required', message: 'Complete onboarding first: choose Dixie or Willow and enter your API key.' });
+    }
   }
 
-  const agent = await loadAgentProfile(req.user!.id);
-  const studentAgentResult = await db.query(`select * from agents where user_id = $1`, [req.user!.id]);
-  const studentAgent = studentAgentResult.rows[0];
+  const agent = isAdmin
+    ? ADMIN_CHAT_PROFILE
+    : await loadAgentProfile(req.user!.id);
+  const studentAgent = isAdmin
+    ? null
+    : (await db.query(`select * from agents where user_id = $1`, [req.user!.id])).rows[0];
 
-  if (!agent || !studentAgent) {
+  if (!agent || (!isAdmin && !studentAgent)) {
     return res.status(400).json({ error: 'missing_agent', message: 'Complete onboarding first' });
   }
 
-  const quotaResult = await db.query(
-    `select count(*)::int as count
-     from agent_actions aa
-     where aa.agent_id = $1
-       and aa.created_at >= date_trunc('day', now())`,
-    [studentAgent.id]
-  );
-  const usedToday = quotaResult.rows[0]?.count ?? 0;
-  const dailyQuota = Number(process.env.STUDYCLAW_STUDENT_DAILY_AGENT_ACTIONS ?? 150);
-  if (usedToday >= dailyQuota) {
-    return res.status(429).json({
-      error: 'quota_reached',
-      message: `Daily agent quota reached (${usedToday}/${dailyQuota}).`,
+  if (!isAdmin) {
+    await syncUserModelRuntimeConfig({
+      userId: req.user!.id,
+      email: req.user!.email ?? `${req.user!.id}@local.invalid`,
+      modelKey: agent.model_key,
     });
+  }
+
+  if (!isAdmin && studentAgent) {
+    const quotaResult = await db.query(
+      `select count(*)::int as count
+       from agent_actions aa
+       where aa.agent_id = $1
+         and aa.created_at >= date_trunc('day', now())`,
+      [studentAgent.id]
+    );
+    const usedToday = quotaResult.rows[0]?.count ?? 0;
+    const dailyQuota = Number(process.env.STUDYCLAW_STUDENT_DAILY_AGENT_ACTIONS ?? 150);
+    if (usedToday >= dailyQuota) {
+      return res.status(429).json({
+        error: 'quota_reached',
+        message: `Daily agent quota reached (${usedToday}/${dailyQuota}).`,
+      });
+    }
   }
 
   let activeThreadId = threadId;
@@ -694,7 +749,9 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
   ]);
 
   try {
-    const context = await buildStudyContext(req.user!.id);
+    const context = isAdmin
+      ? { profile: null, subjects: [], reminders: [] }
+      : await buildStudyContext(req.user!.id);
     const reminderStatusReply = trimmedMessage
       ? await tryHandleReminderStatusQuestion({
           userId: req.user!.id,
@@ -807,20 +864,22 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
         ]
       );
       await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
-      await db.query(
-        `insert into agent_actions (agent_id, action_type, summary, payload)
-         values ($1, $2, $3, $4)`,
-        [
-          studentAgent.id,
-          'reminder_created',
-          `Created reminder "${resolvedReminderIntent.title}" from chat.`,
-          JSON.stringify({
-            threadId: activeThreadId,
-            reminderAtIso: resolvedReminderIntent.reminderAtIso,
-            reminderType: resolvedReminderIntent.reminderType,
-          }),
-        ]
-      );
+      if (studentAgent) {
+        await db.query(
+          `insert into agent_actions (agent_id, action_type, summary, payload)
+           values ($1, $2, $3, $4)`,
+          [
+            studentAgent.id,
+            'reminder_created',
+            `Created reminder "${resolvedReminderIntent.title}" from chat.`,
+            JSON.stringify({
+              threadId: activeThreadId,
+              reminderAtIso: resolvedReminderIntent.reminderAtIso,
+              reminderType: resolvedReminderIntent.reminderType,
+            }),
+          ]
+        );
+      }
 
       return res.json({
         threadId: activeThreadId,
@@ -859,21 +918,23 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
       activeThreadId,
       reply.sessionId,
     ]);
-    await db.query(
-      `insert into agent_actions (agent_id, action_type, summary, payload)
-       values ($1, $2, $3, $4)`,
-      [
-        studentAgent.id,
-        'chat_reply',
-        `Replied in chat thread ${activeThreadId}.`,
-        JSON.stringify({
-          threadId: activeThreadId,
-          openclawSessionId: reply.sessionId,
-        }),
-      ]
-    );
+    if (studentAgent) {
+      await db.query(
+        `insert into agent_actions (agent_id, action_type, summary, payload)
+         values ($1, $2, $3, $4)`,
+        [
+          studentAgent.id,
+          'chat_reply',
+          `Replied in chat thread ${activeThreadId}.`,
+          JSON.stringify({
+            threadId: activeThreadId,
+            openclawSessionId: reply.sessionId,
+          }),
+        ]
+      );
+    }
 
-    if (!context.profile?.onboarding_complete) {
+    if (!isAdmin && !context.profile?.onboarding_complete) {
       await syncBootstrapProfile(req.user!.id, activeThreadId!, agent.model_key);
     }
 
@@ -886,16 +947,18 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
     });
   } catch (error) {
     const messageText = error instanceof Error ? error.message : 'Unknown OpenClaw error';
-    await db.query(
-      `insert into agent_actions (agent_id, action_type, summary, payload)
-       values ($1, $2, $3, $4)`,
-      [
-        studentAgent.id,
-        'chat_error',
-        'OpenClaw chat request failed.',
-        JSON.stringify({ error: messageText }),
-      ]
-    );
+    if (studentAgent) {
+      await db.query(
+        `insert into agent_actions (agent_id, action_type, summary, payload)
+         values ($1, $2, $3, $4)`,
+        [
+          studentAgent.id,
+          'chat_error',
+          'OpenClaw chat request failed.',
+          JSON.stringify({ error: messageText }),
+        ]
+      );
+    }
     return res.status(502).json({ error: 'openclaw_error', message: messageText });
   }
 });

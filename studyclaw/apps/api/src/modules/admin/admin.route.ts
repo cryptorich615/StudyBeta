@@ -47,7 +47,16 @@ adminRouter.post('/bootstrap', async (req: AuthedRequest, res) => {
       req.user!.id,
       adminAgent.openclawAgentId,
       JSON.stringify({
-        permissions: ['manage_templates', 'manage_rules', 'debug_agents'],
+        role: 'master_admin',
+        permissions: [
+          'manage_templates',
+          'manage_policy',
+          'manage_rules',
+          'manage_runtime',
+          'debug_agents',
+          'reset_agents',
+          'inspect_platform',
+        ],
       }),
     ]
   );

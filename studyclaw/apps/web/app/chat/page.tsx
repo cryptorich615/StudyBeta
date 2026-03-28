@@ -64,6 +64,7 @@ export default function ChatPage() {
   const [sending, setSending] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const prevMsgCountRef = useRef(-1);
   const [hasSession, setHasSession] = useState(false);
   const [threads, setThreads] = useState<any[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -124,7 +125,18 @@ export default function ChatPage() {
   
   // Auto-scroll to bottom when messages change or typing starts
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (prevMsgCountRef.current === -1) {
+      prevMsgCountRef.current = messages.length;
+      return;
+    }
+
+    if (messages.length > prevMsgCountRef.current || isTyping) {
+      prevMsgCountRef.current = messages.length;
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+
+    prevMsgCountRef.current = messages.length;
   }, [messages, isTyping]);
 
   useEffect(() => {
@@ -506,7 +518,7 @@ export default function ChatPage() {
       {feedback ? <StatusBanner tone="warning">{feedback}</StatusBanner> : null}
 
       <section className="chat-main">
-          <div className="chat-prompt-strip">
+          <div className="chat-prompt-strip chat-prompt-strip-elevated">
             {prompts.map((prompt) => (
               <button key={prompt} type="button" className="chat-prompt-chip" onClick={() => setMessage(prompt)}>
                 {prompt}
@@ -517,7 +529,7 @@ export default function ChatPage() {
             </button>
           </div>
 
-          <div className="chat-room chat-room-sleek">
+          <div className="chat-room chat-room-sleek chat-room-remodeled">
             <div className="chat-room-header chat-room-header-sleek">
               <div>
                 <p className="eyebrow">Direct conversation</p>
@@ -559,10 +571,10 @@ export default function ChatPage() {
           <div ref={messagesEndRef} />
 
             <div className="chat-composer">
-              <div className="chat-composer-toolbar">
+              <div className="chat-composer-toolbar chat-composer-toolbar-remodeled">
                 <button
                   type="button"
-                  className="chat-mini-button"
+                  className="chat-toolbar-button chat-toolbar-button-secondary"
                   onClick={() => {
                     setCommandOpen((current) => !current);
                     if (!message.trim()) setMessage('/');
@@ -573,7 +585,7 @@ export default function ChatPage() {
                 <span className="chat-composer-hint">Try `/models` then `/model openrouter/auto`.</span>
                 <button
                   type="button"
-                  className="chat-mini-button"
+                  className="chat-toolbar-button chat-toolbar-button-accent"
                   onClick={() => fileInputRef.current?.click()}
                 >
                   Add document
@@ -638,20 +650,20 @@ export default function ChatPage() {
                   placeholder="Message the agent, or attach a text-based document and press Send to summarize it..."
                   className="chat-textarea"
                 />
-                <button onClick={send} disabled={sending} className="chat-send-button">
+                <button onClick={send} disabled={sending} className="chat-send-button chat-send-button-remodeled">
                   {sending ? 'Sending...' : 'Send'}
                 </button>
               </div>
             </div>
           </div>
 
-          <section className="chat-bottom-bar">
+          <section className="chat-bottom-bar chat-bottom-bar-remodeled">
             <div className="chat-bottom-header">
               <div>
                 <p className="eyebrow">Conversations</p>
                 <h3 style={{ margin: 0 }}>Threads</h3>
               </div>
-              <button onClick={() => void loadThreads()} type="button" className="chat-mini-button">
+              <button onClick={() => void loadThreads()} type="button" className="chat-toolbar-button chat-toolbar-button-secondary">
                 Refresh
               </button>
             </div>

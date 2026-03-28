@@ -42,3 +42,14 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
 
   return response;
 }
+
+export async function beginGoogleConnect(returnTo: string) {
+  const response = await apiFetch(`/api/google/connect-url?returnTo=${encodeURIComponent(returnTo)}`);
+  const payload = await response.json().catch(() => ({}));
+
+  if (!response.ok || !payload?.url) {
+    throw new Error(payload?.message || 'Failed to start Google connection');
+  }
+
+  window.location.assign(payload.url);
+}

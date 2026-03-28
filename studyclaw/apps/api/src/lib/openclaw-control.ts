@@ -12,9 +12,59 @@ const GATEWAY_LOG_PATH = join(OPENCLAW_HOME, 'gateway.log');
 
 type OpenClawConfig = {
   channels?: Record<string, Record<string, unknown>>;
+  bindings?: Array<Record<string, unknown>>;
   agents?: {
     list?: Array<Record<string, unknown>>;
   };
+};
+
+type TelegramPersonaKey = 'quick_start_1' | 'quick_start_2';
+
+type TelegramPersonaBinding = {
+  personaKey: TelegramPersonaKey;
+  personaName: string;
+  accountId: 'dixie' | 'willow';
+  botUsername: string;
+};
+
+type PairingRequestRecord = {
+  id?: string;
+  code?: string;
+  createdAt?: string;
+  lastSeenAt?: string;
+  meta?: Record<string, string>;
+};
+
+type PairingListResponse = {
+  requests?: PairingRequestRecord[];
+};
+
+type RoutingBinding = {
+  type?: string;
+  agentId?: string;
+  match?: {
+    channel?: string;
+    accountId?: string;
+    peer?: {
+      kind?: string;
+      id?: string;
+    };
+  };
+};
+
+const TELEGRAM_PERSONA_BINDINGS: Record<TelegramPersonaKey, TelegramPersonaBinding> = {
+  quick_start_1: {
+    personaKey: 'quick_start_1',
+    personaName: 'Dixie',
+    accountId: 'dixie',
+    botUsername: '@DixieGirlBot',
+  },
+  quick_start_2: {
+    personaKey: 'quick_start_2',
+    personaName: 'Willow',
+    accountId: 'willow',
+    botUsername: '@WillieWillowBot',
+  },
 };
 
 type SessionRecord = {
@@ -57,6 +107,87 @@ function stripAnsi(value: string) {
   );
 }
 
+function extractJsonPayload(raw: string) {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    throw new Error('OpenClaw returned an empty response');
+  }
+
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const char = trimmed[index];
+    if (char !== '{' && char !== '[') {
+      continue;
+    }
+
+    if (char === '[' && trimmed.slice(index, index + 9) === '[plugins]') {
+      continue;
+    }
+
+    const candidate = extractBalancedJson(trimmed, index);
+    if (!candidate) {
+      continue;
+    }
+
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error('OpenClaw did not return parsable JSON');
+}
+
+function extractBalancedJson(value: string, startIndex: number) {
+  const opener = value[startIndex];
+  const closer = opener === '{' ? '}' : opener === '[' ? ']' : null;
+  if (!closer) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = startIndex; index < value.length; index += 1) {
+    const char = value[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === opener) {
+      depth += 1;
+      continue;
+    }
+
+    if (char === closer) {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(startIndex, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
 function normalizeChannelConfig(config: Record<string, unknown> | undefined) {
   if (!config) {
     return {
@@ -86,17 +217,24 @@ function getAgentEntry(config: OpenClawConfig, agentId: string) {
   return (config.agents?.list ?? []).find((entry) => entry.id === agentId);
 }
 
+function getRoutingBindings(config: OpenClawConfig) {
+  return Array.isArray(config.bindings) ? (config.bindings as RoutingBinding[]) : [];
+}
+
 function getAgentSkillFilter(config: OpenClawConfig, agentId: string) {
   const entry = getAgentEntry(config, agentId);
   return Array.isArray(entry?.skills) ? entry.skills.map((value) => String(value)) : null;
 }
 
 async function runOpenClaw(args: string[]) {
+  const commandEnv = { ...process.env };
+  delete commandEnv.NODE_TLS_REJECT_UNAUTHORIZED;
+
   try {
     const { stdout, stderr } = await execFileAsync('openclaw', args, {
       cwd: OPENCLAW_HOME,
       env: {
-        ...process.env,
+        ...commandEnv,
         NO_COLOR: '1',
         FORCE_COLOR: '0',
       },
@@ -250,6 +388,180 @@ function parseCapabilities(output: string) {
   };
 }
 
+export function resolveTelegramPersonaBinding(agentPreset?: string | null) {
+  if (agentPreset === 'quick_start_1' || agentPreset === 'quick_start_2') {
+    return TELEGRAM_PERSONA_BINDINGS[agentPreset];
+  }
+
+  return null;
+}
+
+function listTelegramBindingsForAgent(config: OpenClawConfig, agentId: string, accountId: string) {
+  return getRoutingBindings(config).filter((binding) => {
+    const type = String(binding.type ?? 'route');
+    const peer = binding.match?.peer;
+
+    return (
+      type === 'route' &&
+      binding.agentId === agentId &&
+      binding.match?.channel === 'telegram' &&
+      String(binding.match?.accountId ?? '') === accountId &&
+      peer?.kind === 'direct' &&
+      !!peer.id
+    );
+  });
+}
+
+async function validateAndWriteOpenClawConfig(nextConfig: OpenClawConfig, previousRaw?: string) {
+  const serialized = `${JSON.stringify(nextConfig, null, 2)}\n`;
+  await writeFile(OPENCLAW_CONFIG_PATH, serialized, 'utf8');
+
+  const validation = await runOpenClaw(['config', 'validate']);
+  if (!validation.ok) {
+    if (typeof previousRaw === 'string') {
+      await writeFile(OPENCLAW_CONFIG_PATH, previousRaw, 'utf8');
+    }
+    throw new Error(validation.stderr || validation.stdout || 'OpenClaw config validation failed');
+  }
+}
+
+async function upsertTelegramPeerBinding(input: {
+  userId: string;
+  accountId: 'dixie' | 'willow';
+  peerId: string;
+}) {
+  const agentId = buildUserAgentId(input.userId);
+  const previousRaw = await readFile(OPENCLAW_CONFIG_PATH, 'utf8');
+  const config = JSON.parse(previousRaw) as OpenClawConfig;
+  const existingBindings = getRoutingBindings(config);
+
+  const keptBindings = existingBindings.filter((binding) => {
+    const type = String(binding.type ?? 'route');
+    if (type !== 'route') {
+      return true;
+    }
+
+    if (binding.match?.channel !== 'telegram' || binding.match?.peer?.kind !== 'direct') {
+      return true;
+    }
+
+    const bindingPeerId = String(binding.match?.peer?.id ?? '');
+    const bindingAccountId = String(binding.match?.accountId ?? '');
+    const bindingAgentId = String(binding.agentId ?? '');
+
+    if (bindingAgentId === agentId) {
+      return false;
+    }
+
+    if (bindingAccountId === input.accountId && bindingPeerId === input.peerId) {
+      return false;
+    }
+
+    return true;
+  });
+
+  config.bindings = [
+    {
+      agentId,
+      match: {
+        channel: 'telegram',
+        accountId: input.accountId,
+        peer: {
+          kind: 'direct',
+          id: input.peerId,
+        },
+      },
+    },
+    ...keptBindings,
+  ];
+
+  await validateAndWriteOpenClawConfig(config, previousRaw);
+}
+
+export async function getUserTelegramSettings(input: {
+  userId: string;
+  agentPreset?: string | null;
+}) {
+  const personaBinding = resolveTelegramPersonaBinding(input.agentPreset);
+  if (!personaBinding) {
+    return {
+      available: false,
+      message: 'Telegram pairing is available after choosing Dixie or Willow.',
+    };
+  }
+
+  const agentId = buildUserAgentId(input.userId);
+  const config = await readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH, {});
+  const telegramChannel = (config.channels?.telegram ?? {}) as Record<string, unknown>;
+  const telegramAccounts = (telegramChannel.accounts ?? {}) as Record<string, Record<string, unknown>>;
+  const accountConfig = telegramAccounts[personaBinding.accountId] ?? {};
+  const bindings = listTelegramBindingsForAgent(config, agentId, personaBinding.accountId);
+
+  return {
+    available: true,
+    personaKey: personaBinding.personaKey,
+    personaName: personaBinding.personaName,
+    accountId: personaBinding.accountId,
+    botUsername: personaBinding.botUsername,
+    channelEnabled: telegramChannel.enabled === true,
+    accountConfigured: Boolean(accountConfig.botToken),
+    dmPolicy: String(accountConfig.dmPolicy ?? telegramChannel.dmPolicy ?? 'pairing'),
+    paired: bindings.length > 0,
+    boundPeerId: String(bindings[0]?.match?.peer?.id ?? ''),
+  };
+}
+
+export async function approveUserTelegramPairing(input: {
+  userId: string;
+  agentPreset?: string | null;
+  code: string;
+}) {
+  const personaBinding = resolveTelegramPersonaBinding(input.agentPreset);
+  if (!personaBinding) {
+    throw new Error('Telegram pairing is only available for Dixie or Willow.');
+  }
+
+  const normalizedCode = input.code.trim().toUpperCase();
+  if (!normalizedCode) {
+    throw new Error('Pairing code is required.');
+  }
+
+  const pendingResult = await runOpenClawOrThrow([
+    'pairing',
+    'list',
+    'telegram',
+    '--account',
+    personaBinding.accountId,
+    '--json',
+  ]);
+  const pending = JSON.parse(extractJsonPayload(pendingResult.stdout || '{}')) as PairingListResponse;
+  const request = (pending.requests ?? []).find(
+    (entry) => String(entry.code ?? '').trim().toUpperCase() === normalizedCode
+  );
+
+  if (!request?.id) {
+    throw new Error('That Telegram pairing code was not found or has expired.');
+  }
+
+  await runOpenClawOrThrow([
+    'pairing',
+    'approve',
+    'telegram',
+    normalizedCode,
+    '--account',
+    personaBinding.accountId,
+    '--notify',
+  ]);
+
+  await upsertTelegramPeerBinding({
+    userId: input.userId,
+    accountId: personaBinding.accountId,
+    peerId: String(request.id),
+  });
+
+  return getUserTelegramSettings(input);
+}
+
 export async function getOpenClawSettingsSnapshot(userId: string) {
   const [config, sessionsResult, skillsResult, cronFile, gatewayLog, capabilitiesResult] = await Promise.all([
     readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH, {}),
@@ -262,7 +574,7 @@ export async function getOpenClawSettingsSnapshot(userId: string) {
 
   const agentId = buildUserAgentId(userId);
   const agentSkillFilter = getAgentSkillFilter(config, agentId);
-  const sessionsJson = sessionsResult.ok ? (JSON.parse(sessionsResult.stdout || '{}') as SessionsResponse) : { sessions: [] };
+  const sessionsJson = sessionsResult.ok ? (JSON.parse(extractJsonPayload(sessionsResult.stdout || '{}')) as SessionsResponse) : { sessions: [] };
   const ownSessions = (sessionsJson.sessions ?? [])
     .filter((session) => session.agentId === agentId)
     .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0));
@@ -350,7 +662,7 @@ export async function createOpenClawCronJob(input: {
 
 export async function deleteOpenClawCronJob(input: { userId: string; jobId: string }) {
   const listResult = await runOpenClawOrThrow(['cron', 'list', '--json']);
-  const parsed = JSON.parse(listResult.stdout || '{}') as CronListResponse;
+  const parsed = JSON.parse(extractJsonPayload(listResult.stdout || '{}')) as CronListResponse;
   const ownAgentId = buildUserAgentId(input.userId);
   const targetJob = (parsed.jobs ?? []).find((job) => {
     const jobId = String(job.jobId ?? job.id ?? '');

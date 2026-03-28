@@ -1,0 +1,17 @@
+[Unit]
+Description=StudyClaw supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/StudyBeta/studyclaw
+Environment=HOME=/home/ubuntu
+Environment=PATH=/home/ubuntu/.nvm/versions/node/v24.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/ubuntu/StudyBeta/studyclaw/run-studyclaw-supervisor.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

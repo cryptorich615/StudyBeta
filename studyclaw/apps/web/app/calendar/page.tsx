@@ -1,11 +1,11 @@
 'use client';
 
 import { useEffect, useState, Suspense } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
-import { apiFetch } from '../../lib/api';
+import { useSearchParams } from 'next/navigation';
+import { apiFetch, beginGoogleConnect } from '../../lib/api';
 import { readStoredSession } from '../../lib/session';
 import { consumePayloadFromUrl } from '../../lib/consumePayload';
-import { Calendar as CalendarIcon, RefreshCw, ExternalLink, MapPin, Clock, CheckCircle } from 'lucide-react';
+import { Calendar as CalendarIcon, RefreshCw, ExternalLink, Clock, CheckCircle } from 'lucide-react';
 
 type CalendarEvent = {
   id: string;
@@ -53,15 +53,24 @@ function CalendarPageContent() {
   const [connected, setConnected] = useState<boolean | null>(null);
   const [showSuccess, setShowSuccess] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const router = useRouter();
   const searchParams = useSearchParams();
-  const hasSession = !!readStoredSession()?.user?.id;
+  const [hasSession, setHasSession] = useState<boolean | null>(() => {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+
+    return !!readStoredSession()?.user?.id;
+  });
 
   useEffect(() => {
-    // Consume payload from URL if present (e.g., from OAuth redirect)
-    consumePayloadFromUrl(searchParams);
-    
-    if (searchParams.get('connected') === 'true') {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const payloadSession = consumePayloadFromUrl(searchParams);
+    setHasSession((current) => current ?? !!(payloadSession?.user?.id || readStoredSession()?.user?.id));
+
+    if (searchParams.get('connected') === 'true' || searchParams.get('google') === 'connected') {
       setShowSuccess(true);
       setConnected(true);
       setTimeout(() => setShowSuccess(false), 5000);
@@ -69,7 +78,7 @@ function CalendarPageContent() {
   }, [searchParams]);
 
   async function loadStatus() {
-    if (!hasSession) return;
+    if (hasSession !== true) return;
     try {
       const res = await apiFetch('/api/google');
       const data = await res.json();
@@ -78,7 +87,7 @@ function CalendarPageContent() {
   }
 
   async function loadEvents() {
-    if (!hasSession) return;
+    if (hasSession !== true) return;
     setLoading(true);
     setError('');
     try {
@@ -102,8 +111,12 @@ function CalendarPageContent() {
     }
   }
 
-  function handleConnect() {
-    window.location.href = '/api/auth/google';
+  async function handleConnect() {
+    try {
+      await beginGoogleConnect('/calendar');
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Failed to start Google connection');
+    }
   }
 
   async function handleRefresh() {
@@ -113,8 +126,10 @@ function CalendarPageContent() {
   }
 
   useEffect(() => {
-    if (hasSession) {
+    if (hasSession === true) {
       loadStatus();
+    } else if (hasSession === false) {
+      setLoading(false);
     }
   }, [hasSession]);
 
@@ -125,6 +140,16 @@ function CalendarPageContent() {
       setLoading(false);
     }
   }, [connected]);
+
+  if (hasSession === null) {
+    return (
+      <section className="hero-card">
+        <p className="insight-chip">Calendar</p>
+        <h1 className="hero-title">Loading your calendar.</h1>
+        <p className="hero-description">Checking your session and Google connection.</p>
+      </section>
+    );
+  }
 
   if (!hasSession) {
     return (

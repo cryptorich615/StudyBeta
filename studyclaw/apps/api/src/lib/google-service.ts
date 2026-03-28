@@ -1,16 +1,28 @@
+import crypto from 'node:crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { db } from './db';
 import { decryptToken, encryptToken } from './token-crypto';
 
-const GOOGLE_SCOPES = [
+export type GoogleAuthPurpose = 'signin' | 'connect';
+
+const GOOGLE_SIGNIN_SCOPES = [
   'openid',
   'email',
   'profile',
-  'https://www.googleapis.com/auth/calendar.readonly',
-  'https://www.googleapis.com/auth/gmail.readonly',
-  'https://www.googleapis.com/auth/drive.readonly',
   'https://www.googleapis.com/auth/userinfo.email',
 ];
+
+const GOOGLE_CONNECT_SCOPES = [
+  ...GOOGLE_SIGNIN_SCOPES,
+  'https://www.googleapis.com/auth/calendar.readonly',
+  'https://www.googleapis.com/auth/drive.readonly',
+];
+
+type GoogleAuthState = {
+  purpose: GoogleAuthPurpose;
+  userId?: string;
+  returnTo?: string;
+};
 
 type StoredGoogleToken = {
   user_id: string;
@@ -31,6 +43,41 @@ function getGoogleClient() {
     process.env.GOOGLE_OAUTH_REDIRECT_URI ||
       `${process.env.API_BASE_URL || 'http://localhost:4000'}/api/auth/google/callback`
   );
+}
+
+function getStateSecret() {
+  return process.env.JWT_SECRET || process.env.GOOGLE_CLIENT_SECRET || 'studyclaw-google-state';
+}
+
+function signState(value: string) {
+  return crypto.createHmac('sha256', getStateSecret()).update(value).digest('base64url');
+}
+
+function encodeState(state: GoogleAuthState) {
+  const payload = Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
+  return `${payload}.${signState(payload)}`;
+}
+
+export function decodeGoogleAuthState(rawState: string | undefined) {
+  if (!rawState) {
+    return null;
+  }
+
+  const [payload, signature] = rawState.split('.');
+  if (!payload || !signature) {
+    return null;
+  }
+
+  const expected = signState(payload);
+  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as GoogleAuthState;
+  } catch {
+    return null;
+  }
 }
 
 async function getStoredGoogleToken(userId: string) {
@@ -60,12 +107,13 @@ async function googleApiFetch<T>(userId: string, url: string, init?: RequestInit
   return (await response.json()) as T;
 }
 
-export function buildGoogleAuthUrl() {
+export function buildGoogleAuthUrl(input: GoogleAuthState) {
   return getGoogleClient().generateAuthUrl({
     access_type: 'offline',
     include_granted_scopes: true,
     prompt: 'consent select_account',
-    scope: GOOGLE_SCOPES,
+    scope: input.purpose === 'connect' ? GOOGLE_CONNECT_SCOPES : GOOGLE_SIGNIN_SCOPES,
+    state: encodeState(input),
   });
 }
 

@@ -41,5 +41,9 @@ export function isOnboardingComplete(session: StoredSession | null) {
     return false;
   }
 
-  return Boolean(session.onboardingComplete || session.user.agent_type);
+  if (session.user.role === 'admin') {
+    return true;
+  }
+
+  return Boolean(session.onboardingComplete || (session.user.agent_type && session.user.agent_type !== 'custom'));
 }

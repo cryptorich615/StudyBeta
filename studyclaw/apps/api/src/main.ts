@@ -1,7 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import { json } from 'body-parser';
-import { resolve } from 'node:path';
 import { healthRouter } from './modules/health/health.route';
 import { authRouter } from './modules/auth/auth.route';
 import { onboardingRouter } from './modules/onboarding/onboarding.route';
@@ -17,8 +16,9 @@ import { userRouter } from './modules/user/user.route';
 import { googleRouter } from './modules/google/google.route.js';
 import { ensurePlatformSchema } from './lib/platform-schema';
 import { startReminderWorker } from './jobs/reminderWorker';
+import { loadRepoEnv } from './lib/load-env';
 
-process.loadEnvFile?.(resolve(process.cwd(), '../../.env'));
+loadRepoEnv();
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);

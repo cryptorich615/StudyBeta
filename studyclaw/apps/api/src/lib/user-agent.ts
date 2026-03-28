@@ -2,7 +2,13 @@ import { execFile } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { buildCoreTraitsMarkdown } from './agent-config';
+import {
+  buildCoreTraitsMarkdown,
+  buildIdentityMarkdown,
+  getBootstrapIntro,
+  mergeAgentConfig,
+  resolveAgentPresetFromPersonaName,
+} from './agent-config';
 
 const execFileAsync = promisify(execFile);
 
@@ -24,6 +30,113 @@ type OpenClawConfigFile = {
     list?: Array<Record<string, unknown>>;
   };
 };
+
+type UserAgentModelsFile = {
+  providers?: Record<
+    string,
+    {
+      baseUrl?: string;
+      api?: string;
+      authHeader?: boolean;
+      apiKey?: string;
+      models?: Array<{
+        id: string;
+        name?: string;
+        reasoning?: boolean;
+        input?: string[];
+        cost?: {
+          input?: number;
+          output?: number;
+          cacheRead?: number;
+          cacheWrite?: number;
+        };
+        contextWindow?: number;
+        maxTokens?: number;
+      }>;
+    }
+  >;
+};
+
+function extractJsonPayload(raw: string) {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    throw new Error('OpenClaw returned an empty response');
+  }
+
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const char = trimmed[index];
+    if (char !== '{' && char !== '[') {
+      continue;
+    }
+
+    if (char === '[' && trimmed.slice(index, index + 9) === '[plugins]') {
+      continue;
+    }
+
+    const candidate = extractBalancedJson(trimmed, index);
+    if (!candidate) {
+      continue;
+    }
+
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error('OpenClaw did not return parsable JSON');
+}
+
+function extractBalancedJson(value: string, startIndex: number) {
+  const opener = value[startIndex];
+  const closer = opener === '{' ? '}' : opener === '[' ? ']' : null;
+  if (!closer) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = startIndex; index < value.length; index += 1) {
+    const char = value[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === opener) {
+      depth += 1;
+      continue;
+    }
+
+    if (char === closer) {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(startIndex, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
 
 export function buildUserAgentId(userId: string) {
   return `student_${userId.replace(/-/g, '').slice(0, 12)}`;
@@ -50,18 +163,18 @@ export function getAdminWorkspacePath() {
 }
 
 export function getAdminAgentRoot() {
-  return join(OPENCLAW_HOME, 'agents', buildAdminAgentId());
+  return getAdminWorkspacePath();
 }
 
 export function getAdminAgentStateDir() {
-  return join(getAdminAgentRoot(), 'agent');
+  return getAdminWorkspacePath();
 }
 
 async function listAgents() {
   const { stdout } = await execFileAsync('openclaw', ['agents', 'list', '--json'], {
     maxBuffer: 4 * 1024 * 1024,
   });
-  return JSON.parse(stdout) as AgentListResponse;
+  return JSON.parse(extractJsonPayload(stdout)) as AgentListResponse;
 }
 
 async function syncOpenClawAgentModel(agentId: string, modelKey?: string) {
@@ -88,35 +201,6 @@ async function syncOpenClawAgentModel(agentId: string, modelKey?: string) {
   await writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
 }
 
-function getPersonaIdentity(personaName?: string | null, tone?: string | null) {
-  const normalized = personaName?.trim().toLowerCase();
-
-  if (normalized === 'willow') {
-    return {
-      name: 'Willow',
-      creature: 'calm study guide',
-      vibe: 'calm, thoughtful, and steady',
-      emoji: '🌿',
-    };
-  }
-
-  if (normalized === 'dixie') {
-    return {
-      name: 'Dixie',
-      creature: 'sprint study coach',
-      vibe: 'energetic, direct, and motivating',
-      emoji: '⚡',
-    };
-  }
-
-  return {
-    name: personaName?.trim() || 'StudyClaw',
-    creature: 'student study coach',
-    vibe: tone?.trim() || 'calm, practical, supportive',
-    emoji: '📚',
-  };
-}
-
 async function writeWorkspaceFiles(
   userId: string,
   email: string,
@@ -126,7 +210,11 @@ async function writeWorkspaceFiles(
   } = {}
 ) {
   const workspacePath = getUserWorkspacePath(userId);
-  const identity = getPersonaIdentity(options.personaName, options.tone);
+  const agentType = resolveAgentPresetFromPersonaName(options.personaName);
+  const resolvedConfig = mergeAgentConfig(agentType, {
+    personaName: options.personaName,
+    tone: options.tone,
+  });
 
   await mkdir(workspacePath, { recursive: true });
   await writeFile(
@@ -148,15 +236,7 @@ async function writeWorkspaceFiles(
 
   await writeFile(
     join(workspacePath, 'IDENTITY.md'),
-    [
-      '# IDENTITY.md',
-      '',
-      `Name: ${identity.name}`,
-      `Creature: ${identity.creature}`,
-      `Vibe: ${identity.vibe}`,
-      `Emoji: ${identity.emoji}`,
-      '',
-    ].join('\n'),
+    buildIdentityMarkdown(resolvedConfig),
     'utf8'
   );
 
@@ -165,19 +245,143 @@ async function writeWorkspaceFiles(
     [
       '# BOOTSTRAP.md',
       '',
-      `Your identity is already configured. Your name is ${identity.name}.`,
-      `Your role is ${identity.creature}.`,
-      `Your vibe is ${identity.vibe}.`,
+      `Your identity is already configured. Your name is ${resolvedConfig.personaName}.`,
+      'Use the following voice as your opening anchor when the student first engages:',
+      '',
+      getBootstrapIntro(agentType),
       '',
       'Do not ask the student to decide your name or persona again.',
       'Use the configured identity consistently in every response.',
-      'Focus your first conversation on learning the student profile and helping with school work.',
+      'Focus your first conversation on understanding the student profile, immediate workload, and how to help with school work.',
       '',
     ].join('\n'),
     'utf8'
   );
 
   await writeFile(join(workspacePath, 'CORE_TRAITS.md'), buildCoreTraitsMarkdown(), 'utf8');
+}
+
+async function writeAdminWorkspaceFiles(input: {
+  workspacePath: string;
+  ownerUserId: string;
+  email: string;
+}) {
+  const adminIdentity = {
+    personaName: 'StudyClaw Admin',
+    role: 'Master platform administrator and policy authority',
+    tone: 'precise, authoritative, security-aware, and operationally calm',
+    mission: 'Protect platform integrity, keep student workspaces healthy, and enforce platform policy.',
+    powers: [
+      'Inspect platform-wide health, configuration, and recent system activity',
+      'Bootstrap, repair, and reset student agents when the platform allows it',
+      'Manage templates, policies, prompts, runtime defaults, and admin-approved automation',
+      'Debug onboarding, auth, model routing, calendar integration, and workspace state',
+      'Operate with cross-platform visibility that student agents never receive',
+    ],
+    rules: [
+      'Admin is the only agent with full platform powers.',
+      'Admin may inspect platform state across the system, but should expose student-specific data only when operationally necessary and explicitly relevant.',
+      'Admin should prefer repair, rollback-safe changes, and auditability over risky intervention.',
+      'Admin should think like an operator: identify root cause, blast radius, fix, verification, and follow-up.',
+      'Admin must never act like a student coach unless explicitly helping diagnose the coaching stack.',
+    ],
+  };
+
+  await mkdir(input.workspacePath, { recursive: true });
+
+  await writeFile(
+    join(input.workspacePath, 'IDENTITY.md'),
+    [
+      '# IDENTITY.md',
+      '',
+      `Name: ${adminIdentity.personaName}`,
+      `Role: ${adminIdentity.role}`,
+      `Tone: ${adminIdentity.tone}`,
+      `Mission: ${adminIdentity.mission}`,
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+
+  await writeFile(
+    join(input.workspacePath, 'ADMIN.md'),
+    [
+      '# ADMIN.md',
+      '',
+      `Owner email: ${input.email}`,
+      `Owner user id: ${input.ownerUserId}`,
+      'Authority level: full platform administrator',
+      'Scope: the complete StudyClaw platform and all admin-approved maintenance actions',
+      '',
+      '## Platform Powers',
+      ...adminIdentity.powers.map((power) => `- ${power}`),
+      '',
+      '## Operating Rules',
+      ...adminIdentity.rules.map((rule) => `- ${rule}`),
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+
+  await writeFile(
+    join(input.workspacePath, 'BOOTSTRAP.md'),
+    [
+      '# BOOTSTRAP.md',
+      '',
+      'You are already configured as the master StudyClaw admin agent.',
+      'Do not ask anyone to choose your persona or authority level.',
+      'Operate as the platform owner’s administrative agent with full system powers.',
+      'Default to operational clarity: summarize the issue, diagnose the root cause, apply the safest fix, and verify the result.',
+      'When reporting, prioritize: system status, root cause, impacted surface area, action taken, and any residual risk.',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+
+  await writeFile(
+    join(input.workspacePath, 'OPERATIONS.md'),
+    [
+      '# OPERATIONS.md',
+      '',
+      '## Admin Priorities',
+      '- Keep auth, onboarding, chat, study tools, calendar, and reminders operational.',
+      '- Preserve student isolation and never leak data casually across users.',
+      '- Treat migrations, model settings, and workspace state as production-sensitive surfaces.',
+      '',
+      '## Response Pattern',
+      '- Triage the failure mode quickly.',
+      '- Name the likely root cause and affected subsystem.',
+      '- Prefer deterministic fixes and verifiable checks.',
+      '- Report what changed and what still needs attention.',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+
+  await writeFile(
+    join(input.workspacePath, 'POWERS.md'),
+    [
+      '# POWERS.md',
+      '',
+      'Admin is the only agent with all platform powers.',
+      '',
+      '## Allowed Powers',
+      '- Cross-system operational visibility',
+      '- Agent bootstrap and reset authority',
+      '- Policy, template, and prompt governance',
+      '- Runtime and model configuration maintenance',
+      '- Platform debugging and incident response',
+      '',
+      '## Non-Negotiable Restraints',
+      '- Do not abuse admin authority for non-educational or non-operational work.',
+      '- Do not expose sensitive student data unless required for a real operational task.',
+      '- Do not fabricate state, metrics, or outcomes. Verify before claiming.',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+
+  await writeFile(join(input.workspacePath, 'CORE_TRAITS.md'), buildCoreTraitsMarkdown(), 'utf8');
 }
 
 async function ensureEmptyAuthStore(agentStateDir: string) {
@@ -263,7 +467,7 @@ export async function ensureAdminAgent(input: {
 }) {
   const agentId = buildAdminAgentId();
   const workspacePath = getAdminWorkspacePath();
-  const agentStateDir = getAdminAgentStateDir();
+  const agentStateDir = workspacePath;
   const existing = (await listAgents()).agents?.find((agent) => agent.id === agentId);
 
   if (!existing) {
@@ -277,7 +481,7 @@ export async function ensureAdminAgent(input: {
           '--workspace',
           workspacePath,
           '--agent-dir',
-          agentStateDir,
+          workspacePath,
           '--model',
           input.modelKey ?? process.env.OPENCLAW_DEFAULT_MODEL ?? 'openrouter/auto',
           '--non-interactive',
@@ -293,23 +497,14 @@ export async function ensureAdminAgent(input: {
     }
   }
 
+  await syncOpenClawAgentModel(agentId, input.modelKey);
   await mkdir(workspacePath, { recursive: true });
-  await mkdir(agentStateDir, { recursive: true });
   await ensureEmptyAuthStore(agentStateDir);
-  await writeFile(
-    join(workspacePath, 'ADMIN.md'),
-    [
-      '# ADMIN.md',
-      '',
-      `Owner email: ${input.email}`,
-      `Owner user id: ${input.ownerUserId}`,
-      'Role: master StudyClaw admin agent',
-      'Boundaries: never share student data across tenants; operate only through admin-approved routes.',
-      '',
-    ].join('\n'),
-    'utf8'
-  );
-  await writeFile(join(workspacePath, 'CORE_TRAITS.md'), buildCoreTraitsMarkdown(), 'utf8');
+  await writeAdminWorkspaceFiles({
+    workspacePath,
+    ownerUserId: input.ownerUserId,
+    email: input.email,
+  });
 
   return {
     openclawAgentId: agentId,
@@ -328,6 +523,7 @@ export async function bindUserAgentCredential(input: {
   const authData = JSON.parse(authRaw) as {
     version?: number;
     profiles?: Record<string, { type: string; provider: string; key: string }>;
+    lastGood?: Record<string, string>;
     usageStats?: Record<string, { errorCount: number; lastUsed?: number }>;
   };
 
@@ -335,15 +531,66 @@ export async function bindUserAgentCredential(input: {
 
   authData.version = 1;
   authData.profiles = authData.profiles ?? {};
+  authData.lastGood = authData.lastGood ?? {};
   authData.usageStats = authData.usageStats ?? {};
   authData.profiles[profileId] = {
     type: 'api_key',
     provider: input.provider,
     key: input.apiKey,
   };
+  authData.lastGood[input.provider] = profileId;
   authData.usageStats[profileId] = authData.usageStats[profileId] ?? { errorCount: 0 };
 
   await writeFile(authProfilesPath, JSON.stringify(authData, null, 2), 'utf8');
+}
+
+export async function upsertUserAgentModelProvider(input: {
+  userId: string;
+  provider: string;
+  baseUrl: string;
+  apiType: string;
+  authHeader?: boolean;
+  apiKey?: string | null;
+  modelName: string;
+  maxContextWindow?: number | null;
+  maxOutputTokens?: number | null;
+}) {
+  const modelsPath = join(getUserAgentStateDir(input.userId), 'models.json');
+  const modelsRaw = await readFile(modelsPath, 'utf8');
+  const modelsData = JSON.parse(modelsRaw) as UserAgentModelsFile;
+  const providerEntry = modelsData.providers?.[input.provider] ?? {};
+  const existingModels = providerEntry.models ?? [];
+  const nextModel = {
+    id: input.modelName,
+    name: input.modelName,
+    reasoning: false,
+    input: ['text'],
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+    contextWindow: input.maxContextWindow ?? 128000,
+    maxTokens: input.maxOutputTokens ?? 8192,
+  };
+
+  const nextModels = [
+    nextModel,
+    ...existingModels.filter((model) => model.id !== input.modelName),
+  ];
+
+  modelsData.providers = modelsData.providers ?? {};
+  modelsData.providers[input.provider] = {
+    ...providerEntry,
+    baseUrl: input.baseUrl,
+    api: input.apiType,
+    ...(input.authHeader ? { authHeader: true } : {}),
+    ...(input.apiKey ? { apiKey: input.apiKey } : {}),
+    models: nextModels,
+  };
+
+  await writeFile(modelsPath, JSON.stringify(modelsData, null, 2), 'utf8');
 }
 
 export async function syncUserWorkspaceProfile(input: {

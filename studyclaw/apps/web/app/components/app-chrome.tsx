@@ -25,14 +25,33 @@ function isActivePath(pathname: string, href: string) {
 export default function AppChrome({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [session, setSession] = useState<StoredSession | null>(null);
+  const [session, setSession] = useState<StoredSession | null>(() => readStoredSession());
+  const [mounted, setMounted] = useState(false);
+  const sessionResolved = mounted;
+  const onboardingComplete = isOnboardingComplete(session);
   const isPublicRoute =
     pathname === '/' || pathname === '/auth' || pathname === '/login' || pathname === '/signup';
   const isAuthRoute = pathname === '/auth' || pathname === '/login' || pathname === '/signup';
-  const primaryLinks = session ? navLinks : [{ href: '/', label: 'Home', shortLabel: 'Home', icon: LayoutDashboard }, ...navLinks];
-  const brandHref = session ? '/dashboard' : '/';
+  const isOnboardingRoute = pathname === '/onboarding';
+  const shouldLockToOnboarding = sessionResolved && !!session && !onboardingComplete;
+  const shouldBlockPrivateRoute = sessionResolved && !session && !isPublicRoute && !isOnboardingRoute;
+  const shouldHoldRender =
+    !sessionResolved ||
+    shouldBlockPrivateRoute ||
+    (shouldLockToOnboarding && !isOnboardingRoute);
+  const primaryLinks = mounted
+    ? session
+      ? onboardingComplete
+        ? navLinks
+        : []
+      : [{ href: '/', label: 'Home', shortLabel: 'Home', icon: LayoutDashboard }, ...navLinks]
+    : isPublicRoute
+      ? [{ href: '/', label: 'Home', shortLabel: 'Home', icon: LayoutDashboard }, ...navLinks]
+      : [];
+  const brandHref = mounted ? (session ? (onboardingComplete ? '/dashboard' : '/onboarding') : '/') : isPublicRoute ? '/' : '/onboarding';
 
   useEffect(() => {
+    setMounted(true);
     setSession(readStoredSession());
   }, [pathname]);
 
@@ -43,18 +62,64 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
   const handleLogout = () => {
     clearStoredSession();
     setSession(null);
-    router.push('/login');
+    router.push('/auth?mode=login');
   };
 
-  // Mandatory onboarding gate: redirect if logged in but no agent set up
   useEffect(() => {
-    if (!session) return;
-    const isPublic = pathname === '/' || pathname === '/login' || pathname === '/auth' || pathname === '/signup';
-    if (isPublic || pathname === '/onboarding') return;
-    if (!isOnboardingComplete(session)) {
-      router.replace('/onboarding');
+    if (!sessionResolved) {
+      return;
     }
-  }, [pathname, router, session]);
+
+    if (!session) {
+      if (!isPublicRoute && !isOnboardingRoute) {
+        router.replace('/auth?mode=login');
+      }
+      return;
+    }
+
+    if (!onboardingComplete && !isOnboardingRoute) {
+      router.replace('/onboarding');
+      return;
+    }
+
+    if (onboardingComplete && isOnboardingRoute) {
+      router.replace('/dashboard');
+    }
+  }, [isOnboardingRoute, isPublicRoute, onboardingComplete, pathname, router, session, sessionResolved]);
+
+  if (shouldHoldRender) {
+    return (
+      <div className="min-h-screen transition-colors duration-500 bg-background">
+        <header className="sticky top-4 z-50 mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between h-16 rounded-3xl border border-border/50 bg-background/70 backdrop-blur-2xl px-4 shadow-xl shadow-foreground/5">
+            <Link href={brandHref} className="flex items-center gap-3 group transition-transform hover:scale-[1.02]">
+              <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-primary to-primary-strong flex items-center justify-center text-[var(--icon-contrast)] font-bold text-lg shadow-lg shadow-primary/30">
+                SC
+              </div>
+              <div className="hidden sm:block">
+                <div className="font-display font-bold text-lg leading-none tracking-tight">StudyClaw</div>
+              </div>
+            </Link>
+            <ThemeToggle />
+          </div>
+        </header>
+
+        <main className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-32 pt-12">
+          <section className="hero-card">
+            <p className="insight-chip">Onboarding Gate</p>
+            <h1 className="hero-title">
+              {session ? 'Finishing your agent setup.' : 'Checking your session.'}
+            </h1>
+            <p className="hero-description">
+              {session
+                ? 'StudyClaw locks the rest of the workspace until your agent is fully launched and onboarding is completed.'
+                : 'Redirecting you to sign in so onboarding can continue.'}
+            </p>
+          </section>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen transition-colors duration-500 bg-background">
@@ -74,7 +139,7 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
               </div>
             </Link>
 
-            {!isPublicRoute ? (
+            {!isPublicRoute && primaryLinks.length ? (
               <nav className="hidden md:flex items-center gap-1">
                 {primaryLinks.map((link) => (
                   <Link
@@ -101,11 +166,11 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
                   className="w-1.5 h-1.5 rounded-full bg-success animate-pulse"
                   style={{ boxShadow: '0 0 8px var(--success-soft)' }}
                 />
-                {session ? session.user.full_name || session.user.email : 'Guest Mode'}
+                {mounted ? (session ? session.user.full_name || session.user.email : 'Guest Mode') : 'Loading'}
               </div>
             ) : null}
             
-            {!session && (
+            {mounted && !session && (
               !isAuthRoute ? (
                 <div className="flex items-center gap-2">
                   <Button variant="ghost" size="sm" className="rounded-2xl font-bold" asChild>
@@ -134,7 +199,7 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
       </main>
 
       {/* Mobile Dock */}
-      <nav className={cn("fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-md md:hidden", isPublicRoute && "hidden")}>
+      <nav className={cn("fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-md md:hidden", (isPublicRoute || !primaryLinks.length) && "hidden")}>
         <div className="flex items-center justify-around p-2 rounded-3xl border border-border/50 bg-background/80 backdrop-blur-2xl shadow-2xl shadow-foreground/10">
           {primaryLinks.map((link) => {
             const Icon = link.icon;

@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { writeStoredSession } from '../../../lib/session';
+import { isOnboardingComplete, writeStoredSession } from '../../../lib/session';
 
 type CallbackPayload = {
   user: {
@@ -35,7 +35,7 @@ function AuthCallbackContent() {
 
     try {
       const parsed = JSON.parse(decodeBase64Url(payload)) as CallbackPayload;
-      writeStoredSession({
+      const nextSession = {
         user: {
           id: parsed.user.id,
           email: parsed.user.email,
@@ -45,8 +45,9 @@ function AuthCallbackContent() {
         },
         accessToken: parsed.accessToken,
         onboardingComplete: parsed.onboardingComplete,
-      });
-      router.replace(parsed.onboardingComplete ? '/dashboard' : '/onboarding');
+      };
+      writeStoredSession(nextSession);
+      router.replace(isOnboardingComplete(nextSession) ? '/dashboard' : '/onboarding');
     } catch {
       router.replace('/login');
     }

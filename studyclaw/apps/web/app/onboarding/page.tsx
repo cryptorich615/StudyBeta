@@ -30,41 +30,151 @@ const AGENTS = [
   },
 ];
 
+const DEFAULT_MODELS = [
+  {
+    key: 'openrouter/auto',
+    name: 'OpenRouter Auto',
+    provider: 'openrouter',
+    oauthAvailable: false,
+    isFree: true,
+  },
+  {
+    key: 'openrouter/free',
+    name: 'OpenRouter Free',
+    provider: 'openrouter',
+    oauthAvailable: false,
+    isFree: true,
+  },
+  {
+    key: 'ollama/lfm2.5-thinking:latest',
+    name: 'LFM 2.5 Thinking',
+    provider: 'ollama',
+    oauthAvailable: false,
+    isFree: true,
+  },
+  {
+    key: 'minimax/MiniMax-M2.7',
+    name: 'MiniMax M2.7',
+    provider: 'minimax',
+    oauthAvailable: false,
+    isFree: false,
+  },
+  {
+    key: 'minimax/MiniMax-M2.5',
+    name: 'MiniMax M2.5',
+    provider: 'minimax',
+    oauthAvailable: false,
+    isFree: false,
+  },
+  {
+    key: 'openai-codex/gpt-5.3-codex',
+    name: 'GPT-5.3 Codex',
+    provider: 'openai-codex',
+    oauthAvailable: false,
+    isFree: false,
+  },
+] as const;
+
+type OnboardingModelOption = {
+  key: string;
+  name: string;
+  provider: string;
+  oauthAvailable?: boolean;
+  isFree?: boolean;
+};
+
+function mergeModelOptions(models: OnboardingModelOption[]) {
+  return Array.from(
+    models.reduce((acc, model) => {
+      if (!model?.key) {
+        return acc;
+      }
+
+      const current = acc.get(model.key);
+      acc.set(model.key, current ? { ...current, ...model } : model);
+      return acc;
+    }, new Map<string, OnboardingModelOption>())
+  )
+    .map(([, model]) => model)
+    .sort((left, right) => {
+      const leftDefault = DEFAULT_MODELS.some((model) => model.key === left.key);
+      const rightDefault = DEFAULT_MODELS.some((model) => model.key === right.key);
+
+      if (leftDefault !== rightDefault) {
+        return leftDefault ? -1 : 1;
+      }
+
+      if (!!left.isFree !== !!right.isFree) {
+        return left.isFree ? -1 : 1;
+      }
+
+      if (left.provider !== right.provider) {
+        return left.provider.localeCompare(right.provider);
+      }
+
+      return left.name.localeCompare(right.name);
+    });
+}
+
+function isValidPreset(value: string): value is 'quick_start_1' | 'quick_start_2' {
+  return value === 'quick_start_1' || value === 'quick_start_2';
+}
+
 function OnboardingPageContent() {
   const router = useRouter();
   const [step, setStep] = useState<1 | 2>(1);
   const [selectedAgent, setSelectedAgent] = useState<string>('');
-  const [models, setModels] = useState<{ key: string; name: string; provider: string }[]>([]);
-  const [modelKey, setModelKey] = useState('');
+  const [models, setModels] = useState<OnboardingModelOption[]>(() => mergeModelOptions([...DEFAULT_MODELS]));
+  const [modelKey, setModelKey] = useState('openrouter/auto');
   const [apiKey, setApiKey] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
-  const [userId, setUserId] = useState<string | null>(null);
+  const [existingCredential, setExistingCredential] = useState<{ providerId?: string; hasApiKey?: boolean } | null>(null);
   const searchParams = useSearchParams();
-  const [modelSearch, setModelSearch] = useState('');
 
   useEffect(() => {
-    // First, try to consume any payload from URL (e.g., from OAuth redirect)
-    const payloadSession = consumePayloadFromUrl(searchParams);
+    consumePayloadFromUrl(searchParams);
     
     const parsed = readStoredSession();
     if (!parsed?.user) { router.push('/auth?mode=login'); return; }
-    setUserId(parsed.user.id);
-    // If already onboarded, go to dashboard
     if (isOnboardingComplete(parsed)) { router.push('/dashboard'); return; }
-    // Load models
-    apiFetch('/api/onboarding/options').then(res => res.json()).then(data => {
-      const nextModels = data.models ?? [];
-      setModels(nextModels);
-      const preferredModel =
-        nextModels.find((model: { key: string }) => model.key === 'openrouter/auto') ??
-        nextModels.find((model: { provider: string }) => model.provider === 'openrouter') ??
-        nextModels[0];
-      if (preferredModel) {
-        setModelKey(preferredModel.key);
-      }
-    }).catch(() => {});
-  }, []);
+
+    void Promise.allSettled([
+      apiFetch('/api/onboarding/options'),
+      apiFetch('/api/onboarding/status'),
+    ])
+      .then(async ([optionsResult, statusResult]) => {
+        const optionsData =
+          optionsResult.status === 'fulfilled' && optionsResult.value.ok
+            ? await optionsResult.value.json().catch(() => null)
+            : null;
+        const statusData =
+          statusResult.status === 'fulfilled' && statusResult.value.ok
+            ? await statusResult.value.json().catch(() => null)
+            : null;
+        const nextModels = mergeModelOptions([...(optionsData?.models ?? []), ...DEFAULT_MODELS]);
+        const savedPreset = statusData?.agent?.preset_key ?? statusData?.agent?.agent_type ?? '';
+
+        setModels(nextModels);
+        setExistingCredential(statusData?.credentials ?? null);
+        setSelectedAgent(isValidPreset(savedPreset) ? savedPreset : '');
+
+        const preferredModel =
+          nextModels.find((model: { key: string }) => model.key === statusData?.agent?.model_key) ??
+          nextModels.find((model: { key: string }) => model.key === 'openrouter/auto') ??
+          nextModels.find((model: { key: string }) => model.key === 'openrouter/free') ??
+          nextModels.find((model: { key: string }) => model.key === 'ollama/lfm2.5-thinking:latest') ??
+          nextModels.find((model: { provider: string }) => model.provider === 'openrouter') ??
+          nextModels[0];
+        if (preferredModel) {
+          setModelKey(preferredModel.key);
+        }
+      })
+      .catch(() => {
+        setModels(mergeModelOptions([...DEFAULT_MODELS]));
+        setModelKey((current) => current || 'openrouter/auto');
+      });
+  }, [router, searchParams]);
 
   const handleAgentSelect = (key: string) => {
     setSelectedAgent(key);
@@ -79,31 +189,34 @@ function OnboardingPageContent() {
   const handleSubmit = async () => {
     if (!modelKey) { setError('Please select a model provider.'); return; }
     if (requiresApiKey && !apiKey.trim()) { setError('API key is required to activate your agent.'); return; }
+    const effectiveAgentPreset = isValidPreset(selectedAgent) ? selectedAgent : 'quick_start_2';
     setIsSubmitting(true);
     setError('');
     try {
       const res = await apiFetch('/api/onboarding/model-config', {
         method: 'POST',
-        body: JSON.stringify({ modelKey, apiKey: apiKey.trim(), agentPreset: selectedAgent }),
+        body: JSON.stringify({ modelKey, apiKey: apiKey.trim(), agentPreset: effectiveAgentPreset }),
       });
-      const data = await res.json();
-      if (!res.ok) { setError(data.message ?? 'Setup failed. Please try again.'); return; }
-      // Refresh session to mark onboarding complete
-      const statusRes = await apiFetch('/api/onboarding/status');
-      if (statusRes.ok) {
-        const status = await statusRes.json();
-        const session = readStoredSession();
-        if (session) {
-          writeStoredSession({
-            ...session,
-            user: {
-              ...session.user,
-              agent_type: status.agent?.agent_type ?? selectedAgent,
-            },
-            onboardingComplete: true,
-          });
-        }
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
       }
+      if (!res.ok) { setError(data?.message ?? 'Setup failed. Please try again.'); return; }
+
+      const session = readStoredSession();
+      if (session) {
+        writeStoredSession({
+          ...session,
+          user: {
+            ...session.user,
+            agent_type: effectiveAgentPreset,
+          },
+          onboardingComplete: true,
+        });
+      }
+
       router.push('/dashboard');
     } catch (e) {
       setError('Connection error. Please try again.');
@@ -113,24 +226,28 @@ function OnboardingPageContent() {
   };
 
   const selectedModel = models.find(m => m.key === modelKey);
-  const preferredOpenRouterModel =
-    models.find((model) => model.key === 'openrouter/auto') ??
-    models.find((model) => model.provider === 'openrouter') ??
-    null;
-  const requiresApiKey = selectedModel?.provider !== 'ollama';
-  const filteredModels = models.filter((m: any) => 
-    modelSearch === '' || 
-    m.name.toLowerCase().includes(modelSearch.toLowerCase()) ||
-    m.provider.toLowerCase().includes(modelSearch.toLowerCase()) ||
-    m.key.toLowerCase().includes(modelSearch.toLowerCase())
-  );
+  const hasSavedCredential = !!existingCredential?.hasApiKey && existingCredential?.providerId === selectedModel?.provider;
+  const requiresApiKey = selectedModel?.provider !== 'ollama' && !hasSavedCredential;
 
   const handleOpenRouterConnect = () => {
-    if (preferredOpenRouterModel) {
-      setModelKey(preferredOpenRouterModel.key);
+    const openRouterModel =
+      models.find((model) => model.key === 'openrouter/auto') ??
+      models.find((model) => model.provider === 'openrouter') ??
+      null;
+    if (openRouterModel) {
+      setModelKey(openRouterModel.key);
     }
     setError('');
     window.open('https://openrouter.ai/keys', '_blank', 'noopener,noreferrer');
+  };
+
+  const handleMiniMaxConnect = () => {
+    const miniMaxModel = models.find((model) => model.provider === 'minimax') ?? null;
+    if (miniMaxModel) {
+      setModelKey(miniMaxModel.key);
+    }
+    setError('');
+    window.open('https://platform.minimaxi.com/user-center/basic-information/interface-key', '_blank', 'noopener,noreferrer');
   };
 
   return (
@@ -215,8 +332,8 @@ function OnboardingPageContent() {
               <p className="text-sm font-semibold text-foreground">Connect OpenRouter for the fastest setup</p>
               <p className="mt-2 text-sm text-muted-foreground">
                 StudyClaw needs a provider connection so your agent can actually generate responses, save your model choice,
-                and run chats, coaching, and study tools on your own account. Connect OpenRouter to StudyClaw to use it
-                as your main provider and model source.
+                and run chats, coaching, and study tools on your own account. Google sign-in only unlocks your account.
+                Calendar and Drive can be connected later in settings without blocking this setup.
               </p>
               <button
                 type="button"
@@ -250,8 +367,17 @@ function OnboardingPageContent() {
             {/* API Key */}
             <div>
               <label className="block text-sm font-medium mb-2">
-                API Key {requiresApiKey ? <span className="text-destructive">*</span> : <span className="text-muted-foreground">(not needed for Ollama)</span>}
+                API Key {requiresApiKey ? <span className="text-destructive">*</span> : <span className="text-muted-foreground">(already saved or not needed)</span>}
               </label>
+              {selectedModel?.provider === 'minimax' ? (
+                <button
+                  type="button"
+                  onClick={handleMiniMaxConnect}
+                  className="mb-3 inline-flex items-center rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 text-sm font-medium text-primary hover:bg-primary/15"
+                >
+                  Get MiniMax API Key
+                </button>
+              ) : null}
               <input
                 type="password"
                 value={apiKey}
@@ -261,13 +387,17 @@ function OnboardingPageContent() {
                     ? 'No API key needed for local Ollama'
                     : selectedModel?.provider === 'openrouter'
                       ? 'sk-or-v1-...'
+                      : selectedModel?.provider === 'minimax'
+                        ? 'Enter your MiniMax API key'
                       : 'Enter your API key'
                 }
                 className="w-full bg-input border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                 disabled={!requiresApiKey}
               />
               <p className="text-xs text-muted-foreground mt-1">
-                {requiresApiKey
+                {hasSavedCredential
+                  ? 'You already have a saved key for this provider, so you do not need to enter it again.'
+                  : requiresApiKey
                   ? 'Your key is encrypted and never shared. Used only to power your agent.'
                   : 'This model runs through your local Ollama setup, so no API key is required.'}
               </p>

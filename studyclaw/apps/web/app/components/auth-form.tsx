@@ -7,7 +7,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { ArrowRight, CheckCircle2, LockKeyhole, Mail } from 'lucide-react';
 import { Button } from './ui/button';
 import { apiFetch, resolveApiUrl } from '../../lib/api';
-import { readStoredSession, writeStoredSession, type StoredSession } from '../../lib/session';
+import { isOnboardingComplete, readStoredSession, writeStoredSession, type StoredSession } from '../../lib/session';
 
 type Mode = 'login' | 'signup';
 
@@ -86,12 +86,14 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
       writeStoredSession(data);
       setSaved(data);
 
-      const nextPath = data.onboardingComplete ? '/dashboard' : '/onboarding';
+      const nextPath = isOnboardingComplete(data) ? '/dashboard' : '/onboarding';
       setStatus(
         mode === 'signup'
           ? data.existingUser
             ? 'Account exists. Opening your workspace...'
-            : 'Account created. Taking you to onboarding...'
+            : nextPath === '/dashboard'
+              ? 'Account created. Opening your workspace...'
+              : 'Account created. Taking you to onboarding...'
           : 'Signed in. Opening your workspace...'
       );
 

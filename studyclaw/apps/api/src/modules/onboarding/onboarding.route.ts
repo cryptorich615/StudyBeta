@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { db } from '../../lib/db';
 import { requireAuth, type AuthedRequest } from '../../lib/auth';
-import { loadOpenClawModels, resolveModelSelection } from '../../lib/openclaw-config';
+import { loadConfiguredOpenClawDefaults, loadOpenClawModels, resolveModelSelection } from '../../lib/openclaw-config';
 import { buildBootstrapStudyPrompt } from '../../lib/bootstrap';
 import { buildLockedSystemPrompt, mergeAgentConfig, QUICK_START_AGENTS } from '../../lib/agent-config';
 import {
@@ -14,37 +14,127 @@ import {
 } from '../../lib/user-agent';
 import { getGoogleConnectionStatus } from '../../lib/google-service';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
+import { syncUserModelRuntimeConfig } from '../../lib/model-settings';
 
 export const onboardingRouter = Router();
 const LOCAL_PROVIDER_PLACEHOLDER_KEYS: Record<string, string> = {
   ollama: 'local-ollama-no-key-required',
 };
-
-async function ensureUserModelConfigsTable() {
-  await db.query(`
-    create table if not exists user_model_credentials (
-      user_id uuid primary key references users(id) on delete cascade,
-      provider_id text not null,
-      api_key text,
-      oauth_connected boolean not null default false,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now()
-    )
-  `);
-}
+const DEFAULT_ONBOARDING_MODELS = [
+  {
+    key: 'openrouter/auto',
+    name: 'OpenRouter Auto',
+    provider: 'openrouter',
+    oauthAvailable: false,
+    available: true,
+  },
+  {
+    key: 'openrouter/free',
+    name: 'OpenRouter Free',
+    provider: 'openrouter',
+    oauthAvailable: false,
+    available: true,
+  },
+  {
+    key: 'ollama/lfm2.5-thinking:latest',
+    name: 'LFM 2.5 Thinking',
+    provider: 'ollama',
+    oauthAvailable: false,
+    available: true,
+  },
+  {
+    key: 'minimax/MiniMax-M2.7',
+    name: 'MiniMax M2.7',
+    provider: 'minimax',
+    oauthAvailable: false,
+    available: true,
+  },
+  {
+    key: 'minimax/MiniMax-M2.5',
+    name: 'MiniMax M2.5',
+    provider: 'minimax',
+    oauthAvailable: false,
+    available: true,
+  },
+  {
+    key: 'openai-codex/gpt-5.3-codex',
+    name: 'GPT-5.3 Codex',
+    provider: 'openai-codex',
+    oauthAvailable: false,
+    available: true,
+  },
+] as const;
 
 type AgentType = 'custom' | 'quick_start_1' | 'quick_start_2';
 
-async function ensureAgentProfile(userId: string, modelKey?: string, agentType: AgentType = 'custom') {
+function normalizeAgentType(value: string | null | undefined): AgentType {
+  if (value === 'quick_start_1' || value === 'quick_start_2' || value === 'custom') {
+    return value;
+  }
+
+  return 'quick_start_2';
+}
+
+function mergeOnboardingModels(models: Awaited<ReturnType<typeof loadOpenClawModels>>) {
+  return Array.from(
+    [...DEFAULT_ONBOARDING_MODELS, ...models].reduce((acc, model) => {
+      if (!acc.has(model.key)) {
+        acc.set(model.key, { ...model });
+        return acc;
+      }
+
+      acc.set(model.key, {
+        ...acc.get(model.key),
+        ...model,
+      });
+      return acc;
+    }, new Map<string, (typeof models)[number]>())
+  ).map(([, model]) => model);
+}
+
+async function loadOnboardingModelsFast() {
+  try {
+    const configuredDefaults = await loadConfiguredOpenClawDefaults();
+    const models = await Promise.race([
+      loadOpenClawModels(),
+      new Promise<Awaited<ReturnType<typeof loadOpenClawModels>>>((resolve) =>
+        setTimeout(() => resolve([]), 1500)
+      ),
+    ]);
+
+    return mergeOnboardingModels([...configuredDefaults, ...models]);
+  } catch {
+    const configuredDefaults = await loadConfiguredOpenClawDefaults().catch(() => []);
+    return mergeOnboardingModels(configuredDefaults);
+  }
+}
+
+async function ensureAgentProfile(userId: string, modelKey?: string | null, agentType?: AgentType | null) {
+  const existingProfileResult = await db.query(
+    `select model_key, preset_key
+     from agent_profiles
+     where user_id = $1
+     limit 1`,
+    [userId]
+  );
+  const existingProfile = existingProfileResult.rows[0] as
+    | { model_key?: string | null; preset_key?: string | null }
+    | undefined;
+  const effectiveModelKey =
+    modelKey?.trim() ||
+    existingProfile?.model_key ||
+    process.env.OPENCLAW_DEFAULT_MODEL ||
+    'openrouter/auto';
+  const normalizedAgentType = normalizeAgentType(agentType ?? existingProfile?.preset_key);
   const agentId = buildUserAgentId(userId);
-  const mergedConfig = mergeAgentConfig(agentType);
+  const mergedConfig = mergeAgentConfig(normalizedAgentType);
   const systemPrompt = buildLockedSystemPrompt(mergedConfig);
 
   const result = await db.query(
     `insert into agent_profiles (user_id, openclaw_agent_id, model_key, system_prompt, persona_name, tone, verbosity, teaching_style, reminder_style, preset_key, custom_instructions, core_traits_version)
      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      on conflict (user_id) do update set
-       model_key = coalesce(excluded.model_key, agent_profiles.model_key),
+      model_key = coalesce(excluded.model_key, agent_profiles.model_key),
        preset_key = excluded.preset_key,
        persona_name = excluded.persona_name,
        tone = excluded.tone,
@@ -56,16 +146,16 @@ async function ensureAgentProfile(userId: string, modelKey?: string, agentType: 
        core_traits_version = excluded.core_traits_version
      returning *`,
     [
-      userId, 
-      agentId, 
-      modelKey ?? process.env.OPENCLAW_DEFAULT_MODEL ?? 'openrouter/auto', 
-      systemPrompt, 
+      userId,
+      agentId,
+      effectiveModelKey,
+      systemPrompt,
       mergedConfig.personaName,
       mergedConfig.tone,
       mergedConfig.verbosity,
       mergedConfig.teachingStyle,
       mergedConfig.reminderStyle,
-      agentType,
+      normalizedAgentType,
       mergedConfig.customInstructions,
       mergedConfig.coreTraitsVersion,
     ]
@@ -80,7 +170,7 @@ async function ensureAgentProfile(userId: string, modelKey?: string, agentType: 
        config = excluded.config,
        status = excluded.status,
        updated_at = now()`,
-    [userId, agentId, mergedConfig.personaName, agentType, JSON.stringify(mergedConfig)]
+    [userId, agentId, mergedConfig.personaName, normalizedAgentType, JSON.stringify(mergedConfig)]
   );
 
   await db.query(
@@ -122,8 +212,7 @@ const LOCKED_PERSONALITIES: Record<string, {
 
 onboardingRouter.get('/options', requireAuth, async (_req, res) => {
   await ensurePlatformSchema();
-  await ensureUserModelConfigsTable();
-  const models = await loadOpenClawModels();
+  const models = await loadOnboardingModelsFast();
   const FREE_MODEL_KEYS = new Set(['ollama/lfm2.5-thinking:latest', 'openrouter/auto', 'openrouter/free']);
   const taggedModels = (models as any[]).map((m: any) => ({
     ...m,
@@ -146,7 +235,6 @@ onboardingRouter.get('/options', requireAuth, async (_req, res) => {
 
 onboardingRouter.get('/status', requireAuth, async (req: AuthedRequest, res) => {
   await ensurePlatformSchema();
-  await ensureUserModelConfigsTable();
   await ensurePersonalAgent({ userId: req.user!.id, email: req.user!.email ?? `${req.user!.id}@local.invalid` });
   const [profileResult, agentResult, credentialResult, studentAgentResult, googleStatus] = await Promise.all([
     db.query(`select * from student_profiles where user_id = $1`, [req.user!.id]),
@@ -180,67 +268,80 @@ onboardingRouter.get('/status', requireAuth, async (req: AuthedRequest, res) => 
 });
 
 onboardingRouter.post('/model-config', requireAuth, async (req: AuthedRequest, res) => {
-  await ensurePlatformSchema();
-  await ensureUserModelConfigsTable();
+  try {
+    await ensurePlatformSchema();
 
-  const { modelKey, apiKey, agentPreset } = req.body as { modelKey?: string; apiKey?: string; agentPreset?: AgentType };
-  if (!modelKey) {
-    return res.status(400).json({ error: 'bad_request', message: 'modelKey is required' });
+    const { modelKey, apiKey, agentPreset } = req.body as { modelKey?: string; apiKey?: string; agentPreset?: AgentType };
+    if (!modelKey) {
+      return res.status(400).json({ error: 'bad_request', message: 'modelKey is required' });
+    }
+
+    const model = resolveModelSelection(modelKey, await loadOpenClawModels());
+    if (!model) {
+      return res.status(400).json({ error: 'bad_request', message: 'Unsupported model selection' });
+    }
+
+    if (agentPreset && agentPreset !== 'quick_start_1' && agentPreset !== 'quick_start_2') {
+      return res.status(400).json({ error: 'bad_request', message: 'Agent must be Dixie (quick_start_1) or Willow (quick_start_2)' });
+    }
+
+    const normalizedAgentPreset = normalizeAgentType(agentPreset);
+
+    await ensurePersonalAgent({
+      userId: req.user!.id,
+      email: req.user!.email ?? `${req.user!.id}@local.invalid`,
+      modelKey: model.key,
+    });
+    const agent = await ensureAgentProfile(req.user!.id, modelKey, normalizedAgentPreset);
+    await syncUserWorkspaceIdentity({
+      userId: req.user!.id,
+      email: req.user!.email ?? `${req.user!.id}@local.invalid`,
+      personaName: agent.persona_name,
+      tone: agent.tone,
+    });
+    const existingCredential = await db.query(`select api_key from user_model_credentials where user_id = $1`, [req.user!.id]);
+    const nextApiKey =
+      apiKey?.trim() ||
+      existingCredential.rows[0]?.api_key ||
+      LOCAL_PROVIDER_PLACEHOLDER_KEYS[model.provider] ||
+      null;
+
+    if (!nextApiKey) {
+      return res.status(400).json({ error: 'bad_request', message: 'apiKey is required for the first model setup' });
+    }
+
+    await db.query(
+      `insert into user_model_credentials (user_id, provider_id, api_key, oauth_connected, updated_at)
+       values ($1, $2, $3, false, now())
+       on conflict (user_id) do update set
+         provider_id = excluded.provider_id,
+         api_key = excluded.api_key,
+         oauth_connected = excluded.oauth_connected,
+         updated_at = now()`,
+      [req.user!.id, model.provider, nextApiKey]
+    );
+    await bindUserAgentCredential({ userId: req.user!.id, provider: model.provider, apiKey: nextApiKey });
+    await syncUserModelRuntimeConfig({
+      userId: req.user!.id,
+      email: req.user!.email ?? `${req.user!.id}@local.invalid`,
+      modelKey: model.key,
+    });
+
+    await db.query(`update agent_profiles set model_key = $2 where user_id = $1`, [req.user!.id, modelKey]);
+    await db.query(`update student_profiles set onboarding_complete = true where user_id = $1`, [req.user!.id]);
+
+    res.json({
+      ok: true,
+      oauthAvailable: model.oauthAvailable,
+      agentId: agent.openclaw_agent_id,
+    });
+  } catch (error) {
+    console.error('Onboarding model-config failed:', error);
+    res.status(500).json({
+      error: 'model_config_failed',
+      message: error instanceof Error ? error.message : 'Failed to launch your agent',
+    });
   }
-
-  const model = resolveModelSelection(modelKey, await loadOpenClawModels());
-  if (!model) {
-    return res.status(400).json({ error: 'bad_request', message: 'Unsupported model selection' });
-  }
-
-  await ensurePersonalAgent({
-    userId: req.user!.id,
-    email: req.user!.email ?? `${req.user!.id}@local.invalid`,
-    modelKey: model.key,
-  });
-  const agent = await ensureAgentProfile(req.user!.id, modelKey, agentPreset ?? 'quick_start_2');
-  await syncUserWorkspaceIdentity({
-    userId: req.user!.id,
-    email: req.user!.email ?? `${req.user!.id}@local.invalid`,
-    personaName: agent.persona_name,
-    tone: agent.tone,
-  });
-  const existingCredential = await db.query(`select api_key from user_model_credentials where user_id = $1`, [req.user!.id]);
-  const nextApiKey =
-    apiKey?.trim() ||
-    existingCredential.rows[0]?.api_key ||
-    LOCAL_PROVIDER_PLACEHOLDER_KEYS[model.provider] ||
-    null;
-
-  if (!nextApiKey) {
-    return res.status(400).json({ error: 'bad_request', message: 'apiKey is required for the first model setup' });
-  }
-
-  // Enforce: only Dixie (quick_start_1) or Willow (quick_start_2) are allowed
-  if (agentPreset && agentPreset !== 'quick_start_1' && agentPreset !== 'quick_start_2') {
-    return res.status(400).json({ error: 'bad_request', message: 'Agent must be Dixie (quick_start_1) or Willow (quick_start_2)' });
-  }
-
-  await db.query(
-    `insert into user_model_credentials (user_id, provider_id, api_key, oauth_connected, updated_at)
-     values ($1, $2, $3, false, now())
-     on conflict (user_id) do update set
-       provider_id = excluded.provider_id,
-       api_key = excluded.api_key,
-       oauth_connected = excluded.oauth_connected,
-       updated_at = now()`,
-    [req.user!.id, model.provider, nextApiKey]
-  );
-  await bindUserAgentCredential({ userId: req.user!.id, provider: model.provider, apiKey: nextApiKey });
-
-  await db.query(`update agent_profiles set model_key = $2 where user_id = $1`, [req.user!.id, modelKey]);
-  await db.query(`update student_profiles set onboarding_complete = true where user_id = $1`, [req.user!.id]);
-
-  res.json({
-    ok: true,
-    oauthAvailable: model.oauthAvailable,
-    agentId: agent.openclaw_agent_id,
-  });
 });
 
 onboardingRouter.post('/bootstrap/start', requireAuth, async (req: AuthedRequest, res) => {

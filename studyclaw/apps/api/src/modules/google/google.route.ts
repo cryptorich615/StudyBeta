@@ -1,7 +1,7 @@
 import { Router } from 'express';
-import { db } from '../../lib/db';
 import { requireAuth, type AuthedRequest } from '../../lib/auth';
 import { 
+  buildGoogleAuthUrl,
   getGoogleConnectionStatus, 
   listUpcomingCalendarEvents, 
   listRecentDriveFiles 
@@ -9,6 +9,28 @@ import {
 
 export const googleRouter = Router();
 googleRouter.use(requireAuth);
+
+googleRouter.get('/connect', async (req: AuthedRequest, res) => {
+  const returnTo = typeof req.query.returnTo === 'string' ? req.query.returnTo : '/settings';
+  const url = buildGoogleAuthUrl({
+    purpose: 'connect',
+    userId: req.user!.id,
+    returnTo,
+  });
+
+  res.redirect(url);
+});
+
+googleRouter.get('/connect-url', async (req: AuthedRequest, res) => {
+  const returnTo = typeof req.query.returnTo === 'string' ? req.query.returnTo : '/settings';
+  const url = buildGoogleAuthUrl({
+    purpose: 'connect',
+    userId: req.user!.id,
+    returnTo,
+  });
+
+  res.json({ url });
+});
 
 // GET / - returns connection status
 googleRouter.get('/', async (req: AuthedRequest, res) => {

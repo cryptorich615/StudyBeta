@@ -1,5 +1,11 @@
 import { writeStoredSession, type StoredSession } from './session';
 
+function decodeBase64Url(value: string) {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padding = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
+  return window.atob(`${normalized}${padding}`);
+}
+
 /**
  * Reads ?payload= from URL searchParams, decodes it, stores the session,
  * removes the param from URL, and returns the session data.
@@ -13,7 +19,7 @@ export function consumePayloadFromUrl(searchParams: URLSearchParams): StoredSess
   if (!payload) return null;
 
   try {
-    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as StoredSession;
+    const decoded = JSON.parse(decodeBase64Url(payload)) as StoredSession;
     
     if (decoded.accessToken && decoded.user?.id) {
       writeStoredSession(decoded);

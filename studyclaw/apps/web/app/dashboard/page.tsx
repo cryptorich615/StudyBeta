@@ -1,9 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState, Suspense } from 'react';
-import { useSearchParams } from 'next/navigation';
-import { apiFetch } from '../../lib/api';
+import { useEffect, useState } from 'react';
+import { apiFetch, beginGoogleConnect } from '../../lib/api';
 import { readStoredSession } from '../../lib/session';
 import { consumePayloadFromUrl } from '../../lib/consumePayload';
 import StatusBanner from '../components/status-banner';
@@ -12,8 +11,15 @@ type DashboardTask = {
   id: string;
   title: string;
   type: string;
+  status?: string;
   reminder_at: string;
   urgencyLabel: string;
+};
+
+type TaskDraft = {
+  title: string;
+  type: string;
+  reminderAt: string;
 };
 
 type DashboardData = {
@@ -72,6 +78,16 @@ function formatDate(value: string) {
   });
 }
 
+function toLocalDateTimeValue(value: string) {
+  const date = new Date(value);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
 function isExamTask(task: DashboardTask) {
   const examPattern = /exam|midterm|final|quiz|test/i;
   return examPattern.test(task.type) || examPattern.test(task.title);
@@ -96,14 +112,58 @@ function buildUpcomingExams(data: DashboardData | null) {
 function DashboardPageContent() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [status, setStatus] = useState('');
-  const [hasSession, setHasSession] = useState(false);
-  const searchParams = useSearchParams();
+  const [hasSession, setHasSession] = useState<boolean | null>(() => {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+
+    return !!readStoredSession()?.user?.id;
+  });
+  const [loading, setLoading] = useState(false);
+  const [taskActionId, setTaskActionId] = useState<string | null>(null);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [taskDraft, setTaskDraft] = useState<TaskDraft | null>(null);
   const upcomingExams = buildUpcomingExams(data);
 
+  async function handleGoogleConnect(returnTo: string) {
+    try {
+      await beginGoogleConnect(returnTo);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Failed to start Google connection');
+    }
+  }
+
+  async function loadDashboard(options?: { silent?: boolean }) {
+    if (!options?.silent) {
+      setLoading(true);
+    }
+
+    const response = await apiFetch('/api/dashboard');
+    const payload = await response.json();
+
+    if (!response.ok) {
+      setStatus(payload.message || 'Failed to load dashboard');
+      if (!options?.silent) {
+        setLoading(false);
+      }
+      return false;
+    }
+
+    setData(payload);
+    setStatus('');
+    if (!options?.silent) {
+      setLoading(false);
+    }
+    return true;
+  }
+
   useEffect(() => {
-    // Consume payload from URL if present (e.g., from OAuth redirect)
-    consumePayloadFromUrl(searchParams);
-    setHasSession(!!readStoredSession()?.user?.id);
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const payloadSession = consumePayloadFromUrl(new URLSearchParams(window.location.search));
+    setHasSession((current) => current ?? !!(payloadSession?.user?.id || readStoredSession()?.user?.id));
   }, []);
 
   useEffect(() => {
@@ -112,28 +172,96 @@ function DashboardPageContent() {
     let active = true;
 
     async function load() {
-      const response = await apiFetch('/api/dashboard');
-      const payload = await response.json();
-
       if (!active) return;
-
-      if (!response.ok) {
-        setStatus(payload.message || 'Failed to load dashboard');
-        return;
-      }
-
-      setData(payload);
-      setStatus('');
+      await loadDashboard();
     }
 
     void load();
-    const timer = window.setInterval(() => void load(), 30 * 60 * 1000);
+    const timer = window.setInterval(() => {
+      if (active) {
+        void loadDashboard({ silent: true });
+      }
+    }, 60 * 1000);
 
     return () => {
       active = false;
       window.clearInterval(timer);
     };
   }, [hasSession]);
+
+  function beginEditingTask(task: DashboardTask) {
+    setEditingTaskId(task.id);
+    setTaskDraft({
+      title: task.title,
+      type: task.type,
+      reminderAt: toLocalDateTimeValue(task.reminder_at),
+    });
+    setStatus('');
+  }
+
+  function cancelEditingTask() {
+    setEditingTaskId(null);
+    setTaskDraft(null);
+  }
+
+  async function saveTask(taskId: string) {
+    if (!taskDraft?.title.trim() || !taskDraft.type.trim() || !taskDraft.reminderAt) {
+      setStatus('Title, type, and time are required.');
+      return;
+    }
+
+    setTaskActionId(taskId);
+    const response = await apiFetch(`/api/reminders/${taskId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        title: taskDraft.title.trim(),
+        type: taskDraft.type.trim(),
+        reminderAt: new Date(taskDraft.reminderAt).toISOString(),
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      setStatus(payload.message || 'Failed to update task.');
+      setTaskActionId(null);
+      return;
+    }
+
+    cancelEditingTask();
+    await loadDashboard({ silent: true });
+    setTaskActionId(null);
+  }
+
+  async function deleteTask(taskId: string) {
+    setTaskActionId(taskId);
+    const response = await apiFetch(`/api/reminders/${taskId}`, {
+      method: 'DELETE',
+    });
+    const payload = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      setStatus(payload.message || 'Failed to delete task.');
+      setTaskActionId(null);
+      return;
+    }
+
+    if (editingTaskId === taskId) {
+      cancelEditingTask();
+    }
+
+    await loadDashboard({ silent: true });
+    setTaskActionId(null);
+  }
+
+  if (hasSession === null) {
+    return (
+      <section className="hero-card">
+        <p className="insight-chip">Dashboard</p>
+        <h1 className="hero-title">Loading your student board.</h1>
+        <p className="hero-description">Checking your saved session and pulling the latest dashboard state.</p>
+      </section>
+    );
+  }
 
   if (!hasSession) {
     return (
@@ -184,10 +312,19 @@ function DashboardPageContent() {
         </div>
       </section>
 
+      {loading && !data ? <StatusBanner tone="neutral">Loading your dashboard...</StatusBanner> : null}
       {status ? <StatusBanner tone="danger">{status}</StatusBanner> : null}
+      {data && !data.onboardingComplete ? (
+        <StatusBanner tone="warning">
+          Your account is signed in, but setup is not finished yet. Use the quick actions below to finish onboarding and start feeding the dashboard real study data.
+        </StatusBanner>
+      ) : null}
       {data && !data.integrations.calendarConnected ? (
         <StatusBanner tone="warning">
-          <a href="/api/auth/google">Connect Google Calendar</a> to see upcoming events alongside your study priorities.
+          <button type="button" className="inline-edit-button" onClick={() => void handleGoogleConnect('/dashboard')}>
+            Connect Google Calendar
+          </button>{' '}
+          to see upcoming events alongside your study priorities.
         </StatusBanner>
       ) : null}
 
@@ -220,11 +357,84 @@ function DashboardPageContent() {
             {(data?.todayTasks ?? []).length ? (
               data?.todayTasks.map((task) => (
                 <li key={task.id} className="priority-item">
-                  <div>
-                    <strong>{task.title}</strong>
-                    <span>{task.type} · {task.urgencyLabel}</span>
-                  </div>
-                  <div className="task-meta">{formatDate(task.reminder_at)}</div>
+                  {editingTaskId === task.id && taskDraft ? (
+                    <div className="task-editor">
+                      <input
+                        value={taskDraft.title}
+                        onChange={(event) =>
+                          setTaskDraft((current) => (current ? { ...current, title: event.target.value } : current))
+                        }
+                        className="task-editor-input"
+                        placeholder="Task title"
+                      />
+                      <div className="task-editor-grid">
+                        <input
+                          value={taskDraft.type}
+                          onChange={(event) =>
+                            setTaskDraft((current) => (current ? { ...current, type: event.target.value } : current))
+                          }
+                          className="task-editor-input"
+                          placeholder="Task type"
+                        />
+                        <input
+                          type="datetime-local"
+                          value={taskDraft.reminderAt}
+                          onChange={(event) =>
+                            setTaskDraft((current) => (current ? { ...current, reminderAt: event.target.value } : current))
+                          }
+                          className="task-editor-input"
+                        />
+                      </div>
+                      <div className="task-action-row">
+                        <button
+                          type="button"
+                          className="task-action-button task-action-button-primary"
+                          onClick={() => void saveTask(task.id)}
+                          disabled={taskActionId === task.id}
+                        >
+                          {taskActionId === task.id ? 'Saving...' : 'Save'}
+                        </button>
+                        <button
+                          type="button"
+                          className="task-action-button"
+                          onClick={cancelEditingTask}
+                          disabled={taskActionId === task.id}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="task-main">
+                        <div>
+                          <strong>{task.title}</strong>
+                          <span>{task.type} · {task.urgencyLabel}</span>
+                        </div>
+                        <div className="task-meta-stack">
+                          <div className="task-meta">{formatDate(task.reminder_at)}</div>
+                          <div className="task-action-row">
+                            <button
+                              type="button"
+                              className="task-action-button"
+                              onClick={() => beginEditingTask(task)}
+                              disabled={taskActionId === task.id}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              className="task-action-button task-action-button-danger"
+                              onClick={() => void deleteTask(task.id)}
+                              disabled={taskActionId === task.id}
+                            >
+                              {taskActionId === task.id ? 'Deleting...' : 'Delete'}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </li>
               ))
             ) : (
@@ -276,26 +486,47 @@ function DashboardPageContent() {
               <p className="muted-copy">No upcoming events in the next 3 days</p>
             )
           ) : (
-            <a href="/api/auth/google" className="ghost-button">
+            <button type="button" className="ghost-button" onClick={() => void handleGoogleConnect('/dashboard')}>
               Connect Google Calendar →
-            </a>
+            </button>
           )}
         </section>
       </section>
 
       <section className="board-grid">
         <section className="secondary-card">
+          <p className="eyebrow">Quick actions</p>
+          <h2 className="section-title">Make the board useful</h2>
+          <p className="muted-copy">
+            The dashboard API already returns a setup path, but this screen was not rendering it. Fresh accounts looked inactive even though the backend had actions ready.
+          </p>
+          <div className="actions">
+            {(data?.quickActions ?? []).map((action) => (
+              <Link key={action.href} href={action.href} className="ghost-button">
+                {action.label}
+              </Link>
+            ))}
+          </div>
+        </section>
+
+        <section className="secondary-card">
           <p className="eyebrow">Due soon</p>
           <div className="stack-list">
-            {(data?.dueSoon ?? []).map((task) => (
-              <article key={task.id} className="stack-item">
-                <div>
-                  <strong>{task.title}</strong>
-                  <p className="muted-copy" style={{ margin: '4px 0 0' }}>{task.type} · {task.urgencyLabel}</p>
-                </div>
-                <span className="settings-badge">{formatDate(task.reminder_at)}</span>
-              </article>
-            ))}
+            {(data?.dueSoon ?? []).length ? (
+              data?.dueSoon.map((task) => (
+                <article key={task.id} className="stack-item">
+                  <div>
+                    <strong>{task.title}</strong>
+                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>{task.type} · {task.urgencyLabel}</p>
+                  </div>
+                  <span className="settings-badge">{formatDate(task.reminder_at)}</span>
+                </article>
+              ))
+            ) : (
+              <p className="muted-copy">
+                No near-term work is connected yet. Finish onboarding, add reminders, or connect calendar data to populate this list.
+              </p>
+            )}
           </div>
         </section>
 
@@ -356,9 +587,5 @@ function DashboardPageContent() {
 }
 
 export default function DashboardPage() {
-  return (
-    <Suspense fallback={<section className="hero-card"><h1>Loading...</h1></section>}>
-      <DashboardPageContent />
-    </Suspense>
-  );
+  return <DashboardPageContent />;
 }
