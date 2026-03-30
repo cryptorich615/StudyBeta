@@ -5,7 +5,8 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import ThemeToggle from './theme-toggle';
 import { Button } from './ui/button';
-import { readStoredSession, clearStoredSession, isOnboardingComplete, type StoredSession } from '../../lib/session';
+import { ACCOUNT_REFRESH_EVENT, apiFetch } from '../../lib/api';
+import { readStoredSession, writeStoredSession, clearStoredSession, isOnboardingComplete, type StoredSession } from '../../lib/session';
 import { cn } from '../../lib/utils';
 import { LayoutDashboard, Brain, MessageSquare, Calendar, Settings, LogOut } from 'lucide-react';
 
@@ -27,12 +28,14 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [session, setSession] = useState<StoredSession | null>(() => readStoredSession());
   const [mounted, setMounted] = useState(false);
+  const [accountLoading, setAccountLoading] = useState(false);
   const sessionResolved = mounted;
   const onboardingComplete = isOnboardingComplete(session);
   const isPublicRoute =
     pathname === '/' || pathname === '/auth' || pathname === '/login' || pathname === '/signup';
   const isAuthRoute = pathname === '/auth' || pathname === '/login' || pathname === '/signup';
   const isOnboardingRoute = pathname === '/onboarding';
+  const isAdminRoute = pathname.startsWith('/admin');
   const shouldLockToOnboarding = sessionResolved && !!session && !onboardingComplete;
   const shouldBlockPrivateRoute = sessionResolved && !session && !isPublicRoute && !isOnboardingRoute;
   const shouldHoldRender =
@@ -56,6 +59,57 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
   }, [pathname]);
 
   useEffect(() => {
+    if (!mounted) {
+      return;
+    }
+
+    const refreshAccountState = async () => {
+      const stored = readStoredSession();
+      if (!stored?.accessToken) {
+        setSession(stored);
+        return;
+      }
+
+      setAccountLoading(true);
+      try {
+        const response = await apiFetch('/api/auth/me');
+        const data = await response.json().catch(() => null);
+        if (!response.ok || !data?.user) {
+          setSession(readStoredSession());
+          return;
+        }
+
+        const nextSession: StoredSession = {
+          ...stored,
+          user: {
+            ...stored.user,
+            ...data.user,
+          },
+          onboardingComplete: data.onboardingComplete,
+          usageProfile: data.usageProfile ?? stored.usageProfile ?? null,
+        };
+        writeStoredSession(nextSession);
+        setSession(nextSession);
+      } finally {
+        setAccountLoading(false);
+      }
+    };
+
+    void refreshAccountState();
+    const intervalId = window.setInterval(() => {
+      void refreshAccountState();
+    }, 30000);
+    const handleRefresh = () => {
+      void refreshAccountState();
+    };
+    window.addEventListener(ACCOUNT_REFRESH_EVENT, handleRefresh);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener(ACCOUNT_REFRESH_EVENT, handleRefresh);
+    };
+  }, [mounted, pathname]);
+
+  useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   }, [pathname]);
 
@@ -65,8 +119,25 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
     router.push('/auth?mode=login');
   };
 
+  const creditTracker =
+    session?.user?.role !== 'admin' && session?.usageProfile
+      ? {
+          tier: session.usageProfile.tier ?? 'unassigned',
+          remaining: session.usageProfile.creditsRemaining,
+          windowLimit: session.usageProfile.windowLimit ?? null,
+          windowRemaining: session.usageProfile.remainingInWindow ?? null,
+        }
+      : null;
+
   useEffect(() => {
     if (!sessionResolved) {
+      return;
+    }
+
+    if (session?.user?.role === 'admin') {
+      if (pathname === '/dashboard' || pathname === '/onboarding') {
+        router.replace('/admin');
+      }
       return;
     }
 
@@ -86,6 +157,10 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
       router.replace('/dashboard');
     }
   }, [isOnboardingRoute, isPublicRoute, onboardingComplete, pathname, router, session, sessionResolved]);
+
+  if (isAdminRoute) {
+    return <>{children}</>;
+  }
 
   if (shouldHoldRender) {
     return (
@@ -167,6 +242,32 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
                   style={{ boxShadow: '0 0 8px var(--success-soft)' }}
                 />
                 {mounted ? (session ? session.user.full_name || session.user.email : 'Guest Mode') : 'Loading'}
+              </div>
+            ) : null}
+
+            {creditTracker ? (
+              <div className="hidden md:flex min-w-[180px] items-center gap-3 rounded-2xl border border-primary/20 bg-primary/10 px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-primary">
+                      {creditTracker.tier.replace('_', ' ')}
+                    </div>
+                    <div className="text-[11px] font-semibold text-foreground">
+                      {accountLoading ? 'Updating...' : `${creditTracker.remaining ?? 0} cr`}
+                    </div>
+                  </div>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full border border-primary/15 bg-background/50">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-[var(--accent)] via-[var(--primary)] to-[var(--primary-strong)] transition-[width] duration-500"
+                      style={{
+                        width:
+                          creditTracker.windowLimit && creditTracker.windowRemaining !== null
+                            ? `${Math.min(Math.max((creditTracker.windowRemaining / creditTracker.windowLimit) * 100, 0), 100)}%`
+                            : '100%',
+                      }}
+                    />
+                  </div>
+                </div>
               </div>
             ) : null}
             

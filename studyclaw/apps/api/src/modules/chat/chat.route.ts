@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { randomUUID } from 'node:crypto';
 import { db } from '../../lib/db';
 import { requireAuth, type AuthedRequest } from '../../lib/auth';
 import { OpenClawClient } from '../../integrations/openclaw/openclaw.client';
@@ -9,9 +10,20 @@ import {
   loadAgentProfile,
 } from '../../lib/study-context';
 import { buildBootstrapExtractionPrompt } from '../../lib/bootstrap';
+import { syncGoogleSkillForUser, upsertCalendarEventForReminder } from '../../lib/google-service';
 import { syncUserWorkspaceProfile } from '../../lib/user-agent';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
 import { syncUserModelRuntimeConfig } from '../../lib/model-settings';
+import {
+  ManagedUsageLimitError,
+  finalizeManagedUsageEvent,
+  reserveManagedUsageEvent,
+} from '../../lib/managed-usage';
+import {
+  recordStudyEvent,
+  upsertAssignmentFromReminder,
+  writeMemorySummary,
+} from '../../lib/student-memory';
 
 export const chatRouter = Router();
 chatRouter.use(requireAuth);
@@ -28,6 +40,31 @@ type ReminderIntentResult = {
   assumedTimezone?: string;
   confirmation?: string;
   missingFields?: string[];
+};
+
+type ResearchSource = {
+  label: string;
+  url: string;
+  hostname: string;
+};
+
+type ResearchResultCard = {
+  kind: 'research_result';
+  title: string;
+  summary: string;
+  sources: ResearchSource[];
+  pageTitle: string | null;
+  checkedAt: string;
+  screenshots: string[];
+  screenshotUrl: string | null;
+  screenshotAlt: string;
+  savedToBackpack?: boolean;
+  savedAssetId?: string | null;
+};
+
+type AssistantCapabilityBadge = {
+  key: string;
+  label: string;
 };
 
 const TIMEZONE_ABBREVIATION_TO_OFFSET_MINUTES: Record<string, number> = {
@@ -76,6 +113,224 @@ function parseJsonBlock(value: string) {
 
     throw new Error('invalid_json');
   }
+}
+
+function extractUrlsFromString(value: string) {
+  const matches = value.match(/https?:\/\/[^\s<>"')\]]+/gi) ?? [];
+  return matches
+    .map((match) => match.replace(/[),.;]+$/, ''))
+    .filter(Boolean);
+}
+
+function collectNestedStrings(value: unknown, bucket: string[], depth = 0) {
+  if (depth > 6 || value === null || value === undefined) {
+    return;
+  }
+
+  if (typeof value === 'string') {
+    bucket.push(value);
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectNestedStrings(item, bucket, depth + 1);
+    }
+    return;
+  }
+
+  if (typeof value === 'object') {
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      collectNestedStrings(item, bucket, depth + 1);
+    }
+  }
+}
+
+function findNestedStringByKey(value: unknown, candidateKeys: string[], depth = 0): string | null {
+  if (depth > 6 || value === null || value === undefined || typeof value !== 'object') {
+    return null;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const match = findNestedStringByKey(item, candidateKeys, depth + 1);
+      if (match) {
+        return match;
+      }
+    }
+    return null;
+  }
+
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (candidateKeys.includes(key) && typeof item === 'string' && item.trim()) {
+      return item.trim();
+    }
+
+    const nested = findNestedStringByKey(item, candidateKeys, depth + 1);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return null;
+}
+
+function sanitizeScreenshotPreview(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  if (/^data:image\/[a-zA-Z0-9.+-]+;base64,/i.test(value)) {
+    return value.length <= 250_000 ? value : null;
+  }
+
+  if (/^https?:\/\//i.test(value)) {
+    return value;
+  }
+
+  return null;
+}
+
+function buildSourceLabel(url: string) {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.replace(/^www\./, '');
+    const path = parsed.pathname.replace(/\/+$/, '') || '/';
+
+    if (path === '/') {
+      return hostname;
+    }
+
+    return `${hostname}${path.length > 32 ? `${path.slice(0, 32)}…` : path}`;
+  } catch {
+    return url;
+  }
+}
+
+function summarizeResearchText(text: string) {
+  const cleaned = text.replace(/\[(\d+)\]/g, '').trim();
+  const firstParagraph = cleaned.split(/\n\s*\n/).find((part) => part.trim()) ?? cleaned;
+  return firstParagraph.slice(0, 320).trim();
+}
+
+function buildResearchTitle(text: string, sources: ResearchSource[]) {
+  const firstSentence =
+    text
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .find(Boolean)
+      ?.replace(/^[-*#\s]+/, '')
+      .replace(/^here('|’)s what i found[:, -]*/i, '')
+      .replace(/^summary[:, -]*/i, '') ?? '';
+
+  const normalized = firstSentence.replace(/\s+/g, ' ').trim();
+  if (normalized) {
+    return normalized.length > 88 ? `${normalized.slice(0, 88).trim()}…` : normalized;
+  }
+
+  if (sources[0]) {
+    return `Research from ${sources[0].hostname}`;
+  }
+
+  return 'Research result';
+}
+
+function buildResearchResultCard(assistantText: string, raw: unknown): ResearchResultCard {
+  const nestedStrings: string[] = [];
+  collectNestedStrings(raw, nestedStrings);
+
+  const sourceUrls = Array.from(
+    new Set(
+      [...extractUrlsFromString(assistantText), ...nestedStrings.flatMap((value) => extractUrlsFromString(value))]
+        .map((value) => value.trim())
+        .filter((value) => /^https?:\/\//i.test(value))
+        .filter((value) => !/localhost|127\.0\.0\.1|openclaw/i.test(value))
+    )
+  );
+
+  const sources = sourceUrls.slice(0, 5).map((url) => {
+    let hostname = '';
+
+    try {
+      hostname = new URL(url).hostname.replace(/^www\./, '');
+    } catch {
+      hostname = url;
+    }
+
+    return {
+      label: buildSourceLabel(url),
+      url,
+      hostname,
+    };
+  });
+
+  const screenshotCandidates = Array.from(
+    new Set(
+      nestedStrings
+        .filter(
+          (value) =>
+            /^data:image\//i.test(value) ||
+            /^https?:\/\/\S+\.(png|jpe?g|webp)(\?\S*)?$/i.test(value) ||
+            (/screenshot/i.test(value) && /^https?:\/\//i.test(value))
+        )
+        .map((value) => sanitizeScreenshotPreview(value))
+        .filter((value): value is string => Boolean(value))
+    )
+  ).slice(0, 3);
+
+  const pageTitle =
+    findNestedStringByKey(raw, ['pageTitle', 'page_title', 'documentTitle']) ??
+    findNestedStringByKey(raw, ['title'])?.replace(/\s+/g, ' ').trim() ??
+    null;
+
+  return {
+    kind: 'research_result',
+    title: buildResearchTitle(assistantText, sources),
+    summary: summarizeResearchText(assistantText),
+    sources,
+    pageTitle: pageTitle && pageTitle.length <= 120 && !/^https?:\/\//i.test(pageTitle) ? pageTitle : null,
+    checkedAt: new Date().toISOString(),
+    screenshots: screenshotCandidates,
+    screenshotUrl: screenshotCandidates[0] ?? null,
+    screenshotAlt: pageTitle ? `${pageTitle} preview` : 'Research browser preview',
+  };
+}
+
+function buildAssistantCapabilityBadges(input: {
+  isResearchRequest?: boolean;
+  hasAttachments?: boolean;
+  reminderCreated?: boolean;
+  reminderLookup?: boolean;
+  researchResult?: ResearchResultCard | null;
+}) {
+  const badges: AssistantCapabilityBadge[] = [];
+
+  if (input.isResearchRequest) {
+    badges.push({ key: 'browser', label: 'Used browser research' });
+  }
+
+  if (input.researchResult?.sources.length) {
+    badges.push({ key: 'sources', label: `Checked ${input.researchResult.sources.length} source${input.researchResult.sources.length === 1 ? '' : 's'}` });
+  }
+
+  const screenshotCount = input.researchResult?.screenshots.length ?? 0;
+  if (screenshotCount) {
+    badges.push({ key: 'screenshots', label: `${screenshotCount} screenshot${screenshotCount === 1 ? '' : 's'} captured` });
+  }
+
+  if (input.hasAttachments) {
+    badges.push({ key: 'notes', label: 'Used uploaded notes' });
+  }
+
+  if (input.reminderCreated) {
+    badges.push({ key: 'reminder', label: 'Created a reminder' });
+  }
+
+  if (input.reminderLookup) {
+    badges.push({ key: 'reminder_lookup', label: 'Checked reminders' });
+  }
+
+  return badges;
 }
 
 function looksLikeReminderStatusQuestion(message: string) {
@@ -327,8 +582,39 @@ async function createReminderRecord(input: {
       }),
     ]
   );
+  const reminder = created.rows[0] ?? null;
+  if (!reminder) {
+    return null;
+  }
 
-  return created.rows[0] ?? null;
+  const syncedEvent = await upsertCalendarEventForReminder({
+    userId: input.userId,
+    title: input.title,
+    reminderAt: reminder.reminder_at,
+    type: input.reminderType,
+    metadata: reminder.metadata_json ?? {},
+    timeZone: input.assumedTimezone ?? 'America/New_York',
+  });
+  if (!syncedEvent) {
+    return reminder;
+  }
+
+  const updated = await db.query(
+    `update reminders
+     set metadata_json = metadata_json || $2::jsonb
+     where id = $1
+     returning *`,
+    [
+      reminder.id,
+      JSON.stringify({
+        calendarSource: 'google',
+        googleCalendarEventId: syncedEvent.id,
+        googleCalendarHtmlLink: syncedEvent.htmlLink,
+      }),
+    ]
+  );
+
+  return updated.rows[0] ?? reminder;
 }
 
 function normalizeAssistantIdentity(replyText: string, personaName: string) {
@@ -341,6 +627,36 @@ function normalizeAssistantIdentity(replyText: string, personaName: string) {
     .replace(/\b(My name is|I(?:'| a)m)\s+StudyClaw\b/gi, (match, prefix: string) => `${prefix} ${trimmedPersona}`)
     .replace(/\bcall me\s+StudyClaw\b/gi, `call me ${trimmedPersona}`)
     .replace(/\bStudyClaw\b/g, trimmedPersona);
+}
+
+function inferWeakAreaSummary(message: string) {
+  const match = message.match(/\b(?:i\s+struggle\s+with|i'?m\s+struggling\s+with|i\s+keep\s+missing|i'?m\s+confused\s+about|i\s+need\s+help\s+with)\s+(.+?)(?:[.?!]|$)/i);
+  if (!match?.[1]) {
+    return null;
+  }
+
+  const topic = match[1].trim().replace(/\s+/g, ' ');
+  if (!topic || topic.length < 3) {
+    return null;
+  }
+
+  return `Student struggles with ${topic.length > 90 ? `${topic.slice(0, 90).trim()}...` : topic}.`;
+}
+
+function inferPreferenceSummary(message: string) {
+  const match = message.match(
+    /\b(?:i\s+prefer|i\s+learn\s+best\s+with|i\s+study\s+best\s+with|i\s+study\s+better\s+with|i\s+study\s+better\s+in|i\s+retain\s+more\s+when)\s+(.+?)(?:[.?!]|$)/i
+  );
+  if (!match?.[1]) {
+    return null;
+  }
+
+  const preference = match[1].trim().replace(/\s+/g, ' ');
+  if (!preference || preference.length < 4) {
+    return null;
+  }
+
+  return `Student prefers ${preference.length > 110 ? `${preference.slice(0, 110).trim()}...` : preference}.`;
 }
 
 type ChatAttachment = {
@@ -630,34 +946,191 @@ chatRouter.get('/threads/:threadId', async (req: AuthedRequest, res) => {
   res.json({ thread: thread.rows[0], messages: messages.rows });
 });
 
+chatRouter.post('/research-note', async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+
+  const { threadId, messageId } = req.body as {
+    threadId?: string;
+    messageId?: string;
+  };
+
+  if (!threadId || !messageId) {
+    return res.status(400).json({ error: 'bad_request', message: 'threadId and messageId are required' });
+  }
+
+  const threadResult = await db.query(`select id from chat_threads where id = $1 and user_id = $2 limit 1`, [
+    threadId,
+    req.user!.id,
+  ]);
+
+  if (!threadResult.rows[0]) {
+    return res.status(404).json({ error: 'not_found', message: 'Study session not found' });
+  }
+
+  const messageResult = await db.query(
+    `select id, role, content, metadata_json
+     from chat_messages
+     where id = $1
+       and thread_id = $2
+     limit 1`,
+    [messageId, threadId]
+  );
+
+  const messageRow = messageResult.rows[0] as
+    | {
+        id: string;
+        role: string;
+        content: string;
+        metadata_json?: {
+          researchResult?: ResearchResultCard;
+          savedToBackpack?: boolean;
+          savedAssetId?: string | null;
+        } | null;
+      }
+    | undefined;
+
+  if (!messageRow || messageRow.role !== 'assistant') {
+    return res.status(404).json({ error: 'not_found', message: 'Research message not found' });
+  }
+
+  const researchResult = messageRow.metadata_json?.researchResult;
+  if (!researchResult || researchResult.kind !== 'research_result') {
+    return res.status(400).json({
+      error: 'bad_request',
+      message: 'Only browser-backed research replies can be saved to notes.',
+    });
+  }
+
+  if (messageRow.metadata_json?.savedAssetId) {
+    return res.status(200).json({
+      ok: true,
+      duplicate: true,
+      assetId: messageRow.metadata_json.savedAssetId,
+      message: 'This research is already saved in Backpack.',
+    });
+  }
+
+  const existingAsset = await db.query(
+    `select id
+     from study_assets
+     where user_id = $1
+       and coalesce(metadata_json->>'source', '') = 'chat_research'
+       and coalesce(metadata_json->>'sourceMessageId', '') = $2
+     limit 1`,
+    [req.user!.id, messageId]
+  );
+
+  if (existingAsset.rows[0]?.id) {
+    await db.query(
+      `update chat_messages
+       set metadata_json = coalesce(metadata_json, '{}'::jsonb) || $3::jsonb
+       where id = $1
+         and thread_id = $2`,
+      [
+        messageId,
+        threadId,
+        JSON.stringify({
+          savedToBackpack: true,
+          savedAssetId: existingAsset.rows[0].id,
+          researchResult: {
+            ...researchResult,
+            savedToBackpack: true,
+            savedAssetId: existingAsset.rows[0].id,
+          },
+        }),
+      ]
+    );
+
+    return res.status(200).json({
+      ok: true,
+      duplicate: true,
+      assetId: existingAsset.rows[0].id,
+      message: 'This research is already saved in Backpack.',
+    });
+  }
+
+  const noteTitle = `Research · ${researchResult.title}`.slice(0, 140);
+  const processedText = [
+    researchResult.summary,
+    researchResult.sources.length
+      ? `Sources\n${researchResult.sources.map((source) => `- ${source.label}: ${source.url}`).join('\n')}`
+      : '',
+    researchResult.screenshotUrl && !researchResult.screenshotUrl.startsWith('data:')
+      ? `Screenshot preview\n${researchResult.screenshotUrl}`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  const createdAsset = await db.query(
+    `insert into study_assets (user_id, subject_id, asset_type, title, original_text, processed_text, metadata_json)
+     values ($1, null, 'typed_note', $2, $3, $4, $5)
+     returning id, title`,
+    [
+      req.user!.id,
+      noteTitle,
+      messageRow.content,
+      processedText,
+      JSON.stringify({
+        source: 'chat_research',
+        sourceThreadId: threadId,
+        sourceMessageId: messageId,
+        sectionName: 'Research',
+        researchResult: {
+          ...researchResult,
+          screenshotUrl: researchResult.screenshotUrl?.startsWith('data:') ? null : researchResult.screenshotUrl,
+          savedToBackpack: true,
+        },
+      }),
+    ]
+  );
+
+  await db.query(
+    `update chat_messages
+     set metadata_json = coalesce(metadata_json, '{}'::jsonb) || $3::jsonb
+     where id = $1
+       and thread_id = $2`,
+    [
+      messageId,
+      threadId,
+      JSON.stringify({
+        savedToBackpack: true,
+        savedAssetId: createdAsset.rows[0].id,
+        researchResult: {
+          ...researchResult,
+          savedToBackpack: true,
+          savedAssetId: createdAsset.rows[0].id,
+        },
+      }),
+    ]
+  );
+
+  return res.status(201).json({
+    ok: true,
+    duplicate: false,
+    assetId: createdAsset.rows[0].id,
+    message: 'Saved to Backpack.',
+  });
+});
+
 chatRouter.post('/send', async (req: AuthedRequest, res) => {
   await ensurePlatformSchema();
-  const { threadId, message, attachments } = req.body as {
+  const { threadId, message, attachments, studyMode } = req.body as {
     threadId?: string;
     message?: string;
     attachments?: ChatAttachment[];
+    studyMode?: string;
   };
   const normalizedAttachments = normalizeAttachments(attachments);
   const trimmedMessage = message?.trim() ?? '';
+  const isResearchRequest =
+    studyMode === 'research' || /use the browser tool to research|research this on the web/i.test(trimmedMessage);
 
   if (!trimmedMessage && !normalizedAttachments.length) {
     return res.status(400).json({ error: 'bad_request', message: 'message or document text is required' });
   }
 
   const isAdmin = req.user?.role === 'admin';
-
-  if (!isAdmin) {
-    const credentialCheck = await db.query(
-      `select api_key
-       from user_model_credentials
-       where user_id = $1
-       limit 1`,
-      [req.user!.id]
-    );
-    if (!credentialCheck.rows[0]?.api_key) {
-      return res.status(403).json({ error: 'onboarding_required', message: 'Complete onboarding first: choose Dixie or Willow and enter your API key.' });
-    }
-  }
 
   const agent = isAdmin
     ? ADMIN_CHAT_PROFILE
@@ -678,26 +1151,9 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
     });
   }
 
-  if (!isAdmin && studentAgent) {
-    const quotaResult = await db.query(
-      `select count(*)::int as count
-       from agent_actions aa
-       where aa.agent_id = $1
-         and aa.created_at >= date_trunc('day', now())`,
-      [studentAgent.id]
-    );
-    const usedToday = quotaResult.rows[0]?.count ?? 0;
-    const dailyQuota = Number(process.env.STUDYCLAW_STUDENT_DAILY_AGENT_ACTIONS ?? 150);
-    if (usedToday >= dailyQuota) {
-      return res.status(429).json({
-        error: 'quota_reached',
-        message: `Daily agent quota reached (${usedToday}/${dailyQuota}).`,
-      });
-    }
-  }
-
   let activeThreadId = threadId;
   let openclawSessionId: string | undefined;
+  let managedUsageEventId: string | null = null;
 
   if (threadId) {
     const thread = await db.query(`select * from chat_threads where id = $1 and user_id = $2`, [
@@ -744,14 +1200,54 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
     activeThreadId,
     storedUserMessage,
     JSON.stringify({
+      studyMode: studyMode ?? 'general',
       attachments: normalizedAttachments.map((attachment) => ({ name: attachment.name, type: attachment.type })),
     }),
   ]);
 
+  async function ensureManagedUsageReservation(feature: string, metadata: Record<string, unknown> = {}) {
+    if (isAdmin || managedUsageEventId) {
+      return;
+    }
+
+    if (!agent) {
+      throw new Error('StudyClaw agent profile is unavailable for quota tracking.');
+    }
+
+    const reservation = await reserveManagedUsageEvent({
+      userId: req.user!.id,
+      feature,
+      modelKey: agent.model_key,
+      eventKey: `chat:${activeThreadId}:${feature}:${randomUUID()}`,
+      metadata: {
+        threadId: activeThreadId,
+        ...metadata,
+      },
+    });
+    managedUsageEventId = reservation.eventId;
+  }
+
+  async function completeManagedUsage(success: boolean, metadata: Record<string, unknown> = {}) {
+    if (!managedUsageEventId) {
+      return;
+    }
+
+    const eventId = managedUsageEventId;
+    managedUsageEventId = null;
+    await finalizeManagedUsageEvent({
+      eventId,
+      success,
+      metadata: {
+        threadId: activeThreadId,
+        ...metadata,
+      },
+    });
+  }
+
   try {
     const context = isAdmin
-      ? { profile: null, subjects: [], reminders: [] }
-      : await buildStudyContext(req.user!.id);
+      ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] } }
+      : await buildStudyContext(req.user!.id, { query: effectiveMessage });
     const reminderStatusReply = trimmedMessage
       ? await tryHandleReminderStatusQuestion({
           userId: req.user!.id,
@@ -765,7 +1261,16 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
 
       await db.query(
         `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
-        [activeThreadId, assistantText, JSON.stringify(reminderStatusReply.metadata ?? {})]
+        [
+          activeThreadId,
+          assistantText,
+          JSON.stringify({
+            ...(reminderStatusReply.metadata ?? {}),
+            capabilityBadges: buildAssistantCapabilityBadges({
+              reminderLookup: true,
+            }),
+          }),
+        ]
       );
       await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
 
@@ -777,13 +1282,18 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
     }
 
     const reminderIntent = trimmedMessage
-      ? await tryHandleReminderIntent({
-          userId: req.user!.id,
-          message: trimmedMessage,
-          modelKey: agent.model_key,
-          timezone: context.profile?.timezone ?? null,
-          threadId: activeThreadId!,
-        }).catch(() => null)
+      ? await (async () => {
+          await ensureManagedUsageReservation('chat-reminder-intent', {
+            attachmentCount: normalizedAttachments.length,
+          });
+          return tryHandleReminderIntent({
+            userId: req.user!.id,
+            message: trimmedMessage,
+            modelKey: agent.model_key,
+            timezone: context.profile?.timezone ?? null,
+            threadId: activeThreadId!,
+          }).catch(() => null);
+        })()
       : null;
 
     const fallbackReminderIntent =
@@ -810,6 +1320,7 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
             reminderRequested: true,
             reminderCreated: false,
             missingFields: ['time'],
+            capabilityBadges: buildAssistantCapabilityBadges({}),
           }),
         ]
       );
@@ -860,6 +1371,9 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
             reminderCreated: true,
             reminderAtIso: resolvedReminderIntent.reminderAtIso,
             reminderType: resolvedReminderIntent.reminderType,
+            capabilityBadges: buildAssistantCapabilityBadges({
+              reminderCreated: true,
+            }),
           }),
         ]
       );
@@ -880,6 +1394,42 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
           ]
         );
       }
+      if ((resolvedReminderIntent as any).createdReminder?.id) {
+        const createdReminder = (resolvedReminderIntent as any).createdReminder;
+        await recordStudyEvent({
+          userId: req.user!.id,
+          eventKey: `chat-reminder:${createdReminder.id}`,
+          eventType: 'reminder_created',
+          sourceType: 'reminder',
+          sourceId: createdReminder.id,
+          payload: {
+            title: createdReminder.title,
+            reminderType: createdReminder.type,
+          },
+        });
+        const assignment = await upsertAssignmentFromReminder({
+          userId: req.user!.id,
+          reminderId: createdReminder.id,
+          title: createdReminder.title,
+          type: createdReminder.type,
+          reminderAt: createdReminder.reminder_at,
+          status: createdReminder.status,
+          metadata: createdReminder.metadata_json ?? {},
+        });
+        if (assignment) {
+          await writeMemorySummary({
+            userId: req.user!.id,
+            summaryType: 'assignment_tracking',
+            summary: `Student is tracking ${assignment.title} as ${assignment.status}.`,
+            courseId: assignment.course_id ?? null,
+            summaryKey: `assignment:${assignment.id}:tracking`,
+            importance: 4,
+          });
+        }
+      }
+      await completeManagedUsage(true, {
+        outcome: 'reminder_created',
+      });
 
       return res.json({
         threadId: activeThreadId,
@@ -896,6 +1446,12 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
       });
     }
 
+    await ensureManagedUsageReservation('chat', {
+      attachmentCount: normalizedAttachments.length,
+    });
+    if (!isAdmin) {
+      await syncGoogleSkillForUser(req.user!.id).catch(() => undefined);
+    }
     const reply = await openclaw.sendMessage({
       agentId: agent.openclaw_agent_id,
       instructions: buildStudyInstructions(agent.system_prompt, context),
@@ -909,10 +1465,28 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
       userId: req.user!.id,
     });
     const assistantText = normalizeAssistantIdentity(reply.text, agent.persona_name);
+    const researchResult = isResearchRequest ? buildResearchResultCard(assistantText, reply.raw) : null;
+    const assistantMetadata = {
+      openclaw: reply.raw,
+      capabilityBadges: buildAssistantCapabilityBadges({
+        isResearchRequest,
+        hasAttachments: normalizedAttachments.length > 0,
+        researchResult,
+      }),
+      ...(researchResult ? { researchResult } : {}),
+    };
 
     await db.query(
       `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
-      [activeThreadId, assistantText, JSON.stringify({ openclaw: reply.raw })]
+      [activeThreadId, assistantText, JSON.stringify(assistantMetadata)]
+    );
+    const assistantMessageResult = await db.query(
+      `select id, role, content, metadata_json
+       from chat_messages
+       where thread_id = $1
+       order by created_at desc
+       limit 1`,
+      [activeThreadId]
     );
     await db.query(`update chat_threads set last_message_at = now(), openclaw_session_id = $2 where id = $1`, [
       activeThreadId,
@@ -933,20 +1507,69 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
         ]
       );
     }
+    await recordStudyEvent({
+      userId: req.user!.id,
+      eventKey: `chat:${activeThreadId}:${assistantMessageResult.rows[0]?.id ?? reply.sessionId}`,
+      eventType: isResearchRequest ? 'research_chat_reply' : 'chat_reply',
+      sourceType: 'chat_thread',
+      sourceId: activeThreadId,
+      payload: {
+        studyMode: studyMode ?? 'general',
+        usedResearch: isResearchRequest,
+        attachmentCount: normalizedAttachments.length,
+      },
+    });
+    const weakAreaSummary = trimmedMessage ? inferWeakAreaSummary(trimmedMessage) : null;
+    if (weakAreaSummary) {
+      await writeMemorySummary({
+        userId: req.user!.id,
+        summaryType: 'weak_area',
+        summary: weakAreaSummary,
+        summaryKey: `weak-area:${req.user!.id}:${weakAreaSummary.toLowerCase()}`,
+        importance: 5,
+      });
+    }
+    const preferenceSummary = trimmedMessage ? inferPreferenceSummary(trimmedMessage) : null;
+    if (preferenceSummary) {
+      await writeMemorySummary({
+        userId: req.user!.id,
+        summaryType: 'learning_preference',
+        summary: preferenceSummary,
+        summaryKey: `preference:${req.user!.id}:${preferenceSummary.toLowerCase()}`,
+        importance: 5,
+      });
+    }
 
     if (!isAdmin && !context.profile?.onboarding_complete) {
       await syncBootstrapProfile(req.user!.id, activeThreadId!, agent.model_key);
     }
+    await completeManagedUsage(true, {
+      outcome: 'chat_reply',
+      openclawSessionId: reply.sessionId,
+    });
 
     return res.json({
       threadId: activeThreadId,
       openclawSessionId: reply.sessionId,
       assistantMessage: assistantText,
+      assistantEntry: assistantMessageResult.rows[0] ?? null,
       raw: reply.raw,
-      artifacts: [],
+      artifacts: researchResult
+        ? [
+            {
+              type: 'research_result',
+              title: researchResult.title,
+              sourceCount: researchResult.sources.length,
+              hasScreenshot: Boolean(researchResult.screenshotUrl),
+            },
+          ]
+        : [],
     });
   } catch (error) {
     const messageText = error instanceof Error ? error.message : 'Unknown OpenClaw error';
+    await completeManagedUsage(false, {
+      error: messageText,
+    });
     if (studentAgent) {
       await db.query(
         `insert into agent_actions (agent_id, action_type, summary, payload)
@@ -958,6 +1581,13 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
           JSON.stringify({ error: messageText }),
         ]
       );
+    }
+    if (error instanceof ManagedUsageLimitError) {
+      return res.status(error.statusCode).json({
+        error: error.code,
+        message: error.message,
+        detail: error.detail,
+      });
     }
     return res.status(502).json({ error: 'openclaw_error', message: messageText });
   }

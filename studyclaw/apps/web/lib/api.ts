@@ -1,6 +1,7 @@
 import { clearStoredSession, readStoredSession } from './session';
 
 const FALLBACK_API_BASE = 'http://localhost:4000';
+export const ACCOUNT_REFRESH_EVENT = 'studyclaw:account-refresh';
 
 function normalizeApiPath(path: string) {
   return path.startsWith('/') ? path : `/${path}`;
@@ -40,7 +41,30 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
     clearStoredSession();
   }
 
+  if (typeof window !== 'undefined' && String(init.method ?? 'GET').toUpperCase() !== 'GET') {
+    window.dispatchEvent(new Event(ACCOUNT_REFRESH_EVENT));
+  }
+
   return response;
+}
+
+export async function readApiPayload(response: Response) {
+  const raw = await response.text();
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { message: raw };
+  }
+}
+
+export function getApiErrorMessage(payload: any, fallback: string) {
+  return typeof payload?.message === 'string' && payload.message.trim()
+    ? payload.message
+    : fallback;
 }
 
 export async function beginGoogleConnect(returnTo: string) {

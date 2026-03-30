@@ -5,5 +5,19 @@ export default function StatusBanner({
   tone?: 'neutral' | 'success' | 'warning' | 'danger';
   children: React.ReactNode;
 }) {
-  return <div className={`status-banner ${tone}`}>{children}</div>;
+  const label =
+    tone === 'success'
+      ? 'Success'
+      : tone === 'warning'
+        ? 'Notice'
+        : tone === 'danger'
+          ? 'Alert'
+          : 'Update';
+
+  return (
+    <div className={`status-banner ${tone}`}>
+      <span className="status-banner__label">{label}</span>
+      <div className="status-banner__content">{children}</div>
+    </div>
+  );
 }

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { requireAuth, type AuthedRequest } from '../../lib/auth';
 import { db } from '../../lib/db';
@@ -8,6 +9,23 @@ import {
   loadAgentProfile,
 } from '../../lib/study-context';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
+import {
+  ManagedUsageLimitError,
+  finalizeManagedUsageEvent,
+  reserveManagedUsageEvent,
+} from '../../lib/managed-usage';
+import {
+  buildBackpackActionReminder,
+  normalizeActionItemText,
+  normalizeSchedulePreset,
+} from '../../lib/backpack-action-items';
+import { upsertCalendarEventForReminder } from '../../lib/google-service';
+import {
+  recordStudyEvent,
+  updateTopicMastery,
+  upsertAssignmentFromReminder,
+  writeMemorySummary,
+} from '../../lib/student-memory';
 
 const openclaw = new OpenClawClient();
 const ADMIN_COACH_PROFILE = {
@@ -195,6 +213,197 @@ coachRouter.get('/assets', async (req: AuthedRequest, res) => {
   );
 });
 
+coachRouter.post('/assets/:assetId/action-items/reminder', async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+  try {
+    const { actionItem, schedulePreset } = req.body as {
+      actionItem?: string;
+      schedulePreset?: string;
+    };
+
+    const normalizedActionItem = normalizeActionItemText(actionItem);
+    if (!normalizedActionItem) {
+      return res.status(400).json({
+        error: 'bad_request',
+        message: 'actionItem is required',
+      });
+    }
+
+    const assetResult = await db.query(
+      `select id, title, metadata_json
+       from study_assets
+       where id = $1
+         and user_id = $2
+       limit 1`,
+      [req.params.assetId, req.user!.id]
+    );
+
+    const asset = assetResult.rows[0] as
+      | { id: string; title: string; metadata_json?: { actionItems?: unknown; sectionName?: string } | null }
+      | undefined;
+    if (!asset) {
+      return res.status(404).json({
+        error: 'not_found',
+        message: 'Saved note not found',
+      });
+    }
+
+    const savedActionItems = Array.isArray(asset.metadata_json?.actionItems)
+      ? asset.metadata_json?.actionItems.map((item) => normalizeActionItemText(item)).filter(Boolean)
+      : [];
+    const matchedActionItem = savedActionItems.find((item) => item === normalizedActionItem);
+    if (!matchedActionItem) {
+      return res.status(400).json({
+        error: 'bad_request',
+        message: 'That action item is no longer attached to this saved note',
+      });
+    }
+
+    const profileResult = await db.query(
+      `select timezone
+       from student_profiles
+       where user_id = $1
+       limit 1`,
+      [req.user!.id]
+    );
+    const timeZone = String(profileResult.rows[0]?.timezone ?? 'America/New_York');
+    const normalizedPreset = normalizeSchedulePreset(schedulePreset);
+    const reminderPlan = buildBackpackActionReminder({
+      actionItem: matchedActionItem,
+      schedulePreset: normalizedPreset,
+      timeZone,
+    });
+
+    const duplicateResult = await db.query(
+      `select id, title, reminder_at, status, metadata_json
+       from reminders
+       where user_id = $1
+         and title = $2
+         and type = 'study_session'
+         and coalesce(metadata_json->>'source', '') = 'backpack_action_item'
+         and coalesce(metadata_json->>'sourceAssetId', '') = $3
+         and coalesce(metadata_json->>'actionItem', '') = $4
+         and status <> 'completed'
+       order by reminder_at asc
+       limit 1`,
+      [req.user!.id, reminderPlan.title, asset.id, matchedActionItem]
+    );
+
+    if (duplicateResult.rows[0]) {
+      return res.status(200).json({
+        ok: true,
+        duplicate: true,
+        reminder: duplicateResult.rows[0],
+        message: 'This Backpack action item is already on your task list.',
+      });
+    }
+
+    const reminderResult = await db.query(
+      `insert into reminders (user_id, title, reminder_at, type, delivered, metadata_json)
+       values ($1, $2, $3, 'study_session', false, $4)
+       returning *`,
+      [
+        req.user!.id,
+        reminderPlan.title,
+        reminderPlan.reminderAt.toISOString(),
+        JSON.stringify({
+          source: 'backpack_action_item',
+          sourceAssetId: asset.id,
+          assetTitle: asset.title,
+          sectionName: asset.metadata_json?.sectionName ?? 'Unsorted',
+          actionItem: matchedActionItem,
+          schedulePreset: normalizedPreset,
+        }),
+      ]
+    );
+    const reminder = reminderResult.rows[0];
+    const syncedEvent = await upsertCalendarEventForReminder({
+      userId: req.user!.id,
+      title: reminder.title,
+      reminderAt: reminder.reminder_at,
+      type: reminder.type,
+      metadata: reminder.metadata_json ?? {},
+      timeZone,
+    });
+    const persistedReminder = syncedEvent
+      ? (
+          await db.query(
+            `update reminders
+             set metadata_json = metadata_json || $2::jsonb
+             where id = $1
+             returning *`,
+            [
+              reminder.id,
+              JSON.stringify({
+                calendarSource: 'google',
+                googleCalendarEventId: syncedEvent.id,
+                googleCalendarHtmlLink: syncedEvent.htmlLink,
+              }),
+            ]
+          )
+        ).rows[0] ?? reminder
+      : reminder;
+
+    await recordStudyEvent({
+      userId: req.user!.id,
+      eventKey: `backpack-action:${asset.id}:${matchedActionItem}`,
+      eventType: 'backpack_action_scheduled',
+      sourceType: 'study_asset',
+      sourceId: asset.id,
+      payload: {
+        actionItem: matchedActionItem,
+        reminderId: persistedReminder.id,
+        schedulePreset: normalizedPreset,
+      },
+    });
+    await upsertAssignmentFromReminder({
+      userId: req.user!.id,
+      reminderId: persistedReminder.id,
+      title: persistedReminder.title,
+      type: persistedReminder.type,
+      reminderAt: persistedReminder.reminder_at,
+      status: persistedReminder.status,
+      metadata: persistedReminder.metadata_json ?? {},
+    });
+
+    const studentAgent = await getStudentAgentRecord(req.user!.id);
+    if (studentAgent) {
+      await db.query(
+        `insert into agent_actions (agent_id, action_type, summary, payload)
+         values ($1, $2, $3, $4)`,
+        [
+          studentAgent.id,
+          'coach_action_item_scheduled',
+          `Scheduled Backpack action item "${reminderPlan.title}".`,
+          JSON.stringify({
+            assetId: asset.id,
+            actionItem: matchedActionItem,
+            schedulePreset: normalizedPreset,
+            reminderAt: reminderPlan.reminderAt.toISOString(),
+          }),
+        ]
+      );
+    }
+
+    return res.status(201).json({
+      ok: true,
+      duplicate: false,
+      reminder: persistedReminder,
+      message: 'Added to your task list.',
+    });
+  } catch (error) {
+    console.error('[coach] failed to add action item to reminders', {
+      userId: req.user!.id,
+      assetId: req.params.assetId,
+      message: error instanceof Error ? error.message : 'Unknown action-item reminder error',
+    });
+    return res.status(500).json({
+      error: 'task_handoff_failed',
+      message: 'StudyClaw could not add that action item to your task list right now. Please try again.',
+    });
+  }
+});
+
 coachRouter.post('/process', async (req: AuthedRequest, res) => {
   await ensurePlatformSchema();
   const { title, text, sourceType = 'document', attachments = [] } = req.body as {
@@ -242,8 +451,21 @@ ${text}
 `;
 
   const context = isAdmin
-    ? { profile: null, subjects: [], reminders: [] }
-    : await buildStudyContext(req.user!.id);
+    ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] } }
+    : await buildStudyContext(req.user!.id, { query: `${title}\n\n${text.slice(0, 600)}` });
+  const usageReservation = isAdmin
+    ? { eventId: null as string | null }
+    : await reserveManagedUsageEvent({
+        userId: req.user!.id,
+        feature: 'coach-process',
+        modelKey: agent.model_key,
+        eventKey: `coach-process:${title}:${randomUUID()}`,
+        metadata: {
+          sourceType,
+          attachmentCount: attachments.length,
+        },
+      });
+  const usageEventId = usageReservation.eventId;
 
   try {
     const reply = await openclaw.sendMessage({
@@ -305,6 +527,66 @@ ${text}
         ]
       );
     }
+    const noteEvent = await recordStudyEvent({
+      userId: req.user!.id,
+      eventKey: `coach-process:${savedAsset.rows[0]?.id ?? title}`,
+      eventType: 'note_processed',
+      sourceType: 'study_asset',
+      sourceId: savedAsset.rows[0]?.id ?? null,
+      courseId: subject?.id ?? null,
+      payload: {
+        sectionName,
+        sourceType,
+        actionItemsCount: actionItems.length,
+        knowledgeCount: knowledge.length,
+      },
+    });
+    await updateTopicMastery({
+      userId: req.user!.id,
+      topicName: sectionName,
+      courseId: subject?.id ?? null,
+      delta: 0.02,
+      sourceEventId: noteEvent.id,
+      notes: 'Captured and processed Backpack note',
+    });
+    await writeMemorySummary({
+      userId: req.user!.id,
+      summaryType: 'note_processed',
+      summary: `${sectionName === 'Unsorted' ? 'Student added a new study note' : `Student added new notes for ${sectionName}`}: ${summary}`,
+      courseId: subject?.id ?? null,
+      sourceEventId: noteEvent.id,
+      summaryKey: `note:${savedAsset.rows[0]?.id ?? noteEvent.id}`,
+      importance: 3,
+    });
+    for (const item of knowledge) {
+      const titleText = String(item?.title ?? '').trim();
+      const detailText = String(item?.detail ?? '').trim();
+      const kindText = String(item?.kind ?? '').trim().toLowerCase();
+      if (!titleText || !detailText) {
+        continue;
+      }
+
+      if (kindText === 'preference' || kindText === 'logistics') {
+        await writeMemorySummary({
+          userId: req.user!.id,
+          summaryType: kindText,
+          summary: `${titleText}: ${detailText}`,
+          courseId: subject?.id ?? null,
+          sourceEventId: noteEvent.id,
+          summaryKey: `knowledge:${savedAsset.rows[0]?.id ?? noteEvent.id}:${kindText}:${titleText.toLowerCase()}`,
+          importance: kindText === 'preference' ? 5 : 4,
+        });
+      }
+    }
+    await finalizeManagedUsageEvent({
+      eventId: usageEventId,
+      success: true,
+      metadata: {
+        outcome: 'coach_processed',
+        sectionName,
+        assetId: savedAsset.rows[0]?.id ?? null,
+      },
+    });
     res.json({
       assetId: savedAsset.rows[0]?.id ?? null,
       sectionName,
@@ -313,7 +595,21 @@ ${text}
       actionItems,
       knowledge,
     });
-  } catch {
+  } catch (error) {
+    await finalizeManagedUsageEvent({
+      eventId: usageEventId,
+      success: false,
+      metadata: {
+        error: error instanceof Error ? error.message : 'Coach processing failed',
+      },
+    });
+    if (error instanceof ManagedUsageLimitError) {
+      return res.status(error.statusCode).json({
+        error: error.code,
+        message: error.message,
+        detail: error.detail,
+      });
+    }
     const sectionName = 'Unsorted';
     const assetType = inferAssetType(sourceType, title, attachments);
     const fallbackTranscript = text.trim();

@@ -2,9 +2,12 @@ import { Router } from 'express';
 import { requireAuth, type AuthedRequest } from '../../lib/auth';
 import { 
   buildGoogleAuthUrl,
-  getGoogleConnectionStatus, 
-  listUpcomingCalendarEvents, 
-  listRecentDriveFiles 
+  createCalendarEvent,
+  disconnectGoogleIntegration,
+  getGoogleConnectionStatus,
+  listUpcomingCalendarEvents,
+  listRecentDriveFiles,
+  syncGoogleSkillForUser,
 } from '../../lib/google-service';
 
 export const googleRouter = Router();
@@ -37,12 +40,35 @@ googleRouter.get('/', async (req: AuthedRequest, res) => {
   try {
     const status = await getGoogleConnectionStatus(req.user!.id);
     res.json({
+      status: status.status,
       connected: status.connected,
+      needsReconnect: status.needsReconnect,
       account: status.googleEmail,
-      gogInstalled: true,
+      googleEmail: status.googleEmail,
+      scopes: status.scopes,
+      canReadCalendar: status.canReadCalendar,
+      canWriteCalendar: status.canWriteCalendar,
+      canReadDrive: status.canReadDrive,
+      expiresAt: status.expiresAt,
     });
   } catch (error) {
     res.status(500).json({ error: 'server_error', message: 'Failed to check Google connection' });
+  }
+});
+
+googleRouter.post('/disconnect', async (req: AuthedRequest, res) => {
+  try {
+    await disconnectGoogleIntegration(req.user!.id);
+    res.json({
+      ok: true,
+      status: 'not_connected',
+      connected: false,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'disconnect_failed',
+      message: error instanceof Error ? error.message : 'Failed to disconnect Google',
+    });
   }
 });
 
@@ -51,7 +77,14 @@ googleRouter.get('/calendar', async (req: AuthedRequest, res) => {
   try {
     const status = await getGoogleConnectionStatus(req.user!.id);
     if (!status.connected) {
-      return res.status(400).json({ error: 'not_connected', message: 'Google account not connected. Go to /api/auth/google to connect.' });
+      return res.status(400).json({
+        connected: false,
+        status: status.status,
+        error: status.needsReconnect ? 'reconnect_required' : 'not_connected',
+        message: status.needsReconnect
+          ? 'Google Calendar needs to be reconnected before events can load.'
+          : 'Google account not connected.',
+      });
     }
     
     const days = Math.min(Math.max(parseInt(req.query.days as string) || 7, 1), 90);
@@ -63,6 +96,47 @@ googleRouter.get('/calendar', async (req: AuthedRequest, res) => {
       return res.status(400).json({ connected: false, error: msg });
     }
     res.status(500).json({ error: 'fetch_error', message: msg });
+  }
+});
+
+googleRouter.post('/calendar/events', async (req: AuthedRequest, res) => {
+  try {
+    const { title, startsAt, endsAt, description, timeZone } = req.body as {
+      title?: string;
+      startsAt?: string;
+      endsAt?: string;
+      description?: string;
+      timeZone?: string;
+    };
+
+    if (!title?.trim() || !startsAt?.trim()) {
+      return res.status(400).json({
+        error: 'bad_request',
+        message: 'title and startsAt are required',
+      });
+    }
+
+    const event = await createCalendarEvent(req.user!.id, {
+      title: title.trim(),
+      startsAt: startsAt.trim(),
+      endsAt: endsAt?.trim() || null,
+      description: description?.trim() || null,
+      timeZone: timeZone?.trim() || null,
+    });
+    await syncGoogleSkillForUser(req.user!.id).catch(() => undefined);
+
+    res.status(201).json({
+      id: event.id,
+      title: event.summary ?? title.trim(),
+      htmlLink: event.htmlLink ?? null,
+      startsAt: event.start?.dateTime ?? startsAt.trim(),
+      endsAt: event.end?.dateTime ?? endsAt?.trim() ?? null,
+    });
+  } catch (error) {
+    res.status(400).json({
+      error: 'calendar_event_create_failed',
+      message: error instanceof Error ? error.message : 'Failed to create calendar event',
+    });
   }
 });
 

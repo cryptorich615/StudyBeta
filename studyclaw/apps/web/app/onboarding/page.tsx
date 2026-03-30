@@ -5,6 +5,8 @@ import { apiFetch } from '../../lib/api';
 import { isOnboardingComplete, readStoredSession, writeStoredSession } from '../../lib/session';
 import { consumePayloadFromUrl } from '../../lib/consumePayload';
 
+const ONBOARDING_DRAFT_KEY = 'studyclaw-onboarding-draft';
+
 const AGENTS = [
   {
     key: 'quick_start_2',
@@ -30,6 +32,12 @@ const AGENTS = [
   },
 ];
 
+const TEST_TIERS = [
+  { key: 'tier_1', label: 'Tier 1', credits: 1000, detail: '1000 starting credits' },
+  { key: 'tier_2', label: 'Tier 2', credits: 2000, detail: '2000 starting credits' },
+  { key: 'tier_3', label: 'Tier 3', credits: 3000, detail: '3000 starting credits' },
+] as const;
+
 const DEFAULT_MODELS = [
   {
     key: 'openrouter/auto',
@@ -54,14 +62,14 @@ const DEFAULT_MODELS = [
   },
   {
     key: 'minimax/MiniMax-M2.7',
-    name: 'MiniMax M2.7',
+    name: 'MiniMax M2.7 (configured)',
     provider: 'minimax',
     oauthAvailable: false,
     isFree: false,
   },
   {
     key: 'minimax/MiniMax-M2.5',
-    name: 'MiniMax M2.5',
+    name: 'MiniMax M2.5 (configured)',
     provider: 'minimax',
     oauthAvailable: false,
     isFree: false,
@@ -84,6 +92,14 @@ type OnboardingModelOption = {
 };
 
 function mergeModelOptions(models: OnboardingModelOption[]) {
+  const priority = new Map<string, number>([
+    ['minimax/MiniMax-M2.7', 0],
+    ['minimax/MiniMax-M2.5', 1],
+    ['openrouter/auto', 2],
+    ['openrouter/free', 3],
+    ['ollama/lfm2.5-thinking:latest', 4],
+  ]);
+
   return Array.from(
     models.reduce((acc, model) => {
       if (!model?.key) {
@@ -97,11 +113,10 @@ function mergeModelOptions(models: OnboardingModelOption[]) {
   )
     .map(([, model]) => model)
     .sort((left, right) => {
-      const leftDefault = DEFAULT_MODELS.some((model) => model.key === left.key);
-      const rightDefault = DEFAULT_MODELS.some((model) => model.key === right.key);
-
-      if (leftDefault !== rightDefault) {
-        return leftDefault ? -1 : 1;
+      const leftPriority = priority.get(left.key) ?? 100;
+      const rightPriority = priority.get(right.key) ?? 100;
+      if (leftPriority !== rightPriority) {
+        return leftPriority - rightPriority;
       }
 
       if (!!left.isFree !== !!right.isFree) {
@@ -120,6 +135,43 @@ function isValidPreset(value: string): value is 'quick_start_1' | 'quick_start_2
   return value === 'quick_start_1' || value === 'quick_start_2';
 }
 
+function readOnboardingDraft() {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const raw = window.localStorage.getItem(ONBOARDING_DRAFT_KEY);
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw) as {
+      selectedAgent?: 'quick_start_1' | 'quick_start_2';
+      selectedTier?: 'tier_1' | 'tier_2' | 'tier_3';
+    };
+  } catch {
+    window.localStorage.removeItem(ONBOARDING_DRAFT_KEY);
+    return null;
+  }
+}
+
+function writeOnboardingDraft(draft: { selectedAgent?: string; selectedTier?: string }) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.setItem(ONBOARDING_DRAFT_KEY, JSON.stringify(draft));
+}
+
+function clearOnboardingDraft() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.removeItem(ONBOARDING_DRAFT_KEY);
+}
+
 function OnboardingPageContent() {
   const router = useRouter();
   const [step, setStep] = useState<1 | 2>(1);
@@ -130,6 +182,9 @@ function OnboardingPageContent() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [existingCredential, setExistingCredential] = useState<{ providerId?: string; hasApiKey?: boolean } | null>(null);
+  const [miniMaxAccessMode, setMiniMaxAccessMode] = useState<'managed' | 'byok'>('managed');
+  const [selectedTier, setSelectedTier] = useState<'tier_1' | 'tier_2' | 'tier_3' | null>(null);
+  const [tierStatus, setTierStatus] = useState('');
   const searchParams = useSearchParams();
 
   useEffect(() => {
@@ -154,10 +209,29 @@ function OnboardingPageContent() {
             : null;
         const nextModels = mergeModelOptions([...(optionsData?.models ?? []), ...DEFAULT_MODELS]);
         const savedPreset = statusData?.agent?.preset_key ?? statusData?.agent?.agent_type ?? '';
+        const draft = readOnboardingDraft();
 
         setModels(nextModels);
         setExistingCredential(statusData?.credentials ?? null);
-        setSelectedAgent(isValidPreset(savedPreset) ? savedPreset : '');
+        setSelectedAgent(
+          draft?.selectedAgent && isValidPreset(draft.selectedAgent)
+            ? draft.selectedAgent
+            : isValidPreset(savedPreset)
+              ? savedPreset
+              : ''
+        );
+        setMiniMaxAccessMode(statusData?.usageProfile?.billingMode === 'byok' ? 'byok' : 'managed');
+        setSelectedTier(
+          draft?.selectedTier === 'tier_1' ||
+          draft?.selectedTier === 'tier_2' ||
+          draft?.selectedTier === 'tier_3'
+            ? draft.selectedTier
+            : statusData?.usageProfile?.tier === 'tier_1' ||
+              statusData?.usageProfile?.tier === 'tier_2' ||
+              statusData?.usageProfile?.tier === 'tier_3'
+            ? statusData.usageProfile.tier
+            : null
+        );
 
         const preferredModel =
           nextModels.find((model: { key: string }) => model.key === statusData?.agent?.model_key) ??
@@ -179,9 +253,46 @@ function OnboardingPageContent() {
   const handleAgentSelect = (key: string) => {
     setSelectedAgent(key);
     setError('');
+    writeOnboardingDraft({
+      selectedAgent: key,
+      selectedTier: selectedTier ?? undefined,
+    });
+  };
+
+  const handleTierSelect = async (tier: 'tier_1' | 'tier_2' | 'tier_3') => {
+    setSelectedTier(tier);
+    setTierStatus('Saving tier...');
+    setError('');
+    try {
+      const response = await apiFetch('/api/onboarding/testing-tier', {
+        method: 'POST',
+        body: JSON.stringify({ tier }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        setTierStatus(data?.message ?? 'Failed to save tier');
+        return;
+      }
+
+      const stored = readStoredSession();
+      if (stored) {
+        writeStoredSession({
+          ...stored,
+          usageProfile: data?.usageProfile ?? stored.usageProfile ?? null,
+        });
+      }
+      writeOnboardingDraft({
+        selectedAgent: selectedAgent || undefined,
+        selectedTier: tier,
+      });
+      setTierStatus(`${TEST_TIERS.find((item) => item.key === tier)?.label} saved for onboarding testing.`);
+    } catch {
+      setTierStatus('Failed to save tier');
+    }
   };
 
   const handleNext = () => {
+    if (!selectedTier) { setError('Choose a temporary testing tier before continuing.'); return; }
     if (!selectedAgent) { setError('Please choose your study companion to continue.'); return; }
     setStep(2);
   };
@@ -195,7 +306,12 @@ function OnboardingPageContent() {
     try {
       const res = await apiFetch('/api/onboarding/model-config', {
         method: 'POST',
-        body: JSON.stringify({ modelKey, apiKey: apiKey.trim(), agentPreset: effectiveAgentPreset }),
+        body: JSON.stringify({
+          modelKey,
+          apiKey: apiKey.trim(),
+          agentPreset: effectiveAgentPreset,
+          usageMode: isManagedConfiguredMiniMax ? miniMaxAccessMode : undefined,
+        }),
       });
       let data: any = null;
       try {
@@ -214,8 +330,10 @@ function OnboardingPageContent() {
             agent_type: effectiveAgentPreset,
           },
           onboardingComplete: true,
+          usageProfile: data?.usageProfile ?? session.usageProfile ?? null,
         });
       }
+      clearOnboardingDraft();
 
       router.push('/dashboard');
     } catch (e) {
@@ -226,8 +344,17 @@ function OnboardingPageContent() {
   };
 
   const selectedModel = models.find(m => m.key === modelKey);
-  const hasSavedCredential = !!existingCredential?.hasApiKey && existingCredential?.providerId === selectedModel?.provider;
-  const requiresApiKey = selectedModel?.provider !== 'ollama' && !hasSavedCredential;
+  const isManagedConfiguredMiniMax =
+    selectedModel?.provider === 'minimax' &&
+    (selectedModel.key === 'minimax/MiniMax-M2.7' || selectedModel.key === 'minimax/MiniMax-M2.5');
+  const hasSavedCredential =
+    !!existingCredential?.hasApiKey &&
+    existingCredential?.providerId === selectedModel?.provider &&
+    !(isManagedConfiguredMiniMax && miniMaxAccessMode === 'managed');
+  const requiresApiKey =
+    selectedModel?.provider !== 'ollama' &&
+    !(isManagedConfiguredMiniMax && miniMaxAccessMode === 'managed') &&
+    !hasSavedCredential;
 
   const handleOpenRouterConnect = () => {
     const openRouterModel =
@@ -251,171 +378,292 @@ function OnboardingPageContent() {
   };
 
   return (
-    <div className="min-h-screen bg-background flex flex-col items-center justify-center px-4 py-12">
-      {/* Header */}
-      <div className="text-center mb-10">
-        <p className="text-4xl font-bold mb-2">🦀 StudyClaw</p>
-        <p className="text-muted-foreground text-lg">
-          {step === 1 ? 'Choose your study companion' : 'Connect your AI provider'}
-        </p>
-        {/* Steps */}
-        <div className="flex items-center justify-center gap-3 mt-5">
-          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
-            step >= 1 ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'
-          }`}>1</div>
-          <div className={`h-1 w-16 rounded ${ step >= 2 ? 'bg-primary' : 'bg-muted' }`} />
-          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
-            step >= 2 ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'
-          }`}>2</div>
+    <section className="onboarding-shell">
+      <header className="onboarding-header">
+        <div>
+          <p className="onboarding-header__eyebrow">StudyClaw onboarding</p>
+          <h1 className="onboarding-header__title">
+            {step === 1 ? 'Choose your study companion and testing tier.' : 'Connect the model setup that will power your agent.'}
+          </h1>
+          <p className="onboarding-header__description">
+            This setup flow creates your StudyClaw workspace, ties in your model access, and gets your account ready for real study sessions.
+          </p>
         </div>
-      </div>
+        <div className="onboarding-header__brand">
+          <strong>🦀 StudyClaw</strong>
+          <span>Focused study help, configured once.</span>
+        </div>
+      </header>
 
-      {step === 1 && (
-        <div className="w-full max-w-2xl">
-          <h2 className="text-xl font-semibold mb-6 text-center">Pick your agent — this is permanent for your account</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-8">
-            {AGENTS.map(agent => (
-              <button
-                key={agent.key}
-                onClick={() => handleAgentSelect(agent.key)}
-                className={`relative p-6 rounded-2xl border-2 text-left transition-all duration-200 bg-gradient-to-br ${
-                  agent.color
-                } ${
-                  selectedAgent === agent.key
-                    ? agent.border + ' ring-2 ring-offset-2 ring-offset-background ring-primary scale-[1.02]'
-                    : 'border-border hover:border-primary/40 hover:scale-[1.01]'
-                }`}
-              >
-                {selectedAgent === agent.key && (
-                  <span className="absolute top-3 right-3 text-primary text-xl">✓</span>
-                )}
-                <div className="text-4xl mb-3">{agent.emoji}</div>
-                <h3 className="text-xl font-bold mb-1">{agent.name}</h3>
-                <p className={`text-xs font-semibold uppercase tracking-wider mb-3 px-2 py-1 rounded-full inline-block ${ agent.badge }`}>
-                  {agent.tagline}
-                </p>
-                <p className="text-sm text-muted-foreground mb-4">{agent.description}</p>
-                <ul className="space-y-1">
-                  {agent.traits.map(t => (
-                    <li key={t} className="text-xs text-muted-foreground flex items-center gap-2">
-                      <span className="text-primary">•</span> {t}
-                    </li>
+      <section className="onboarding-layout">
+        <aside className="onboarding-sidebar">
+          <div className="onboarding-progress-card">
+            <p className="eyebrow">Progress</p>
+            <div className="onboarding-progress-steps">
+              <div className={`onboarding-progress-step ${step >= 1 ? 'is-active' : ''}`}>
+                <span>1</span>
+                <div>
+                  <strong>Tier + companion</strong>
+                  <p>Pick a testing tier and the study style you want.</p>
+                </div>
+              </div>
+              <div className={`onboarding-progress-step ${step >= 2 ? 'is-active' : ''}`}>
+                <span>2</span>
+                <div>
+                  <strong>Model connection</strong>
+                  <p>Choose how StudyClaw should power your agent.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="onboarding-summary-card">
+            <p className="eyebrow">Current setup</p>
+            <div className="onboarding-summary-row">
+              <span>Tier</span>
+              <strong>{selectedTier ? TEST_TIERS.find((tier) => tier.key === selectedTier)?.label : 'Not selected'}</strong>
+            </div>
+            <div className="onboarding-summary-row">
+              <span>Companion</span>
+              <strong>{selectedAgent ? AGENTS.find((agent) => agent.key === selectedAgent)?.name : 'Not selected'}</strong>
+            </div>
+            <div className="onboarding-summary-row">
+              <span>Model</span>
+              <strong>{selectedModel?.name ?? 'Choose at step 2'}</strong>
+            </div>
+          </div>
+
+          <div className="onboarding-helper-card">
+            <p className="eyebrow">What this affects</p>
+            <p className="muted-copy">
+              Your companion shapes tone and teaching style. Your model setup controls how StudyClaw actually runs chat, coaching, reminders, and study tools.
+            </p>
+          </div>
+        </aside>
+
+        <main className="onboarding-main">
+          {step === 1 ? (
+            <div className="onboarding-panel">
+              <div className="onboarding-panel__head">
+                <div>
+                  <p className="eyebrow">Step 1</p>
+                  <h2 className="section-title">Choose your testing tier and companion</h2>
+                </div>
+              </div>
+
+              <section className="onboarding-tier-section">
+                <div className="onboarding-section-copy">
+                  <strong>Temporary testing tier</strong>
+                  <p>This writes a real tier to the backend immediately and seeds the account with a live test credit balance.</p>
+                </div>
+                <div className="onboarding-tier-grid">
+                  {TEST_TIERS.map((tier) => (
+                    <button
+                      key={tier.key}
+                      type="button"
+                      onClick={() => void handleTierSelect(tier.key)}
+                      className={`onboarding-tier-card${selectedTier === tier.key ? ' is-active' : ''}`}
+                    >
+                      <strong>{tier.label}</strong>
+                      <span>{tier.detail}</span>
+                    </button>
                   ))}
-                </ul>
-              </button>
-            ))}
-          </div>
-          {error && <p className="text-destructive text-sm text-center mb-4">{error}</p>}
-          <button
-            onClick={handleNext}
-            disabled={!selectedAgent}
-            className="w-full py-3 rounded-xl bg-primary text-primary-foreground font-semibold text-lg disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
-          >
-            {selectedAgent ? `Continue with ${AGENTS.find(a => a.key === selectedAgent)?.name}` : 'Continue to provider setup'} →
-          </button>
-        </div>
-      )}
+                </div>
+                <p className="onboarding-status-copy">
+                  {tierStatus || 'Select one tier to persist it in the database before continuing.'}
+                </p>
+              </section>
 
-      {step === 2 && (
-        <div className="w-full max-w-md">
-          <div className="bg-card border border-border rounded-2xl p-6 mb-5">
-            <p className="text-sm text-muted-foreground mb-1">Your companion</p>
-            <div className="flex items-center gap-3">
-              <span className="text-2xl">{AGENTS.find(a => a.key === selectedAgent)?.emoji}</span>
-              <span className="font-bold text-lg">{AGENTS.find(a => a.key === selectedAgent)?.name}</span>
-              <button onClick={() => setStep(1)} className="ml-auto text-xs text-muted-foreground underline">Change</button>
-            </div>
-          </div>
+              <section className="onboarding-agent-section">
+                <div className="onboarding-section-copy">
+                  <strong>Pick your study companion</strong>
+                  <p>This becomes the default teaching personality tied to your account.</p>
+                </div>
+                <div className="onboarding-agent-grid">
+                  {AGENTS.map((agent) => (
+                    <button
+                      key={agent.key}
+                      onClick={() => handleAgentSelect(agent.key)}
+                      className={`onboarding-agent-card${selectedAgent === agent.key ? ' is-active' : ''}`}
+                    >
+                      <div className="onboarding-agent-card__badge-row">
+                        <span className="onboarding-agent-card__emoji">{agent.emoji}</span>
+                        <span className="onboarding-agent-card__tag">{agent.tagline}</span>
+                      </div>
+                      <strong>{agent.name}</strong>
+                      <p>{agent.description}</p>
+                      <ul>
+                        {agent.traits.map((trait) => (
+                          <li key={trait}>{trait}</li>
+                        ))}
+                      </ul>
+                    </button>
+                  ))}
+                </div>
+              </section>
 
-          <div className="space-y-5">
-            <div className="rounded-2xl border border-border bg-card p-5">
-              <p className="text-sm font-semibold text-foreground">Connect OpenRouter for the fastest setup</p>
-              <p className="mt-2 text-sm text-muted-foreground">
-                StudyClaw needs a provider connection so your agent can actually generate responses, save your model choice,
-                and run chats, coaching, and study tools on your own account. Google sign-in only unlocks your account.
-                Calendar and Drive can be connected later in settings without blocking this setup.
-              </p>
-              <button
-                type="button"
-                onClick={handleOpenRouterConnect}
-                className="mt-4 inline-flex items-center rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 text-sm font-medium text-primary hover:bg-primary/15"
-              >
-                Connect OpenRouter
-              </button>
-            </div>
+              {error ? <p className="onboarding-error">{error}</p> : null}
 
-            <div className="flex items-center gap-3">
-              <div className="h-px flex-1 bg-border" />
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">OR BYOK (Bring Your Own Key)</p>
-              <div className="h-px flex-1 bg-border" />
-            </div>
-
-            {/* Model selector */}
-            <div>
-              <label className="block text-sm font-medium mb-2">AI Provider &amp; Model</label>
-              <select
-                value={modelKey}
-                onChange={e => setModelKey(e.target.value)}
-                className="w-full bg-input border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-              >
-                {models.map(m => (
-                  <option key={m.key} value={m.key}>{m.name} ({m.provider})</option>
-                ))}
-              </select>
-            </div>
-
-            {/* API Key */}
-            <div>
-              <label className="block text-sm font-medium mb-2">
-                API Key {requiresApiKey ? <span className="text-destructive">*</span> : <span className="text-muted-foreground">(already saved or not needed)</span>}
-              </label>
-              {selectedModel?.provider === 'minimax' ? (
+              <div className="onboarding-actions">
                 <button
-                  type="button"
-                  onClick={handleMiniMaxConnect}
-                  className="mb-3 inline-flex items-center rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 text-sm font-medium text-primary hover:bg-primary/15"
+                  onClick={handleNext}
+                  disabled={!selectedAgent || !selectedTier}
                 >
-                  Get MiniMax API Key
+                  {selectedAgent ? `Continue with ${AGENTS.find((agent) => agent.key === selectedAgent)?.name}` : 'Continue to provider setup'}
                 </button>
-              ) : null}
-              <input
-                type="password"
-                value={apiKey}
-                onChange={e => { setApiKey(e.target.value); setError(''); }}
-                placeholder={
-                  selectedModel?.provider === 'ollama'
-                    ? 'No API key needed for local Ollama'
-                    : selectedModel?.provider === 'openrouter'
-                      ? 'sk-or-v1-...'
-                      : selectedModel?.provider === 'minimax'
-                        ? 'Enter your MiniMax API key'
-                      : 'Enter your API key'
-                }
-                className="w-full bg-input border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                disabled={!requiresApiKey}
-              />
-              <p className="text-xs text-muted-foreground mt-1">
-                {hasSavedCredential
-                  ? 'You already have a saved key for this provider, so you do not need to enter it again.'
-                  : requiresApiKey
-                  ? 'Your key is encrypted and never shared. Used only to power your agent.'
-                  : 'This model runs through your local Ollama setup, so no API key is required.'}
-              </p>
+              </div>
             </div>
+          ) : (
+            <div className="onboarding-panel">
+              <div className="onboarding-panel__head">
+                <div>
+                  <p className="eyebrow">Step 2</p>
+                  <h2 className="section-title">Connect your model setup</h2>
+                </div>
+                <button type="button" className="ghost-button" onClick={() => setStep(1)}>
+                  Change companion
+                </button>
+              </div>
 
-            {error && <p className="text-destructive text-sm">{error}</p>}
+              <section className="onboarding-selection-card">
+                <p className="eyebrow">Chosen companion</p>
+                <div className="onboarding-selection-card__row">
+                  <span className="onboarding-selection-card__emoji">{AGENTS.find((agent) => agent.key === selectedAgent)?.emoji}</span>
+                  <div>
+                    <strong>{AGENTS.find((agent) => agent.key === selectedAgent)?.name}</strong>
+                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                      {AGENTS.find((agent) => agent.key === selectedAgent)?.tagline}
+                    </p>
+                  </div>
+                </div>
+              </section>
 
-            <button
-              onClick={handleSubmit}
-              disabled={isSubmitting || (requiresApiKey && !apiKey.trim()) || !modelKey}
-              className="w-full py-3 rounded-xl bg-primary text-primary-foreground font-semibold text-lg disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
-            >
-              {isSubmitting ? 'Activating your agent...' : 'Launch StudyClaw 🚀'}
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
+              <section className="onboarding-provider-card">
+                <p className="eyebrow">Recommended setup</p>
+                <strong>Connect OpenRouter for the fastest start</strong>
+                <p className="muted-copy" style={{ marginTop: 10 }}>
+                  StudyClaw needs a provider connection so your agent can chat, coach, generate study tools, and save your chosen model.
+                  Google sign-in only unlocks your account. Calendar and Drive can be connected later in settings.
+                </p>
+                <button type="button" className="ghost-button" onClick={handleOpenRouterConnect}>
+                  Connect OpenRouter
+                </button>
+              </section>
+
+              <div className="onboarding-divider">
+                <div />
+                <p>Or bring your own model setup</p>
+                <div />
+              </div>
+
+              <div className="form-field">
+                <label htmlFor="onboarding-model-key">AI Provider &amp; Model</label>
+                <select
+                  id="onboarding-model-key"
+                  value={modelKey}
+                  onChange={(event) => {
+                    const nextModelKey = event.target.value;
+                    setModelKey(nextModelKey);
+                    if (nextModelKey.startsWith('minimax/')) {
+                      setMiniMaxAccessMode('managed');
+                    }
+                  }}
+                >
+                  {models.map((model) => (
+                    <option key={model.key} value={model.key}>
+                      {model.name} ({model.provider})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {isManagedConfiguredMiniMax ? (
+                <section className="onboarding-access-mode-card">
+                  <p className="eyebrow">MiniMax access mode</p>
+                  <p className="muted-copy" style={{ marginTop: 8 }}>
+                    The configured MiniMax profiles can run on StudyClaw-managed credits, or you can switch to BYOK and use your own MiniMax key directly.
+                  </p>
+                  <div className="onboarding-access-mode-grid">
+                    <button
+                      type="button"
+                      onClick={() => setMiniMaxAccessMode('managed')}
+                      className={`onboarding-access-mode-option${miniMaxAccessMode === 'managed' ? ' is-active' : ''}`}
+                    >
+                      <strong>Use StudyClaw-managed credits</strong>
+                      <span>No MiniMax key needed here. StudyClaw enforces your rolling quota server-side.</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMiniMaxAccessMode('byok')}
+                      className={`onboarding-access-mode-option${miniMaxAccessMode === 'byok' ? ' is-active' : ''}`}
+                    >
+                      <strong>Bring your own MiniMax key</strong>
+                      <span>Bypass StudyClaw credits and use MiniMax on your own provider account.</span>
+                    </button>
+                  </div>
+                </section>
+              ) : null}
+
+              <div className="form-field">
+                <label htmlFor="onboarding-api-key">
+                  API Key {requiresApiKey ? <span className="onboarding-required">*</span> : <span className="muted-copy">(already saved or not needed)</span>}
+                </label>
+                {selectedModel?.provider === 'minimax' && miniMaxAccessMode === 'byok' ? (
+                  <button
+                    type="button"
+                    onClick={handleMiniMaxConnect}
+                    className="ghost-button onboarding-inline-action"
+                  >
+                    Get MiniMax API Key
+                  </button>
+                ) : null}
+                <input
+                  id="onboarding-api-key"
+                  type="password"
+                  value={apiKey}
+                  onChange={(event) => {
+                    setApiKey(event.target.value);
+                    setError('');
+                  }}
+                  placeholder={
+                    selectedModel?.provider === 'ollama'
+                      ? 'No API key needed for local Ollama'
+                      : isManagedConfiguredMiniMax && miniMaxAccessMode === 'managed'
+                        ? 'StudyClaw-managed MiniMax does not require a MiniMax key here'
+                      : selectedModel?.provider === 'openrouter'
+                        ? 'sk-or-v1-...'
+                        : selectedModel?.provider === 'minimax'
+                          ? 'Enter your MiniMax API key'
+                        : 'Enter your API key'
+                  }
+                  disabled={!requiresApiKey}
+                />
+                <p className="onboarding-status-copy">
+                  {isManagedConfiguredMiniMax && miniMaxAccessMode === 'managed'
+                    ? 'StudyClaw will attach this account to a private internal usage identity and keep the real MiniMax API key on the server.'
+                    : hasSavedCredential
+                      ? 'You already have a saved key for this provider, so you do not need to enter it again.'
+                      : requiresApiKey
+                        ? 'Your key is encrypted and used only to power your own agent.'
+                        : 'This model runs through your local Ollama setup, so no API key is required.'}
+                </p>
+              </div>
+
+              {error ? <p className="onboarding-error">{error}</p> : null}
+
+              <div className="onboarding-actions">
+                <button
+                  onClick={handleSubmit}
+                  disabled={isSubmitting || (requiresApiKey && !apiKey.trim()) || !modelKey}
+                >
+                  {isSubmitting ? 'Activating your agent...' : 'Launch StudyClaw'}
+                </button>
+              </div>
+            </div>
+          )}
+        </main>
+      </section>
+    </section>
   );
 }
 

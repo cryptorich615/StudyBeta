@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { requireAuth, type AuthedRequest } from '../../lib/auth';
 import { OpenClawClient } from '../../integrations/openclaw/openclaw.client';
@@ -8,6 +9,24 @@ import {
     loadAgentProfile,
 } from '../../lib/study-context';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
+import {
+    ManagedUsageLimitError,
+    finalizeManagedUsageEvent,
+    reserveManagedUsageEvent,
+} from '../../lib/managed-usage';
+import {
+    buildImprovementSummary,
+    clamp,
+    recordStudyEvent,
+    updateTopicMastery,
+    writeMemorySummary,
+} from '../../lib/student-memory';
+import {
+    hasUsableStudySourceText,
+    isRetryableGenerationError,
+    normalizeGenerationErrorMessage,
+    normalizeStudySourceText,
+} from '../../lib/study-generation';
 
 export const studyToolsRouter = Router();
 studyToolsRouter.use(requireAuth);
@@ -15,6 +34,7 @@ studyToolsRouter.use(requireAuth);
 const openclaw = new OpenClawClient();
 const MIN_FLASHCARDS = 4;
 const MIN_QUIZ_QUESTIONS = 3;
+const GENERATION_RETRY_LIMIT = 2;
 
 async function getStudentAgentRecord(userId: string) {
     const result = await db.query(`select id, name from agents where user_id = $1`, [userId]);
@@ -27,6 +47,67 @@ async function logAgentAction(agentId: string, actionType: string, summary: stri
          values ($1, $2, $3, $4)`,
         [agentId, actionType, summary, JSON.stringify(payload)]
     );
+}
+
+async function loadStudySourceAsset(userId: string, sourceAssetId: unknown) {
+    const normalizedId = String(sourceAssetId ?? '').trim();
+    if (!normalizedId) {
+        return null;
+    }
+
+    const result = await db.query(
+        `select id, title, processed_text, original_text
+         from study_assets
+         where id = $1
+           and user_id = $2
+         limit 1`,
+        [normalizedId, userId]
+    );
+
+    return result.rows[0] ?? null;
+}
+
+async function requestOpenClawGeneration(input: {
+    userId: string;
+    agentId: string;
+    modelKey: string;
+    instructions: string;
+    prompt: string;
+    metadata: Record<string, unknown>;
+    kind: 'flashcards' | 'quiz';
+}) {
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= GENERATION_RETRY_LIMIT; attempt += 1) {
+        try {
+            if (attempt > 1) {
+                console.warn('[study-tools] retrying OpenClaw generation', {
+                    kind: input.kind,
+                    userId: input.userId,
+                    attempt,
+                });
+            }
+
+            return await openclaw.sendMessage({
+                agentId: input.agentId,
+                instructions: input.instructions,
+                message: input.prompt,
+                model: input.modelKey,
+                metadata: {
+                    ...input.metadata,
+                    attempt,
+                },
+                userId: input.userId,
+            });
+        } catch (error) {
+            lastError = error;
+            if (attempt >= GENERATION_RETRY_LIMIT || !isRetryableGenerationError(error)) {
+                throw error;
+            }
+        }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error('Study generation failed');
 }
 
 function extractJsonPayload(value: string) {
@@ -128,6 +209,33 @@ function clampQuestionCount(value: unknown) {
     }
 
     return Math.min(Math.max(Math.round(numeric), MIN_QUIZ_QUESTIONS), 12);
+}
+
+function getProviderKeyFromModelKey(modelKey: string) {
+    return String(modelKey ?? '').split('/')[0] || 'unknown';
+}
+
+function formatProviderLabel(providerKey: string) {
+    const normalized = String(providerKey ?? '').trim().toLowerCase();
+    const aliases: Record<string, string> = {
+        openrouter: 'OpenRouter',
+        minimax: 'MiniMax',
+        ollama: 'Ollama',
+        openai: 'OpenAI',
+        'openai-codex': 'OpenAI Codex',
+        anthropic: 'Anthropic',
+        google: 'Google',
+    };
+
+    if (aliases[normalized]) {
+        return aliases[normalized];
+    }
+
+    return providerKey
+        .split(/[_-]/g)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
 }
 
 function normalizeFlashcards(rawCards: unknown) {
@@ -315,13 +423,35 @@ studyToolsRouter.get('/library', async (req: AuthedRequest, res) => {
 studyToolsRouter.post('/flashcards', async (req: AuthedRequest, res) => {
     await ensurePlatformSchema();
     const { title, text, sourceAssetId, subjectId, audienceLevel } = req.body as any;
-    const normalizedTitle = sanitizeRequiredText(title);
-    const normalizedText = sanitizeRequiredText(text);
+    const sourceAsset = await loadStudySourceAsset(req.user!.id, sourceAssetId);
+    if (String(sourceAssetId ?? '').trim() && !sourceAsset) {
+        return res.status(404).json({
+            error: 'source_asset_not_found',
+            message: 'The source note for this flashcard request could not be found.',
+        });
+    }
 
-    if (!normalizedTitle || !normalizedText) {
+    const normalizedTitle = sanitizeRequiredText(title) || sanitizeRequiredText(sourceAsset?.title) || 'Study flashcards';
+    const requestText = normalizeStudySourceText(text);
+    const assetText =
+        normalizeStudySourceText(sourceAsset?.processed_text) ||
+        normalizeStudySourceText(sourceAsset?.original_text);
+    const normalizedText =
+        hasUsableStudySourceText(requestText)
+            ? requestText
+            : assetText || requestText;
+
+    if (!normalizedTitle) {
         return res.status(400).json({
             error: 'bad_request',
-            message: 'title and text are required',
+            message: 'A title is required before flashcards can be generated.',
+        });
+    }
+
+    if (!hasUsableStudySourceText(normalizedText)) {
+        return res.status(400).json({
+            error: 'insufficient_source_text',
+            message: 'Add more note text before generating flashcards. StudyClaw needs a little more source material to work from.',
         });
     }
 
@@ -335,9 +465,21 @@ studyToolsRouter.post('/flashcards', async (req: AuthedRequest, res) => {
         });
     }
 
-    const context = await buildStudyContext(req.user!.id);
+    const context = await buildStudyContext(req.user!.id, { query: `${normalizedTitle}\n\n${normalizedText.slice(0, 600)}` });
     const learnerLevel = audienceLevel || context.profile?.grade_year || context.profile?.school_level || 'current student level';
     const instructions = buildStudyInstructions(agent.system_prompt, context);
+    const usageReservation = await reserveManagedUsageEvent({
+        userId: req.user!.id,
+        feature: 'flashcards',
+        modelKey: agent.model_key,
+        eventKey: `flashcards:${sourceAssetId ?? 'ad-hoc'}:${randomUUID()}`,
+        metadata: {
+            title: normalizedTitle,
+            sourceAssetId: sourceAssetId ?? null,
+            subjectId: subjectId ?? null,
+        },
+    });
+    const usageEventId = usageReservation.eventId;
 
     const prompt = `
 You are a study assistant.
@@ -363,22 +505,42 @@ ${normalizedText}
 `;
     let reply;
     try {
-        reply = await openclaw.sendMessage({
+        reply = await requestOpenClawGeneration({
+            userId: req.user!.id,
             agentId: agent.openclaw_agent_id,
+            modelKey: agent.model_key,
             instructions,
-            message: prompt,
-            model: agent.model_key,
+            prompt,
             metadata: {
                 feature: 'flashcards',
                 sourceAssetId,
                 subjectId,
             },
-            userId: req.user!.id,
+            kind: 'flashcards',
         });
     } catch (error) {
+        const message = normalizeGenerationErrorMessage({
+            error,
+            kind: 'flashcards',
+        });
+        await finalizeManagedUsageEvent({
+            eventId: usageEventId,
+            success: false,
+            metadata: {
+                error: error instanceof Error ? error.message : 'Flashcard generation failed',
+                normalizedMessage: message,
+            },
+        });
+        if (error instanceof ManagedUsageLimitError) {
+            return res.status(error.statusCode).json({
+                error: error.code,
+                message: error.message,
+                detail: error.detail,
+            });
+        }
         return res.status(502).json({
             error: 'openclaw_error',
-            message: error instanceof Error ? error.message : 'Flashcard generation failed',
+            message,
         });
     }
 
@@ -414,51 +576,148 @@ ${normalizedText}
     }
 
     if (cards.length < MIN_FLASHCARDS) {
+        await finalizeManagedUsageEvent({
+            eventId: usageEventId,
+            success: false,
+            metadata: {
+                outcome: 'validation_failed',
+                validatedCards: cards.length,
+            },
+        });
         return res.status(422).json({
             error: 'generation_failed',
-            message: `StudyClaw could only validate ${cards.length} flashcards. Try cleaner notes or generate again.`,
-            raw: reply.text,
+            message: `StudyClaw could only validate ${cards.length} flashcards from that material. Try cleaner notes or add more source text.`,
         });
     }
 
-    const set = await db.query(
-        `insert into flashcard_sets (user_id, subject_id, source_asset_id, title)
-     values ($1, $2, $3, $4)
-     returning *`,
-        [req.user!.id, subjectId ?? null, sourceAssetId ?? null, normalizedTitle]
-    );
+    const client = await db.connect();
+    let createdSet: any;
 
-    for (const card of cards) {
-        await db.query(
-            `insert into flashcards (set_id, front, back, difficulty)
-       values ($1, $2, $3, $4)`,
-            [set.rows[0].id, card.front, card.back, 2]
+    try {
+        await client.query('begin');
+        const set = await client.query(
+            `insert into flashcard_sets (user_id, subject_id, source_asset_id, title)
+             values ($1, $2, $3, $4)
+             returning *`,
+            [req.user!.id, subjectId ?? null, sourceAssetId ?? null, normalizedTitle]
         );
+        createdSet = set.rows[0];
+
+        for (const card of cards) {
+            await client.query(
+                `insert into flashcards (set_id, front, back, difficulty)
+                 values ($1, $2, $3, $4)`,
+                [createdSet.id, card.front, card.back, 2]
+            );
+        }
+        await client.query('commit');
+    } catch (error) {
+        await client.query('rollback');
+        console.error('[study-tools] failed to persist flashcards', {
+            userId: req.user!.id,
+            sourceAssetId: sourceAssetId ?? null,
+            message: error instanceof Error ? error.message : 'Unknown flashcard persistence error',
+        });
+        return res.status(500).json({
+            error: 'flashcard_save_failed',
+            message: 'Flashcards were generated but could not be saved. Please try again.',
+        });
+    } finally {
+        client.release();
     }
 
-    await logAgentAction(studentAgent.id, 'flashcards_generated', `Created ${cards.length} flashcards for ${title}.`, {
-        flashcardSetId: set.rows[0].id,
+    await logAgentAction(studentAgent.id, 'flashcards_generated', `Created ${cards.length} flashcards for ${normalizedTitle}.`, {
+        flashcardSetId: createdSet.id,
         sourceAssetId: sourceAssetId ?? null,
         subjectId: subjectId ?? null,
     });
+    const flashcardEvent = await recordStudyEvent({
+        userId: req.user!.id,
+        eventKey: `flashcards:${createdSet.id}:generated`,
+        eventType: 'flashcards_generated',
+        sourceType: 'flashcard_set',
+        sourceId: createdSet.id,
+        courseId: subjectId ?? null,
+        payload: {
+            title: normalizedTitle,
+            cardCount: cards.length,
+            sourceAssetId: sourceAssetId ?? null,
+        },
+    });
+    await updateTopicMastery({
+        userId: req.user!.id,
+        topicName: normalizedTitle,
+        courseId: subjectId ?? null,
+        delta: 0.03,
+        sourceEventId: flashcardEvent.id,
+        notes: 'Generated flashcards from study material',
+    });
+    await writeMemorySummary({
+        userId: req.user!.id,
+        summaryType: 'flashcards_generated',
+        summary: `Student generated ${cards.length} flashcards for ${normalizedTitle}.`,
+        courseId: subjectId ?? null,
+        sourceEventId: flashcardEvent.id,
+        summaryKey: `flashcards:${createdSet.id}:generated`,
+        importance: 3,
+    });
+    await finalizeManagedUsageEvent({
+        eventId: usageEventId,
+        success: true,
+        metadata: {
+            outcome: 'flashcards_generated',
+            flashcardSetId: createdSet.id,
+            cardCount: cards.length,
+        },
+    });
 
     res.json({
-        flashcardSetId: set.rows[0].id,
+        flashcardSetId: createdSet.id,
         cards,
+        generation: {
+            kind: 'flashcards',
+            modelKey: agent.model_key,
+            providerKey: getProviderKeyFromModelKey(agent.model_key),
+            providerLabel: formatProviderLabel(getProviderKeyFromModelKey(agent.model_key)),
+            itemCount: cards.length,
+            createdAt: new Date().toISOString(),
+        },
     });
 });
 
 studyToolsRouter.post('/quiz', async (req: AuthedRequest, res) => {
     await ensurePlatformSchema();
     const { title, text, sourceAssetId, subjectId, questionCount = 10, mode = 'practice', audienceLevel } = req.body as any;
-    const normalizedTitle = sanitizeRequiredText(title);
-    const normalizedText = sanitizeRequiredText(text);
+    const sourceAsset = await loadStudySourceAsset(req.user!.id, sourceAssetId);
+    if (String(sourceAssetId ?? '').trim() && !sourceAsset) {
+        return res.status(404).json({
+            error: 'source_asset_not_found',
+            message: 'The source note for this quiz request could not be found.',
+        });
+    }
+
+    const normalizedTitle = sanitizeRequiredText(title) || `${sanitizeRequiredText(sourceAsset?.title) || 'Study'} Quiz`;
+    const requestText = normalizeStudySourceText(text);
+    const assetText =
+        normalizeStudySourceText(sourceAsset?.processed_text) ||
+        normalizeStudySourceText(sourceAsset?.original_text);
+    const normalizedText =
+        hasUsableStudySourceText(requestText)
+            ? requestText
+            : assetText || requestText;
     const normalizedQuestionCount = clampQuestionCount(questionCount);
 
-    if (!normalizedTitle || !normalizedText) {
+    if (!normalizedTitle) {
         return res.status(400).json({
             error: 'bad_request',
-            message: 'title and text are required',
+            message: 'A title is required before a quiz can be generated.',
+        });
+    }
+
+    if (!hasUsableStudySourceText(normalizedText)) {
+        return res.status(400).json({
+            error: 'insufficient_source_text',
+            message: 'Add more note text before generating a quiz. StudyClaw needs a little more source material to work from.',
         });
     }
 
@@ -472,9 +731,22 @@ studyToolsRouter.post('/quiz', async (req: AuthedRequest, res) => {
         });
     }
 
-    const context = await buildStudyContext(req.user!.id);
+    const context = await buildStudyContext(req.user!.id, { query: `${normalizedTitle}\n\n${normalizedText.slice(0, 600)}` });
     const learnerLevel = audienceLevel || context.profile?.grade_year || context.profile?.school_level || 'current student level';
     const instructions = buildStudyInstructions(agent.system_prompt, context);
+    const usageReservation = await reserveManagedUsageEvent({
+        userId: req.user!.id,
+        feature: 'quiz',
+        modelKey: agent.model_key,
+        eventKey: `quiz:${sourceAssetId ?? 'ad-hoc'}:${randomUUID()}`,
+        metadata: {
+            title: normalizedTitle,
+            sourceAssetId: sourceAssetId ?? null,
+            subjectId: subjectId ?? null,
+            questionCount: normalizedQuestionCount,
+        },
+    });
+    const usageEventId = usageReservation.eventId;
 
     const prompt = `
 You are a study assistant.
@@ -510,11 +782,12 @@ ${normalizedText}
 `;
     let reply;
     try {
-        reply = await openclaw.sendMessage({
+        reply = await requestOpenClawGeneration({
+            userId: req.user!.id,
             agentId: agent.openclaw_agent_id,
+            modelKey: agent.model_key,
             instructions,
-            message: prompt,
-            model: agent.model_key,
+            prompt,
             metadata: {
                 feature: 'quiz',
                 sourceAssetId,
@@ -522,12 +795,31 @@ ${normalizedText}
                 questionCount: normalizedQuestionCount,
                 mode,
             },
-            userId: req.user!.id,
+            kind: 'quiz',
         });
     } catch (error) {
+        const message = normalizeGenerationErrorMessage({
+            error,
+            kind: 'quiz',
+        });
+        await finalizeManagedUsageEvent({
+            eventId: usageEventId,
+            success: false,
+            metadata: {
+                error: error instanceof Error ? error.message : 'Quiz generation failed',
+                normalizedMessage: message,
+            },
+        });
+        if (error instanceof ManagedUsageLimitError) {
+            return res.status(error.statusCode).json({
+                error: error.code,
+                message: error.message,
+                detail: error.detail,
+            });
+        }
         return res.status(502).json({
             error: 'openclaw_error',
-            message: error instanceof Error ? error.message : 'Quiz generation failed',
+            message,
         });
     }
 
@@ -555,54 +847,360 @@ ${normalizedText}
             const repairedParsed = extractJsonPayload(repairedText);
             questions = normalizeQuizQuestions(repairedParsed);
         } catch {
+            await finalizeManagedUsageEvent({
+                eventId: usageEventId,
+                success: false,
+                metadata: {
+                    outcome: 'parse_error',
+                },
+            });
             return res.status(500).json({
                 error: 'parse_error',
-                message: 'OpenClaw did not return valid JSON',
-                raw: reply.text,
+                message: 'StudyClaw generated a quiz reply that could not be read safely. Please try again.',
             });
         }
     }
 
     if (questions.length < MIN_QUIZ_QUESTIONS) {
+        await finalizeManagedUsageEvent({
+            eventId: usageEventId,
+            success: false,
+            metadata: {
+                outcome: 'validation_failed',
+                validatedQuestions: questions.length,
+            },
+        });
         return res.status(422).json({
             error: 'generation_failed',
-            message: `StudyClaw could only validate ${questions.length} quiz questions. Try cleaner notes or generate again.`,
+            message: `StudyClaw could only validate ${questions.length} quiz questions from that material. Try cleaner notes or add more source text.`,
         });
     }
 
-    const quiz = await db.query(
-        `insert into quizzes (user_id, subject_id, source_asset_id, title, mode)
-         values ($1, $2, $3, $4, $5)
-         returning *`,
-        [req.user!.id, subjectId ?? null, sourceAssetId ?? null, normalizedTitle, mode]
-    );
+    const client = await db.connect();
+    let createdQuiz: any;
 
-    for (const q of questions) {
-        await db.query(
-            `insert into quiz_questions
-             (quiz_id, question_text, question_type, choices_json, answer_json, explanation)
-             values ($1, $2, $3, $4, $5, $6)`,
-            [
-                quiz.rows[0].id,
-                q.question_text,
-                q.question_type ?? 'multiple_choice',
-                JSON.stringify(q.choices ?? []),
-                JSON.stringify(q.answer ?? {}),
-                q.explanation ?? '',
-            ]
+    try {
+        await client.query('begin');
+        const quiz = await client.query(
+            `insert into quizzes (user_id, subject_id, source_asset_id, title, mode)
+             values ($1, $2, $3, $4, $5)
+             returning *`,
+            [req.user!.id, subjectId ?? null, sourceAssetId ?? null, normalizedTitle, mode]
         );
+        createdQuiz = quiz.rows[0];
+
+        for (const q of questions) {
+            await client.query(
+                `insert into quiz_questions
+                 (quiz_id, question_text, question_type, choices_json, answer_json, explanation)
+                 values ($1, $2, $3, $4, $5, $6)`,
+                [
+                    createdQuiz.id,
+                    q.question_text,
+                    q.question_type ?? 'multiple_choice',
+                    JSON.stringify(q.choices ?? []),
+                    JSON.stringify(q.answer ?? {}),
+                    q.explanation ?? '',
+                ]
+            );
+        }
+        await client.query('commit');
+    } catch (error) {
+        await client.query('rollback');
+        console.error('[study-tools] failed to persist quiz', {
+            userId: req.user!.id,
+            sourceAssetId: sourceAssetId ?? null,
+            message: error instanceof Error ? error.message : 'Unknown quiz persistence error',
+        });
+        return res.status(500).json({
+            error: 'quiz_save_failed',
+            message: 'The quiz was generated but could not be saved. Please try again.',
+        });
+    } finally {
+        client.release();
     }
 
-    await logAgentAction(studentAgent.id, 'quiz_generated', `Created ${questions.length} quiz questions for ${title}.`, {
-        quizId: quiz.rows[0].id,
+    await logAgentAction(studentAgent.id, 'quiz_generated', `Created ${questions.length} quiz questions for ${normalizedTitle}.`, {
+        quizId: createdQuiz.id,
         sourceAssetId: sourceAssetId ?? null,
         subjectId: subjectId ?? null,
         mode,
     });
+    const quizEvent = await recordStudyEvent({
+        userId: req.user!.id,
+        eventKey: `quiz:${createdQuiz.id}:generated`,
+        eventType: 'quiz_generated',
+        sourceType: 'quiz',
+        sourceId: createdQuiz.id,
+        courseId: subjectId ?? null,
+        payload: {
+            title: normalizedTitle,
+            questionCount: questions.length,
+            mode,
+            sourceAssetId: sourceAssetId ?? null,
+        },
+    });
+    await updateTopicMastery({
+        userId: req.user!.id,
+        topicName: normalizedTitle,
+        courseId: subjectId ?? null,
+        delta: 0.04,
+        sourceEventId: quizEvent.id,
+        notes: 'Generated quiz from study material',
+    });
+    await writeMemorySummary({
+        userId: req.user!.id,
+        summaryType: 'quiz_generated',
+        summary: `Student generated ${questions.length} quiz questions for ${normalizedTitle}.`,
+        courseId: subjectId ?? null,
+        sourceEventId: quizEvent.id,
+        summaryKey: `quiz:${createdQuiz.id}:generated`,
+        importance: 3,
+    });
+    await finalizeManagedUsageEvent({
+        eventId: usageEventId,
+        success: true,
+        metadata: {
+            outcome: 'quiz_generated',
+            quizId: createdQuiz.id,
+            questionCount: questions.length,
+        },
+    });
 
     res.json({
-        quizId: quiz.rows[0].id,
+        quizId: createdQuiz.id,
         questions,
+        generation: {
+            kind: 'quiz',
+            modelKey: agent.model_key,
+            providerKey: getProviderKeyFromModelKey(agent.model_key),
+            providerLabel: formatProviderLabel(getProviderKeyFromModelKey(agent.model_key)),
+            itemCount: questions.length,
+            createdAt: new Date().toISOString(),
+        },
+    });
+});
+
+studyToolsRouter.post('/flashcards/:setId/review', async (req: AuthedRequest, res) => {
+    await ensurePlatformSchema();
+    const {
+        topicName,
+        reviewedCount,
+        correctCount,
+        score,
+    } = req.body as {
+        topicName?: string;
+        reviewedCount?: number;
+        correctCount?: number;
+        score?: number;
+    };
+
+    const setResult = await db.query(
+        `select id, title, subject_id
+         from flashcard_sets
+         where id = $1
+           and user_id = $2
+         limit 1`,
+        [req.params.setId, req.user!.id]
+    );
+
+    const set = setResult.rows[0];
+    if (!set) {
+        return res.status(404).json({ error: 'not_found', message: 'Flashcard set not found' });
+    }
+
+    const reviewed = Math.max(Number(reviewedCount ?? 0), 0);
+    const correct = Math.max(Number(correctCount ?? 0), 0);
+    const derivedScore =
+        typeof score === 'number' && Number.isFinite(score)
+            ? Math.min(Math.max(score, 0), 1)
+            : reviewed > 0
+              ? Math.min(Math.max(correct / reviewed, 0), 1)
+              : 0.7;
+
+    const event = await recordStudyEvent({
+        userId: req.user!.id,
+        eventKey: `flashcards:${set.id}:review:${reviewed}:${correct}:${Number(derivedScore).toFixed(3)}`,
+        eventType: 'flashcard_review_completed',
+        sourceType: 'flashcard_set',
+        sourceId: set.id,
+        courseId: set.subject_id ?? null,
+        score: derivedScore,
+        payload: {
+            reviewedCount: reviewed,
+            correctCount: correct,
+        },
+    });
+    const previousTopic = await db.query(
+        `select mastery_score
+         from topics
+         where user_id = $1
+           and coalesce(course_id, '00000000-0000-0000-0000-000000000000'::uuid) = coalesce($2, '00000000-0000-0000-0000-000000000000'::uuid)
+           and lower(name) = lower($3)
+         limit 1`,
+        [req.user!.id, set.subject_id ?? null, (topicName?.trim() || set.title)]
+    );
+    const previousScore = Number(previousTopic.rows[0]?.mastery_score ?? 0.5);
+    const nextTopic = await updateTopicMastery({
+        userId: req.user!.id,
+        topicName: topicName?.trim() || set.title,
+        courseId: set.subject_id ?? null,
+        masteryScore: clamp(previousScore * 0.55 + derivedScore * 0.45),
+        sourceEventId: event.id,
+        notes: 'Recorded flashcard review outcome',
+    });
+    await writeMemorySummary({
+        userId: req.user!.id,
+        summaryType: 'flashcard_review',
+        summary: buildImprovementSummary({
+            topicName: nextTopic?.name ?? (topicName?.trim() || set.title),
+            previousScore,
+            nextScore: Number(nextTopic?.mastery_score ?? derivedScore),
+        }),
+        courseId: set.subject_id ?? null,
+        topicId: nextTopic?.id ?? null,
+        sourceEventId: event.id,
+        summaryKey: `flashcards:${set.id}:review`,
+        importance: 4,
+    });
+    if (derivedScore <= 0.45 || derivedScore >= 0.85) {
+        await writeMemorySummary({
+            userId: req.user!.id,
+            summaryType: derivedScore <= 0.45 ? 'weak_area' : 'strong_area',
+            summary:
+                derivedScore <= 0.45
+                    ? `Student is still struggling with ${nextTopic?.name ?? (topicName?.trim() || set.title)} during flashcard review.`
+                    : `Student is showing strong recall in ${nextTopic?.name ?? (topicName?.trim() || set.title)} during flashcard review.`,
+            courseId: set.subject_id ?? null,
+            topicId: nextTopic?.id ?? null,
+            sourceEventId: event.id,
+            summaryKey: `flashcards:${set.id}:${derivedScore <= 0.45 ? 'weak' : 'strong'}`,
+            importance: 4,
+        });
+    }
+
+    res.json({
+        ok: true,
+        review: {
+            flashcardSetId: set.id,
+            score: derivedScore,
+            reviewedCount: reviewed,
+            correctCount: correct,
+            topicId: nextTopic?.id ?? null,
+            topicName: nextTopic?.name ?? (topicName?.trim() || set.title),
+            masteryScore: Number(nextTopic?.mastery_score ?? derivedScore),
+        },
+    });
+});
+
+studyToolsRouter.post('/quizzes/:quizId/complete', async (req: AuthedRequest, res) => {
+    await ensurePlatformSchema();
+    const {
+        topicName,
+        score,
+        correctCount,
+        totalQuestions,
+    } = req.body as {
+        topicName?: string;
+        score?: number;
+        correctCount?: number;
+        totalQuestions?: number;
+    };
+
+    const quizResult = await db.query(
+        `select id, title, subject_id
+         from quizzes
+         where id = $1
+           and user_id = $2
+         limit 1`,
+        [req.params.quizId, req.user!.id]
+    );
+    const quiz = quizResult.rows[0];
+    if (!quiz) {
+        return res.status(404).json({ error: 'not_found', message: 'Quiz not found' });
+    }
+
+    const correct = Math.max(Number(correctCount ?? 0), 0);
+    const total = Math.max(Number(totalQuestions ?? 0), 0);
+    const derivedScore =
+        typeof score === 'number' && Number.isFinite(score)
+            ? Math.min(Math.max(score, 0), 1)
+            : total > 0
+              ? Math.min(Math.max(correct / total, 0), 1)
+              : 0.7;
+
+    const event = await recordStudyEvent({
+        userId: req.user!.id,
+        eventKey: `quiz:${quiz.id}:complete:${correct}:${total}:${Number(derivedScore).toFixed(3)}`,
+        eventType: 'quiz_completed',
+        sourceType: 'quiz',
+        sourceId: quiz.id,
+        courseId: quiz.subject_id ?? null,
+        score: derivedScore,
+        payload: {
+            correctCount: correct,
+            totalQuestions: total,
+        },
+    });
+    const previousTopic = await db.query(
+        `select mastery_score
+         from topics
+         where user_id = $1
+           and coalesce(course_id, '00000000-0000-0000-0000-000000000000'::uuid) = coalesce($2, '00000000-0000-0000-0000-000000000000'::uuid)
+           and lower(name) = lower($3)
+         limit 1`,
+        [req.user!.id, quiz.subject_id ?? null, (topicName?.trim() || quiz.title)]
+    );
+    const previousScore = Number(previousTopic.rows[0]?.mastery_score ?? 0.5);
+    const nextTopic = await updateTopicMastery({
+        userId: req.user!.id,
+        topicName: topicName?.trim() || quiz.title,
+        courseId: quiz.subject_id ?? null,
+        masteryScore: clamp(previousScore * 0.4 + derivedScore * 0.6),
+        sourceEventId: event.id,
+        notes: 'Recorded quiz completion outcome',
+    });
+    await writeMemorySummary({
+        userId: req.user!.id,
+        summaryType: 'quiz_completion',
+        summary: buildImprovementSummary({
+            topicName: nextTopic?.name ?? (topicName?.trim() || quiz.title),
+            previousScore,
+            nextScore: Number(nextTopic?.mastery_score ?? derivedScore),
+        }),
+        courseId: quiz.subject_id ?? null,
+        topicId: nextTopic?.id ?? null,
+        sourceEventId: event.id,
+        summaryKey: `quiz:${quiz.id}:complete`,
+        importance: 5,
+    });
+    if (derivedScore <= 0.45 || derivedScore >= 0.85) {
+        await writeMemorySummary({
+            userId: req.user!.id,
+            summaryType: derivedScore <= 0.45 ? 'weak_area' : 'strong_area',
+            summary:
+                derivedScore <= 0.45
+                    ? `Student is still struggling with ${nextTopic?.name ?? (topicName?.trim() || quiz.title)} after the latest quiz.`
+                    : `Student is consistently strong in ${nextTopic?.name ?? (topicName?.trim() || quiz.title)} after the latest quiz.`,
+            courseId: quiz.subject_id ?? null,
+            topicId: nextTopic?.id ?? null,
+            sourceEventId: event.id,
+            summaryKey: `quiz:${quiz.id}:${derivedScore <= 0.45 ? 'weak' : 'strong'}`,
+            importance: 5,
+        });
+    }
+
+    res.json({
+        ok: true,
+        result: {
+            quizId: quiz.id,
+            score: derivedScore,
+            correctCount: correct,
+            totalQuestions: total,
+            topicId: nextTopic?.id ?? null,
+            topicName: nextTopic?.name ?? (topicName?.trim() || quiz.title),
+            masteryScore: Number(nextTopic?.mastery_score ?? derivedScore),
+        },
     });
 });
 

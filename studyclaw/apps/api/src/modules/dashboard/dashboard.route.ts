@@ -3,6 +3,7 @@ import { db } from '../../lib/db';
 import { requireAuth, type AuthedRequest } from '../../lib/auth';
 import { getGoogleConnectionStatus, listUpcomingCalendarEvents } from '../../lib/google-service';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
+import { buildWeeklyStudyPlan } from '../../lib/weekly-study-plan';
 
 type ReminderRow = {
   id: string;
@@ -140,6 +141,10 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
   };
 
   const calendarEvents = googleStatus.connected ? await listUpcomingCalendarEvents(userId, 5).catch(() => []) : [];
+  const weeklyStudyPlan = buildWeeklyStudyPlan({
+    reminders,
+    calendarEvents,
+  });
 
   res.json({
     generatedAt: new Date().toISOString(),
@@ -176,6 +181,7 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
         }
       : null,
     recommendations: buildRecommendations(reminders, counts),
+    weeklyStudyPlan,
     calendarEvents,
     activityFeed: activityResult.rows,
     quickActions: [

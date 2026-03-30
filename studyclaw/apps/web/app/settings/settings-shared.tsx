@@ -3,9 +3,9 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, Bell, Bot, BrainCircuit, ChartColumn, Clock3 } from 'lucide-react';
-import PageHero from '../components/page-hero';
 import StatusBanner from '../components/status-banner';
 import { apiFetch, beginGoogleConnect } from '../../lib/api';
+import { readStoredSession } from '../../lib/session';
 
 export type ChannelItem = {
   id: string;
@@ -84,6 +84,67 @@ type ModelSettingsPayload = {
   activeConfigId: string | null;
   selectedConfigId?: string | null;
   configs: SavedModelConfig[];
+  accessProfile?: UsageAccessProfile;
+  managedMiniMaxModelKeys?: string[];
+};
+
+type UsageAccessProfile = {
+  role: string;
+  tier: 'tier_1' | 'tier_2' | 'tier_3' | null;
+  billingMode: 'managed' | 'byok' | 'local' | 'admin' | 'unknown';
+  providerSelection: string | null;
+  modelSelection: string | null;
+  usesManagedCredits: boolean;
+  isByok: boolean;
+  isManaged: boolean;
+  creditsTotal: number | null;
+  creditsRemaining: number | null;
+  internalUsageIdentity: string | null;
+  identityStatus: string | null;
+  windowHours: number;
+  windowLimit: number | null;
+  usedInWindow: number;
+  remainingInWindow: number | null;
+  resetsAt: string | null;
+  recentEvents: Array<{
+    id: string;
+    feature: string;
+    modelKey: string;
+    status: 'reserved' | 'consumed' | 'failed';
+    reservedAt: string;
+    finalizedAt: string | null;
+    metadata: Record<string, unknown>;
+  }>;
+};
+
+type ManagedUsageAccountSummary = {
+  userId: string;
+  email: string;
+  role: string;
+  tier: 'tier_1' | 'tier_2' | 'tier_3' | null;
+  billingMode: 'managed' | 'byok' | 'local' | 'admin' | 'unknown';
+  providerSelection: string | null;
+  modelSelection: string | null;
+  usesManagedCredits: boolean;
+  creditsTotal: number;
+  creditsRemaining: number;
+  internalUsageIdentity: string | null;
+  identityStatus: string | null;
+  usedInWindow: number;
+  windowLimit: number | null;
+  remainingInWindow: number | null;
+  latestWindowEventAt: string | null;
+};
+
+type ManagedUsageEventItem = {
+  id: string;
+  feature: string;
+  modelKey: string;
+  status: 'reserved' | 'consumed' | 'failed';
+  requestUnits: number;
+  reservedAt: string;
+  finalizedAt: string | null;
+  metadata: Record<string, unknown>;
 };
 
 type TelegramSettingsPayload = {
@@ -163,23 +224,179 @@ export function findSettingsSection(slug: string) {
   return settingsSections.find((section) => section.slug === slug);
 }
 
+function formatCountdown(targetIso: string | null, nowMs: number) {
+  if (!targetIso) {
+    return 'No active reset window';
+  }
+
+  const diff = Math.max(new Date(targetIso).getTime() - nowMs, 0);
+  const totalSeconds = Math.floor(diff / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  return `${hours}h ${minutes}m ${seconds}s`;
+}
+
+function SettingsUsageRail() {
+  const [accessProfile, setAccessProfile] = useState<UsageAccessProfile | null>(null);
+  const [railStatus, setRailStatus] = useState('');
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    let active = true;
+
+    const loadAccessProfile = async () => {
+      const response = await apiFetch('/api/openclaw/model-settings');
+      const data = await response.json().catch(() => ({}));
+
+      if (!active) {
+        return;
+      }
+
+      if (!response.ok) {
+        setRailStatus(data.message || 'Failed to load usage');
+        return;
+      }
+
+      setAccessProfile(data.accessProfile ?? null);
+      setRailStatus('');
+    };
+
+    void loadAccessProfile();
+    const pollId = window.setInterval(() => {
+      void loadAccessProfile();
+    }, 10000);
+    const tickId = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+
+    return () => {
+      active = false;
+      window.clearInterval(pollId);
+      window.clearInterval(tickId);
+    };
+  }, []);
+
+  if (railStatus) {
+    return <StatusBanner tone="warning">{railStatus}</StatusBanner>;
+  }
+
+  if (!accessProfile) {
+    return null;
+  }
+
+  const windowLimit = accessProfile.windowLimit ?? 0;
+  const usedInWindow = accessProfile.usedInWindow ?? 0;
+  const remainingWindow = accessProfile.remainingInWindow ?? 0;
+  const progressRatio =
+    windowLimit > 0
+      ? Math.min(Math.max(remainingWindow / windowLimit, 0), 1)
+      : 1;
+  const progressPercent = Math.round(progressRatio * 100);
+  const railToneClass =
+    progressRatio <= 0.2 ? 'is-critical' : progressRatio <= 0.45 ? 'is-warning' : 'is-healthy';
+
+  return (
+    <section className="settings-usage-rail" aria-label="Usage and reset window">
+      <div className="settings-usage-rail__head">
+        <div>
+          <p className="eyebrow">Usage window</p>
+          <h3 style={{ margin: '6px 0 0' }}>
+            {accessProfile.windowLimit === null
+              ? accessProfile.billingMode === 'admin'
+                ? 'Admin account is exempt from managed limits'
+                : 'This account is not on StudyClaw-managed 5-hour limits'
+              : `${progressPercent}% window capacity remaining`}
+          </h3>
+        </div>
+        <div className="settings-usage-rail__stats">
+          <span className="settings-badge">{accessProfile.tier ?? accessProfile.billingMode}</span>
+          {accessProfile.creditsRemaining !== null ? (
+            <span className="settings-badge">{accessProfile.creditsRemaining} credits left</span>
+          ) : null}
+        </div>
+      </div>
+
+      <div
+        className={`settings-usage-rail__track ${railToneClass}`}
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={accessProfile.windowLimit ?? 100}
+        aria-valuenow={accessProfile.remainingInWindow ?? accessProfile.windowLimit ?? 0}
+      >
+        <div className="settings-usage-rail__fill" style={{ width: `${progressRatio * 100}%` }} />
+        <div className="settings-usage-rail__labels">
+          <span>{windowLimit ? `${remainingWindow}/${windowLimit} left` : 'Not limited'}</span>
+          {windowLimit ? <strong>{usedInWindow} used</strong> : null}
+        </div>
+      </div>
+
+      <div className="settings-usage-rail__metrics">
+        <div className="settings-usage-rail__metric">
+          <span>Credits left</span>
+          <strong>{accessProfile.creditsRemaining ?? 'n/a'}</strong>
+        </div>
+        <div className="settings-usage-rail__metric">
+          <span>Window usage</span>
+          <strong>
+            {accessProfile.windowLimit === null ? 'Not limited' : `${usedInWindow}/${windowLimit}`}
+          </strong>
+        </div>
+        <div className="settings-usage-rail__metric">
+          <span>Reset countdown</span>
+          <strong>
+            {accessProfile.windowLimit === null
+              ? 'No countdown'
+              : formatCountdown(accessProfile.resetsAt, nowMs)}
+          </strong>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export function SettingsIndexPage() {
   return (
-    <>
-      <PageHero
-        badge="Settings"
-        title="Choose a settings category to open its detail screen."
-        description="This top-level screen stays lightweight and scrollable. Each row routes into a dedicated settings page for that category."
-        meta={
-          <>
-            <span className="insight-chip">Model Settings</span>
-            <span className="insight-chip">Notification Settings</span>
-            <span className="insight-chip">Usage Overview</span>
-            <span className="insight-chip">Scheduled Jobs</span>
-            <span className="insight-chip">Agent Settings</span>
-          </>
-        }
-      />
+    <section className="settings-shell">
+      <header className="settings-page-header">
+        <div>
+          <p className="settings-page-header__eyebrow">Settings</p>
+          <h1 className="settings-page-header__title">Manage your StudyClaw account, agent, and connected tools.</h1>
+          <p className="settings-page-header__description">
+            Open each category to adjust the part of StudyClaw you want to change, without wading through one long utility screen.
+          </p>
+        </div>
+        <div className="settings-page-header__meta">
+          <div className="settings-page-header__meta-card">
+            <span>Categories</span>
+            <strong>{settingsSections.length}</strong>
+          </div>
+          <div className="settings-page-header__meta-card">
+            <span>Core areas</span>
+            <strong>Model, usage, notifications</strong>
+          </div>
+        </div>
+      </header>
+
+      <section className="settings-spotlight-grid" aria-label="Settings overview">
+        {settingsSections.slice(0, 3).map((section) => {
+          const Icon = section.icon;
+          return (
+            <article key={section.slug} className="settings-spotlight-card">
+              <div className="settings-spotlight-card__icon">
+                <Icon className="h-5 w-5" />
+              </div>
+              <div>
+                <strong>{section.title}</strong>
+                <p>{section.description}</p>
+              </div>
+            </article>
+          );
+        })}
+      </section>
+
+      <SettingsUsageRail />
 
       <section className="settings-index-list" aria-label="Settings categories">
         {settingsSections.map((section) => {
@@ -199,7 +416,7 @@ export function SettingsIndexPage() {
           );
         })}
       </section>
-    </>
+    </section>
   );
 }
 
@@ -215,20 +432,23 @@ function SettingsDetailShell({
   children: React.ReactNode;
 }) {
   return (
-    <>
-      <PageHero
-        badge={badge}
-        title={title}
-        description={description}
-        actions={
+    <section className="settings-shell settings-shell--detail">
+      <header className="settings-page-header settings-page-header--detail">
+        <div>
+          <p className="settings-page-header__eyebrow">{badge}</p>
+          <h1 className="settings-page-header__title">{title}</h1>
+          <p className="settings-page-header__description">{description}</p>
+        </div>
+        <div className="settings-page-header__actions">
           <Link href="/settings" className="settings-back-link">
             <ChevronLeft className="h-4 w-4" />
             Back to Settings
           </Link>
-        }
-      />
-      {children}
-    </>
+        </div>
+      </header>
+      <SettingsUsageRail />
+      <div className="settings-detail-stack">{children}</div>
+    </section>
   );
 }
 
@@ -487,6 +707,48 @@ export function ModelSettingsDetail() {
               <span>Models used</span>
             </div>
           </div>
+          {modelSettings?.accessProfile ? (
+            <div className="settings-stack compact" style={{ marginTop: 16 }}>
+              <div className="settings-row">
+                <span className="muted-copy">Billing mode</span>
+                <strong>{modelSettings.accessProfile.billingMode}</strong>
+              </div>
+              <div className="settings-row">
+                <span className="muted-copy">Tier</span>
+                <strong>{modelSettings.accessProfile.tier ?? 'n/a'}</strong>
+              </div>
+              <div className="settings-row">
+                <span className="muted-copy">Managed usage</span>
+                <strong>{modelSettings.accessProfile.isManaged ? 'Active' : modelSettings.accessProfile.isByok ? 'BYOK' : 'Not managed'}</strong>
+              </div>
+              <div className="settings-row">
+                <span className="muted-copy">Rolling window</span>
+                <strong>
+                  {modelSettings.accessProfile.windowLimit === null
+                    ? 'Not limited'
+                    : `${modelSettings.accessProfile.usedInWindow}/${modelSettings.accessProfile.windowLimit} used`}
+                </strong>
+              </div>
+              {modelSettings.accessProfile.remainingInWindow !== null ? (
+                <div className="settings-row">
+                  <span className="muted-copy">Remaining</span>
+                  <strong>{modelSettings.accessProfile.remainingInWindow}</strong>
+                </div>
+              ) : null}
+              {modelSettings.accessProfile.creditsRemaining !== null ? (
+                <div className="settings-row">
+                  <span className="muted-copy">Credits remaining</span>
+                  <strong>{modelSettings.accessProfile.creditsRemaining}</strong>
+                </div>
+              ) : null}
+              {modelSettings.accessProfile.internalUsageIdentity ? (
+                <div className="settings-row">
+                  <span className="muted-copy">Internal identity</span>
+                  <strong>{modelSettings.accessProfile.internalUsageIdentity}</strong>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </section>
       </div>
 
@@ -827,6 +1089,71 @@ export function NotificationSettingsDetail() {
 
 export function UsageOverviewDetail() {
   const { loading, snapshot, status } = useSettingsSnapshot();
+  const [accessProfile, setAccessProfile] = useState<UsageAccessProfile | null>(null);
+  const [adminAccounts, setAdminAccounts] = useState<ManagedUsageAccountSummary[]>([]);
+  const [selectedAdminAccount, setSelectedAdminAccount] = useState<string>('');
+  const [selectedAdminEvents, setSelectedAdminEvents] = useState<ManagedUsageEventItem[]>([]);
+  const [adminStatus, setAdminStatus] = useState('');
+  const [updatingTierFor, setUpdatingTierFor] = useState('');
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    const nextIsAdmin = readStoredSession()?.user?.role === 'admin';
+    setIsAdmin(nextIsAdmin);
+    void loadUsageState(nextIsAdmin);
+  }, []);
+
+  async function loadUsageState(adminOverride = isAdmin) {
+    const modelResponse = await apiFetch('/api/openclaw/model-settings');
+    const modelData = await modelResponse.json().catch(() => ({}));
+    if (modelResponse.ok) {
+      setAccessProfile(modelData.accessProfile ?? null);
+    }
+
+    if (!adminOverride) {
+      return;
+    }
+
+    const adminResponse = await apiFetch('/api/admin/managed-usage');
+    const adminData = await adminResponse.json().catch(() => ({}));
+    if (!adminResponse.ok) {
+      setAdminStatus(adminData.message || 'Failed to load managed usage accounts');
+      return;
+    }
+
+    setAdminAccounts(adminData.accounts ?? []);
+    setAdminStatus('');
+  }
+
+  async function updateTier(userId: string, tier: 'tier_1' | 'tier_2' | 'tier_3') {
+    setUpdatingTierFor(userId);
+    const response = await apiFetch(`/api/admin/managed-usage/${encodeURIComponent(userId)}/tier`, {
+      method: 'PATCH',
+      body: JSON.stringify({ tier }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      setAdminStatus(data.message || 'Failed to update tier');
+      setUpdatingTierFor('');
+      return;
+    }
+
+    await loadUsageState();
+    setUpdatingTierFor('');
+  }
+
+  async function inspectManagedUsageUser(userId: string) {
+    setSelectedAdminAccount(userId);
+    const response = await apiFetch(`/api/admin/managed-usage/${encodeURIComponent(userId)}`);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      setAdminStatus(data.message || 'Failed to load managed usage events');
+      return;
+    }
+
+    setSelectedAdminEvents(data.events ?? []);
+    setAdminStatus('');
+  }
 
   return (
     <SettingsDetailShell
@@ -835,6 +1162,7 @@ export function UsageOverviewDetail() {
       description="This page keeps the account-wide usage numbers and session history together as a dedicated detail view."
     >
       <SettingsStatus status={status} probe={snapshot?.diagnostics.channelsProbe} />
+      {adminStatus ? <StatusBanner tone="danger">{adminStatus}</StatusBanner> : null}
 
       <section className="secondary-card">
         <p className="eyebrow">Usage</p>
@@ -856,6 +1184,52 @@ export function UsageOverviewDetail() {
             <span>Sessions</span>
           </div>
         </div>
+        {accessProfile ? (
+          <div className="settings-stack compact" style={{ marginTop: 16 }}>
+            <div className="settings-row">
+              <span className="muted-copy">Billing mode</span>
+              <strong>{accessProfile.billingMode}</strong>
+            </div>
+            <div className="settings-row">
+              <span className="muted-copy">Provider selection</span>
+              <strong>{accessProfile.providerSelection ?? 'n/a'}</strong>
+            </div>
+            <div className="settings-row">
+              <span className="muted-copy">Model selection</span>
+              <strong>{accessProfile.modelSelection ?? 'n/a'}</strong>
+            </div>
+            <div className="settings-row">
+              <span className="muted-copy">Tier</span>
+              <strong>{accessProfile.tier ?? 'n/a'}</strong>
+            </div>
+            <div className="settings-row">
+              <span className="muted-copy">Rolling 5-hour usage</span>
+              <strong>
+                {accessProfile.windowLimit === null
+                  ? 'Not limited'
+                  : `${accessProfile.usedInWindow}/${accessProfile.windowLimit}`}
+              </strong>
+            </div>
+            {accessProfile.remainingInWindow !== null ? (
+              <div className="settings-row">
+                <span className="muted-copy">Remaining quota</span>
+                <strong>{accessProfile.remainingInWindow}</strong>
+              </div>
+            ) : null}
+            {accessProfile.creditsRemaining !== null ? (
+              <div className="settings-row">
+                <span className="muted-copy">Remaining credits</span>
+                <strong>{accessProfile.creditsRemaining}</strong>
+              </div>
+            ) : null}
+            {accessProfile.resetsAt ? (
+              <div className="settings-row">
+                <span className="muted-copy">Window resets</span>
+                <strong>{formatTime(new Date(accessProfile.resetsAt).getTime())}</strong>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </section>
 
       <section className="secondary-card">
@@ -883,6 +1257,91 @@ export function UsageOverviewDetail() {
           )}
         </div>
       </section>
+
+      {isAdmin ? (
+        <section className="secondary-card">
+          <p className="eyebrow">Managed account inspection</p>
+          <div className="settings-stack" style={{ marginTop: 14 }}>
+            {adminAccounts.length ? (
+              adminAccounts.map((account) => (
+                <div className="settings-row session-row" key={account.userId}>
+                  <div>
+                    <strong>{account.email}</strong>
+                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                      {account.billingMode}
+                      {' · '}
+                      {account.modelSelection ?? 'No model'}
+                      {' · '}
+                      {account.internalUsageIdentity ?? 'No identity'}
+                      {' · '}
+                      {account.creditsRemaining} credits
+                    </p>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <strong>
+                      {account.windowLimit === null
+                        ? 'Not limited'
+                        : `${account.usedInWindow}/${account.windowLimit}`}
+                    </strong>
+                    <div style={{ marginTop: 8, display: 'flex', gap: 8, justifyContent: 'flex-end', alignItems: 'center' }}>
+                      <select
+                        value={account.tier ?? 'tier_1'}
+                        onChange={(event) => void updateTier(account.userId, event.target.value as 'tier_1' | 'tier_2' | 'tier_3')}
+                        disabled={updatingTierFor === account.userId}
+                      >
+                        <option value="tier_1">tier_1</option>
+                        <option value="tier_2">tier_2</option>
+                        <option value="tier_3">tier_3</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={() => void inspectManagedUsageUser(account.userId)}
+                      >
+                        Inspect events
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="muted-copy">No managed usage accounts found yet.</p>
+            )}
+          </div>
+        </section>
+      ) : null}
+
+      {isAdmin && selectedAdminAccount ? (
+        <section className="secondary-card">
+          <p className="eyebrow">Recent usage events</p>
+          <div className="settings-stack" style={{ marginTop: 14 }}>
+            {selectedAdminEvents.length ? (
+              selectedAdminEvents.map((event) => (
+                <div className="settings-row session-row" key={event.id}>
+                  <div>
+                    <strong>{event.feature}</strong>
+                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                      {event.modelKey}
+                      {' · '}
+                      {event.status}
+                      {' · '}
+                      {event.requestUnits} unit{event.requestUnits === 1 ? '' : 's'}
+                    </p>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <strong>{formatTime(new Date(event.reservedAt).getTime())}</strong>
+                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                      {event.finalizedAt ? `Finalized ${formatTime(new Date(event.finalizedAt).getTime())}` : 'Pending finalization'}
+                    </p>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="muted-copy">No recent usage events found for this account.</p>
+            )}
+          </div>
+        </section>
+      ) : null}
     </SettingsDetailShell>
   );
 }

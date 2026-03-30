@@ -1,4 +1,5 @@
 import { db } from './db';
+import { buildStudentContext, renderStudentMemoryContext } from './student-memory';
 
 type AgentProfile = {
   openclaw_agent_id: string;
@@ -16,38 +17,8 @@ export async function loadAgentProfile(userId: string): Promise<AgentProfile | n
   return result.rows[0] ?? null;
 }
 
-export async function buildStudyContext(userId: string) {
-  const [profileResult, subjectsResult, remindersResult] = await Promise.all([
-    db.query(
-      `select u.full_name, sp.school_name, sp.school_level, sp.grade_year, sp.major, sp.timezone, sp.learning_style, sp.onboarding_complete
-       from student_profiles sp
-       join users u on u.id = sp.user_id
-       where sp.user_id = $1`,
-      [userId]
-    ),
-    db.query(
-      `select name
-       from subjects
-       where user_id = $1
-       order by created_at asc
-       limit 12`,
-      [userId]
-    ),
-    db.query(
-      `select type, title, reminder_at, status
-       from reminders
-       where user_id = $1
-       order by reminder_at asc
-       limit 8`,
-      [userId]
-    ),
-  ]);
-
-  return {
-    profile: profileResult.rows[0] ?? null,
-    subjects: subjectsResult.rows.map((row: { name: string }) => row.name),
-    reminders: remindersResult.rows,
-  };
+export async function buildStudyContext(userId: string, options?: { query?: string | null }) {
+  return buildStudentContext(userId, options);
 }
 
 export function buildStudyInstructions(systemPrompt: string, context: Awaited<ReturnType<typeof buildStudyContext>>) {
@@ -78,6 +49,17 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
         )
         .join(' | ')}`
     : 'Upcoming reminders: none scheduled';
+  const calendarLine = context.calendar?.items?.length
+    ? `Upcoming calendar items: ${context.calendar.items
+        .map(
+          (item: { title: string; startsAt: string | null; endsAt: string | null }) =>
+            `${item.title} (${item.startsAt ?? 'unscheduled'}${item.endsAt ? ` to ${item.endsAt}` : ''})`
+        )
+        .join(' | ')}`
+    : context.calendar?.status === 'reconnect_required'
+      ? 'Upcoming calendar items: Google Calendar needs to be reconnected before StudyClaw can use it.'
+      : 'Upcoming calendar items: none available';
+  const memoryLines = context.memory ? renderStudentMemoryContext(context.memory) : null;
 
   return [
     systemPrompt.trim(),
@@ -86,6 +68,10 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
     ...profileLines,
     subjectLine,
     reminderLine,
+    calendarLine,
+    memoryLines?.progressLine ?? 'Relevant progress: none recorded yet',
+    memoryLines?.assignmentLine ?? 'Tracked assignments: none recorded',
+    memoryLines?.memoryLine ?? 'Long-term memory: none recorded yet',
     '',
     'Behavior rules:',
     `- Your configured assistant name is ${personaName}.`,
@@ -93,7 +79,11 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
     personaName === 'StudyClaw' ? '- You may refer to yourself as StudyClaw.' : '- Do not say your name is StudyClaw.',
     '- Base your response on the student context when it is relevant.',
     '- If app data is missing, say so plainly instead of pretending the data exists.',
+    '- If the student asks for Google Calendar scheduling or live calendar data and Google is not connected, tell them to connect Google Calendar from the Calendar page before promising calendar actions.',
     '- Prefer concrete, prioritized study actions over generic encouragement.',
+    '- When the student asks for current facts, source verification, live web research, or screenshots of what you found, use the browser capability instead of relying only on memory.',
+    '- For browser-based research, prefer reliable educational or primary sources, summarize what you verified, and include direct source links in plain language whenever they are available.',
+    '- Do not browse or continue if the destination is sexual, explicit, or otherwise inappropriate for students; explain briefly that the site is blocked.',
   ].join('\n');
 }
 

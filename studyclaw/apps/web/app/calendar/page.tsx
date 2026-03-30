@@ -1,11 +1,11 @@
 'use client';
 
-import { useEffect, useState, Suspense } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { Calendar as CalendarIcon, CheckCircle, ExternalLink, RefreshCw } from 'lucide-react';
 import { apiFetch, beginGoogleConnect } from '../../lib/api';
-import { readStoredSession } from '../../lib/session';
 import { consumePayloadFromUrl } from '../../lib/consumePayload';
-import { Calendar as CalendarIcon, RefreshCw, ExternalLink, Clock, CheckCircle } from 'lucide-react';
+import { readStoredSession } from '../../lib/session';
 
 type CalendarEvent = {
   id: string;
@@ -14,6 +14,8 @@ type CalendarEvent = {
   endsAt: string | null;
   htmlLink: string | null;
 };
+
+type ConnectionStatus = 'not_connected' | 'connecting' | 'connected' | 'reconnect_required' | 'disconnected';
 
 function formatEventDateTime(dateTime: string | null) {
   if (!dateTime) return 'All day';
@@ -50,7 +52,8 @@ function CalendarPageContent() {
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [connected, setConnected] = useState<boolean | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('not_connected');
+  const [googleEmail, setGoogleEmail] = useState<string | null>(null);
   const [showSuccess, setShowSuccess] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const searchParams = useSearchParams();
@@ -72,18 +75,29 @@ function CalendarPageContent() {
 
     if (searchParams.get('connected') === 'true' || searchParams.get('google') === 'connected') {
       setShowSuccess(true);
-      setConnected(true);
+      setConnectionStatus('connected');
       setTimeout(() => setShowSuccess(false), 5000);
     }
   }, [searchParams]);
+
+  const connected = connectionStatus === 'connected';
+  const needsReconnect = connectionStatus === 'reconnect_required';
 
   async function loadStatus() {
     if (hasSession !== true) return;
     try {
       const res = await apiFetch('/api/google');
       const data = await res.json();
-      setConnected(data.connected);
-    } catch { setConnected(false); }
+      setGoogleEmail(data.googleEmail ?? data.account ?? null);
+      setConnectionStatus(
+        data.status === 'connected' || data.status === 'reconnect_required'
+          ? data.status
+          : 'not_connected'
+      );
+    } catch {
+      setGoogleEmail(null);
+      setConnectionStatus('not_connected');
+    }
   }
 
   async function loadEvents() {
@@ -94,8 +108,8 @@ function CalendarPageContent() {
       const res = await apiFetch('/api/google/calendar?days=14');
       if (!res.ok) {
         const data = await res.json();
-        if (res.status === 400 && (data.error === 'not_connected' || data.connected === false)) {
-          setConnected(false);
+        if (res.status === 400 && (data.error === 'not_connected' || data.error === 'reconnect_required' || data.connected === false)) {
+          setConnectionStatus(data.status === 'reconnect_required' ? 'reconnect_required' : 'not_connected');
           setLoading(false);
           return;
         }
@@ -103,7 +117,7 @@ function CalendarPageContent() {
       }
       const data = await res.json();
       setEvents(Array.isArray(data) ? data : []);
-      setConnected(true);
+      setConnectionStatus('connected');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load events');
     } finally {
@@ -113,9 +127,30 @@ function CalendarPageContent() {
 
   async function handleConnect() {
     try {
+      setConnectionStatus('connecting');
       await beginGoogleConnect('/calendar');
-    } catch (error) {
-      setError(error instanceof Error ? error.message : 'Failed to start Google connection');
+    } catch (nextError) {
+      setConnectionStatus(needsReconnect ? 'reconnect_required' : 'not_connected');
+      setError(nextError instanceof Error ? nextError.message : 'Failed to start Google connection');
+    }
+  }
+
+  async function handleDisconnect() {
+    setRefreshing(true);
+    setError('');
+    try {
+      const res = await apiFetch('/api/google/disconnect', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.message || 'Failed to disconnect Google');
+      }
+      setEvents([]);
+      setGoogleEmail(null);
+      setConnectionStatus('disconnected');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Failed to disconnect Google');
+    } finally {
+      setRefreshing(false);
     }
   }
 
@@ -127,19 +162,40 @@ function CalendarPageContent() {
 
   useEffect(() => {
     if (hasSession === true) {
-      loadStatus();
+      void loadStatus();
     } else if (hasSession === false) {
       setLoading(false);
     }
   }, [hasSession]);
 
   useEffect(() => {
-    if (connected === true) {
-      loadEvents();
-    } else if (connected === false) {
+    if (connected) {
+      void loadEvents();
+    } else if (connectionStatus !== 'connecting') {
       setLoading(false);
     }
-  }, [connected]);
+  }, [connected, connectionStatus]);
+
+  const connectionLabel =
+    connectionStatus === 'connected'
+      ? 'Connected'
+      : connectionStatus === 'connecting'
+        ? 'Connecting'
+        : connectionStatus === 'reconnect_required'
+          ? 'Reconnect needed'
+          : connectionStatus === 'disconnected'
+            ? 'Disconnected'
+            : 'Not connected';
+  const connectionMessage =
+    connectionStatus === 'connected'
+      ? 'Google Calendar is connected. StudyClaw can read your schedule and help with AI scheduling.'
+      : connectionStatus === 'connecting'
+        ? 'Finishing the Google connection now.'
+        : connectionStatus === 'reconnect_required'
+          ? 'Google access expired or changed. Reconnect to keep calendar-aware planning working.'
+          : connectionStatus === 'disconnected'
+            ? 'Google Calendar was disconnected. You can reconnect any time.'
+            : 'Connect once and StudyClaw can sync study sessions and deadlines with your real schedule.';
 
   if (hasSession === null) {
     return (
@@ -162,95 +218,215 @@ function CalendarPageContent() {
   }
 
   return (
-    <>
-      {showSuccess && (
-        <div className="p-4 rounded-xl bg-success/10 border border-success/30 text-success text-sm flex items-center gap-2">
+    <section className="study-calendar-shell">
+      {showSuccess ? (
+        <div className="study-calendar-banner study-calendar-banner--success">
           <CheckCircle className="w-4 h-4" />
-          Google account connected successfully!
+          Google Calendar connected. AI scheduling and calendar-aware planning are ready.
         </div>
-      )}
+      ) : null}
 
-      <section className="hero-card">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="insight-chip">Calendar</p>
-            <h1 className="hero-title">Upcoming Events</h1>
-          </div>
-          {connected && (
-            <button
-              onClick={handleRefresh}
-              disabled={refreshing || loading}
-              className="ghost-button p-2"
-              title="Refresh"
-            >
-              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-            </button>
-          )}
+      <header className="study-calendar-header">
+        <div>
+          <p className="study-calendar-header__eyebrow">Calendar</p>
+          <h1 className="study-calendar-header__title">See classes, study blocks, and deadlines in one calm agenda.</h1>
+          <p className="study-calendar-header__description">
+            Bring Google Calendar into StudyClaw so the rest of your planning stays tied to your real schedule.
+          </p>
         </div>
+        <div className="study-calendar-header__meta">
+          <div className="study-calendar-header__meta-card">
+            <span>Status</span>
+            <strong>{connectionLabel}</strong>
+          </div>
+          <div className="study-calendar-header__meta-card">
+            <span>Events</span>
+            <strong>{events.length}</strong>
+          </div>
+          <div className="study-calendar-header__meta-card">
+            <span>Calendar</span>
+            <strong>{googleEmail || 'Not linked yet'}</strong>
+          </div>
+        </div>
+      </header>
+
+      <section className="study-calendar-ribbon">
+        <article className="study-calendar-ribbon__card">
+          <span className="preview-pill">Next up</span>
+          <strong>{events[0]?.title || 'No upcoming events yet'}</strong>
+          <p className="muted-copy" style={{ margin: '6px 0 0' }}>
+            {events[0]?.startsAt ? formatEventDateTime(events[0].startsAt) : 'Connect your calendar or wait for upcoming events to appear.'}
+          </p>
+        </article>
+        <article className="study-calendar-ribbon__card">
+          <span className="preview-pill">Connection</span>
+          <strong>{connected ? 'Google Calendar is active' : needsReconnect ? 'Reconnect Google Calendar' : 'Calendar not connected'}</strong>
+          <p className="muted-copy" style={{ margin: '6px 0 0' }}>
+            {connected
+              ? 'Refresh anytime to pull the latest events into your agenda.'
+              : needsReconnect
+                ? 'Reconnect to let StudyClaw keep reading and scheduling calendar events.'
+                : 'Connect your Google account to pull classes, exams, and study blocks.'}
+          </p>
+        </article>
       </section>
 
-      {error && (
-        <div className="p-4 rounded-xl bg-destructive/10 border border-destructive/30 text-destructive text-sm">
-          {error}
-        </div>
-      )}
-
-      {loading ? (
-        <section className="secondary-card">
-          <p className="eyebrow">Loading events...</p>
-          <LoadingSkeleton />
-        </section>
-      ) : !connected ? (
-        <section className="secondary-card">
-          <div className="text-center py-12">
-            <CalendarIcon className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-            <p className="muted-copy mb-4">Connect your Google account to see upcoming events</p>
-            <button onClick={handleConnect} className="primary-link-button">
-              Connect Google Account
-            </button>
-          </div>
-        </section>
-      ) : events.length === 0 ? (
-        <section className="secondary-card">
-          <p className="muted-copy text-center py-8">No upcoming events in the next 14 days</p>
-        </section>
-      ) : (
-        <section className="stack-list">
-          {events.map((event) => (
-            <article key={event.id} className="stack-item">
-              <div className="flex-1">
-                <div className="flex items-start gap-3">
-                  <CalendarIcon className="w-5 h-5 mt-0.5 text-primary flex-shrink-0" />
-                  <div>
-                    <strong>{event.title || 'Untitled Event'}</strong>
-                    <div className="flex items-center gap-3 mt-1 text-sm text-muted-foreground">
-                      <span className="flex items-center gap-1">
-                        <Clock className="w-3.5 h-3.5" />
-                        {formatEventTime(event.startsAt) || 'All day'}
-                        {event.startsAt && event.endsAt && (
-                          <> – {formatEventTime(event.endsAt)}</>
-                        )}
-                      </span>
-                    </div>
-                  </div>
-                </div>
+      <section className="study-calendar-grid">
+        <aside className="study-calendar-side">
+          <section className="study-calendar-panel">
+            <div className="study-calendar-panel__head">
+              <div>
+                <p className="eyebrow">Status</p>
+                <h2 className="section-title">Connection</h2>
               </div>
-              {event.htmlLink && (
-                <a
-                  href={event.htmlLink}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="ghost-button p-2"
-                  title="Open in Google Calendar"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                </a>
+              {connected ? <span className="settings-badge is-live">Live</span> : <span className="settings-badge">{needsReconnect ? 'Reconnect' : 'Needs setup'}</span>}
+            </div>
+
+            <div className="study-calendar-status-card">
+              <CalendarIcon className="study-calendar-status-card__icon" />
+              <div>
+                <strong>
+                  {connected
+                    ? 'Google Calendar connected'
+                    : needsReconnect
+                      ? 'Reconnect Google Calendar'
+                      : connectionStatus === 'disconnected'
+                        ? 'Google Calendar disconnected'
+                        : 'Google Calendar not connected'}
+                </strong>
+                <p className="muted-copy" style={{ margin: '6px 0 0' }}>
+                  {connectionMessage}
+                </p>
+                <p className="muted-copy" style={{ margin: '8px 0 0' }}>
+                  Allow AI scheduling. Sync study sessions and deadlines.
+                </p>
+              </div>
+            </div>
+
+            <div className="actions">
+              {connected ? (
+                <>
+                  <button onClick={handleRefresh} disabled={refreshing || loading}>
+                    {refreshing ? 'Refreshing...' : 'Refresh calendar'}
+                  </button>
+                  <button onClick={handleDisconnect} disabled={refreshing} className="ghost-button">
+                    {refreshing ? 'Disconnecting...' : 'Disconnect Google'}
+                  </button>
+                </>
+              ) : (
+                <button onClick={handleConnect} disabled={connectionStatus === 'connecting'}>
+                  {connectionStatus === 'connecting'
+                    ? 'Connecting Google...'
+                    : needsReconnect
+                      ? 'Reconnect Google'
+                      : 'Connect Google Calendar'}
+                </button>
               )}
-            </article>
-          ))}
-        </section>
-      )}
-    </>
+            </div>
+          </section>
+
+          <section className="study-calendar-panel">
+            <div className="study-calendar-panel__head">
+              <div>
+                <p className="eyebrow">Planning notes</p>
+                <h2 className="section-title">How to use this</h2>
+              </div>
+            </div>
+            <div className="study-calendar-helper-list">
+              <article className="study-calendar-helper-card">
+                <strong>See what is actually coming</strong>
+                <p className="muted-copy">Use the agenda to spot class meetings, exams, and busy days before you build study plans.</p>
+              </article>
+              <article className="study-calendar-helper-card">
+                <strong>Let StudyClaw schedule with context</strong>
+                <p className="muted-copy">When Google Calendar is connected, the agent can use your real schedule while planning study sessions and deadlines.</p>
+              </article>
+            </div>
+          </section>
+        </aside>
+
+        <main className="study-calendar-main">
+          {error ? (
+            <div className="study-calendar-banner study-calendar-banner--error">
+              {error}
+            </div>
+          ) : null}
+
+          <section className="study-calendar-panel study-calendar-panel--agenda">
+            <div className="study-calendar-panel__head">
+              <div>
+                <p className="eyebrow">Agenda</p>
+                <h2 className="section-title">Upcoming events</h2>
+              </div>
+              {connected ? (
+                <button
+                  onClick={handleRefresh}
+                  disabled={refreshing || loading}
+                  className="ghost-button"
+                  title="Refresh"
+                >
+                  <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                </button>
+              ) : null}
+            </div>
+
+            {loading ? (
+              <div className="study-calendar-loading">
+                <LoadingSkeleton />
+              </div>
+            ) : !connected ? (
+              <div className="study-calendar-empty">
+                <CalendarIcon className="study-calendar-empty__icon" />
+                <strong>{needsReconnect ? 'Reconnect Google Calendar to restore your agenda' : 'Connect Google Calendar to start your agenda'}</strong>
+                <p>
+                  {needsReconnect
+                    ? 'Google access needs to be refreshed before StudyClaw can read your upcoming events again.'
+                    : 'Once connected, upcoming classes, deadlines, and study blocks will appear here automatically.'}
+                </p>
+                <button onClick={handleConnect} className="primary-link-button">
+                  {needsReconnect ? 'Reconnect Google' : 'Connect Google Calendar'}
+                </button>
+              </div>
+            ) : events.length === 0 ? (
+              <div className="study-calendar-empty">
+                <CalendarIcon className="study-calendar-empty__icon" />
+                <strong>No upcoming events in the next 14 days</strong>
+                <p>Your calendar is connected, but there is nothing scheduled in the current window yet.</p>
+              </div>
+            ) : (
+              <div className="study-calendar-agenda">
+                {events.map((event) => (
+                  <article key={event.id} className="study-calendar-event">
+                    <div className="study-calendar-event__time">
+                      <span>{event.startsAt ? formatEventTime(event.startsAt) : 'All day'}</span>
+                      <small>{event.startsAt ? formatEventDateTime(event.startsAt).split(',')[0] : 'Date TBD'}</small>
+                    </div>
+                    <div className="study-calendar-event__content">
+                      <strong>{event.title || 'Untitled Event'}</strong>
+                      <p className="muted-copy" style={{ margin: '6px 0 0' }}>
+                        {formatEventDateTime(event.startsAt)}
+                        {event.endsAt ? ` – ${formatEventTime(event.endsAt)}` : ''}
+                      </p>
+                    </div>
+                    {event.htmlLink ? (
+                      <a
+                        href={event.htmlLink}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="ghost-button"
+                        title="Open in Google Calendar"
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                      </a>
+                    ) : null}
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        </main>
+      </section>
+    </section>
   );
 }
 

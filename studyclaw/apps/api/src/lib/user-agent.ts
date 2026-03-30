@@ -201,6 +201,68 @@ async function syncOpenClawAgentModel(agentId: string, modelKey?: string) {
   await writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
 }
 
+async function ensureWorkspaceBrowserSkill(workspacePath: string) {
+  const skillPath = join(workspacePath, 'skills', 'openclaw-agent-browser');
+
+  try {
+    await readFile(join(skillPath, 'SKILL.md'), 'utf8');
+    return;
+  } catch {
+    // install below
+  }
+
+  await mkdir(workspacePath, { recursive: true });
+
+  try {
+    await execFileAsync(
+      'openclaw',
+      ['skills', 'install', 'openclaw-agent-browser'],
+      {
+        cwd: workspacePath,
+        maxBuffer: 8 * 1024 * 1024,
+      }
+    );
+  } catch (error: any) {
+    const message = String(error?.stderr ?? error?.message ?? '');
+    if (!message.toLowerCase().includes('already exists')) {
+      throw error;
+    }
+  }
+}
+
+async function syncStudentAgentBrowserAccess(agentId: string) {
+  const configPath = join(OPENCLAW_HOME, 'openclaw.json');
+  const raw = await readFile(configPath, 'utf8');
+  const config = JSON.parse(raw) as OpenClawConfigFile;
+  const agents = config.agents?.list ?? [];
+  const entry = agents.find((item) => item.id === agentId) as
+    | (Record<string, unknown> & {
+        tools?: { alsoAllow?: unknown[] };
+      })
+    | undefined;
+
+  if (!entry) {
+    return;
+  }
+
+  const currentTools = Array.isArray(entry.tools?.alsoAllow)
+    ? entry.tools!.alsoAllow.map((value) => String(value))
+    : [];
+
+  const nextTools = Array.from(new Set([...currentTools, 'browser']));
+  entry.tools = {
+    ...(entry.tools ?? {}),
+    alsoAllow: nextTools.sort((left, right) => left.localeCompare(right)),
+  };
+
+  config.agents = {
+    ...(config.agents ?? {}),
+    list: agents,
+  };
+
+  await writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
+}
+
 async function writeWorkspaceFiles(
   userId: string,
   email: string,
@@ -447,7 +509,9 @@ export async function ensurePersonalAgent(input: {
   }
 
   await ensureEmptyAuthStore(agentStateDir);
+  await ensureWorkspaceBrowserSkill(workspacePath);
   await syncOpenClawAgentModel(agentId, input.modelKey);
+  await syncStudentAgentBrowserAccess(agentId);
   await writeWorkspaceFiles(input.userId, input.email, {
     personaName: input.personaName,
     tone: input.tone,

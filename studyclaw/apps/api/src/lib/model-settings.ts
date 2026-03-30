@@ -1,6 +1,15 @@
 import { readFile } from 'node:fs/promises';
 import { db } from './db';
 import { bindUserAgentCredential, ensurePersonalAgent, upsertUserAgentModelProvider } from './user-agent';
+import {
+  MANAGED_MINIMAX_MODEL_KEYS,
+  attachByokUsage,
+  attachLocalUsage,
+  attachManagedMiniMaxUsage,
+  getUserUsageSnapshot,
+  isManagedMiniMaxModelKey,
+  resolveManagedRuntimeCredential,
+} from './managed-usage';
 
 type SavedModelConfigRow = {
   id: string;
@@ -122,6 +131,14 @@ function getModelDefaults(modelKey: string, config?: GlobalOpenClawConfig) {
   };
 }
 
+function shouldUseManagedMiniMax(input: {
+  providerId: string;
+  modelKey: string;
+  explicitApiKey?: string | null;
+}) {
+  return input.providerId === 'minimax' && isManagedMiniMaxModelKey(input.modelKey) && !input.explicitApiKey?.trim();
+}
+
 async function resolveReusableApiKey(userId: string, providerId: string, configId?: string) {
   const [savedResult, credentialResult] = await Promise.all([
     db.query(
@@ -230,7 +247,7 @@ function mapSavedModelConfig(row: SavedModelConfigRow) {
 export async function getUserModelSettings(userId: string) {
   await ensureActiveSavedModelConfig(userId);
 
-  const [savedResult, profileResult] = await Promise.all([
+  const [savedResult, profileResult, usageProfile] = await Promise.all([
     db.query(
       `select *
        from user_saved_model_configs
@@ -239,6 +256,7 @@ export async function getUserModelSettings(userId: string) {
       [userId]
     ),
     db.query(`select model_key from agent_profiles where user_id = $1 limit 1`, [userId]),
+    getUserUsageSnapshot(userId),
   ]);
 
   const configs = savedResult.rows.map((row) => mapSavedModelConfig(row as SavedModelConfigRow));
@@ -248,6 +266,8 @@ export async function getUserModelSettings(userId: string) {
     activeConfigId: configs.find((config) => config.isActive)?.id ?? null,
     selectedConfigId: configs.find((config) => config.isActive)?.id ?? null,
     configs,
+    accessProfile: usageProfile,
+    managedMiniMaxModelKeys: [...MANAGED_MINIMAX_MODEL_KEYS],
   };
 }
 
@@ -268,11 +288,17 @@ export async function syncUserModelRuntimeConfig(input: {
     credentialResult.rows[0]?.provider_id === providerId
       ? credentialResult.rows[0]
       : null;
+  const managedRuntime = await resolveManagedRuntimeCredential({
+    userId: input.userId,
+    modelKey: input.modelKey,
+  });
   const resolvedApiKey =
+    managedRuntime?.apiKey ||
     credential?.api_key ||
     (await resolveReusableApiKey(input.userId, providerId)) ||
     LOCAL_PROVIDER_PLACEHOLDER_KEYS[providerId] ||
     null;
+  const resolvedBaseUrl = managedRuntime?.baseUrl || providerDefaults.baseUrl;
 
   await ensurePersonalAgent({
     userId: input.userId,
@@ -283,7 +309,7 @@ export async function syncUserModelRuntimeConfig(input: {
   await upsertUserAgentModelProvider({
     userId: input.userId,
     provider: providerId,
-    baseUrl: providerDefaults.baseUrl,
+    baseUrl: resolvedBaseUrl,
     apiType: providerDefaults.apiType,
     authHeader: providerDefaults.authHeader,
     apiKey: resolvedApiKey,
@@ -320,6 +346,47 @@ export async function activateUserModelSetting(input: {
     throw new Error('Saved model configuration not found');
   }
 
+  if (shouldUseManagedMiniMax({ providerId: row.provider_id, modelKey: row.model_key, explicitApiKey: row.api_key })) {
+    await attachManagedMiniMaxUsage({
+      userId: input.userId,
+      modelKey: row.model_key,
+    });
+
+    await ensurePersonalAgent({
+      userId: input.userId,
+      email: input.email,
+      modelKey: row.model_key,
+    });
+
+    await syncUserModelRuntimeConfig({
+      userId: input.userId,
+      email: input.email,
+      modelKey: row.model_key,
+    });
+
+    await db.query(
+      `insert into user_model_credentials (user_id, provider_id, api_key, oauth_connected, updated_at)
+       values ($1, $2, null, false, now())
+       on conflict (user_id) do update set
+         provider_id = excluded.provider_id,
+         api_key = excluded.api_key,
+         oauth_connected = excluded.oauth_connected,
+         updated_at = now()`,
+      [input.userId, row.provider_id]
+    );
+
+    await db.query(`update user_saved_model_configs set is_active = (id = $2), updated_at = now() where user_id = $1`, [
+      input.userId,
+      row.id,
+    ]);
+    await db.query(`update agent_profiles set model_key = $2 where user_id = $1`, [input.userId, row.model_key]);
+
+    return {
+      ...(await getUserModelSettings(input.userId)),
+      selectedConfigId: row.id,
+    };
+  }
+
   const resolvedApiKey =
     row.api_key ||
     (await resolveReusableApiKey(input.userId, row.provider_id, row.id)) ||
@@ -331,6 +398,20 @@ export async function activateUserModelSetting(input: {
   }
 
   const providerDefaults = getProviderDefaults(row.provider_id, row.service_base_url);
+
+  if (row.provider_id === 'ollama') {
+    await attachLocalUsage({
+      userId: input.userId,
+      providerId: row.provider_id,
+      modelKey: row.model_key,
+    });
+  } else {
+    await attachByokUsage({
+      userId: input.userId,
+      providerId: row.provider_id,
+      modelKey: row.model_key,
+    });
+  }
 
   await ensurePersonalAgent({
     userId: input.userId,
@@ -412,9 +493,14 @@ export async function saveUserModelSetting(input: {
   const modelKey = `${providerId}/${modelName}`;
   const maxContextWindow = parseOptionalNumber(input.maxContextWindow);
   const maxOutputTokens = parseOptionalNumber(input.maxOutputTokens);
-  const existingApiKey = await resolveReusableApiKey(input.userId, providerId, input.configId);
+  const useManagedMiniMax = shouldUseManagedMiniMax({
+    providerId,
+    modelKey,
+    explicitApiKey: input.apiKey,
+  });
+  const existingApiKey = useManagedMiniMax ? null : await resolveReusableApiKey(input.userId, providerId, input.configId);
   const resolvedApiKey =
-    input.apiKey?.trim() ||
+    (useManagedMiniMax ? null : input.apiKey?.trim()) ||
     existingApiKey ||
     LOCAL_PROVIDER_PLACEHOLDER_KEYS[providerId] ||
     null;

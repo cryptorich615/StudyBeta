@@ -14,6 +14,7 @@ import { coachRouter } from './modules/coach/coach.route';
 import { adminRouter } from './modules/admin/admin.route';
 import { userRouter } from './modules/user/user.route';
 import { googleRouter } from './modules/google/google.route.js';
+import { minimaxProxyRouter } from './modules/provider-proxy/minimax.route';
 import { ensurePlatformSchema } from './lib/platform-schema';
 import { startReminderWorker } from './jobs/reminderWorker';
 import { loadRepoEnv } from './lib/load-env';
@@ -39,6 +40,7 @@ app.use(
   })
 );
 app.use(json({ limit: '10mb' }));
+app.use('/api/provider-proxy/minimax', minimaxProxyRouter);
 app.use('/api/health', healthRouter); app.use('/api/auth', authRouter); app.use('/api/onboarding', onboardingRouter); app.use('/api/agent', agentRouter); app.use('/api/chat', chatRouter); app.use('/api/study', studyToolsRouter); app.use('/api/reminders', remindersRouter); app.use('/api/openclaw', openclawRouter); app.use('/api/dashboard', dashboardRouter); app.use('/api/coach', coachRouter); app.use('/api/admin', adminRouter); app.use('/api/user', userRouter);
 app.use('/api/google', googleRouter);
 

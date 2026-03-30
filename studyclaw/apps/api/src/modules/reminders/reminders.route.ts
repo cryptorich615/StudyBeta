@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import { db } from '../../lib/db';
 import { requireAuth, type AuthedRequest } from '../../lib/auth';
+import { upsertCalendarEventForReminder } from '../../lib/google-service';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
+import { recordStudyEvent, upsertAssignmentFromReminder, writeMemorySummary } from '../../lib/student-memory';
 
 export const remindersRouter = Router();
 remindersRouter.use(requireAuth);
@@ -52,7 +54,65 @@ remindersRouter.post('/', async (req: AuthedRequest, res) => {
     [req.user!.id, title.trim(), parsedReminderAt.toISOString(), type, JSON.stringify(metadata ?? {})]
   );
 
-  res.status(201).json(result.rows[0]);
+  const reminder = result.rows[0];
+  const syncedEvent = await upsertCalendarEventForReminder({
+    userId: req.user!.id,
+    title: reminder.title,
+    reminderAt: reminder.reminder_at,
+    type: reminder.type,
+    metadata: reminder.metadata_json ?? {},
+  });
+  if (syncedEvent) {
+    const syncedReminder = await db.query(
+      `update reminders
+       set metadata_json = metadata_json || $2::jsonb
+       where id = $1
+       returning *`,
+      [
+        reminder.id,
+        JSON.stringify({
+          calendarSource: 'google',
+          googleCalendarEventId: syncedEvent.id,
+          googleCalendarHtmlLink: syncedEvent.htmlLink,
+        }),
+      ]
+    );
+    if (syncedReminder.rows[0]) {
+      Object.assign(reminder, syncedReminder.rows[0]);
+    }
+  }
+  await recordStudyEvent({
+    userId: req.user!.id,
+    eventKey: `reminder:${reminder.id}:created`,
+    eventType: 'reminder_created',
+    sourceType: 'reminder',
+    sourceId: reminder.id,
+    payload: {
+      title: reminder.title,
+      type: reminder.type,
+    },
+  });
+  const assignment = await upsertAssignmentFromReminder({
+    userId: req.user!.id,
+    reminderId: reminder.id,
+    title: reminder.title,
+    type: reminder.type,
+    reminderAt: reminder.reminder_at,
+    status: reminder.status,
+    metadata: reminder.metadata_json ?? {},
+  });
+  if (assignment) {
+    await writeMemorySummary({
+      userId: req.user!.id,
+      summaryType: 'assignment_tracking',
+      summary: `Student is tracking ${assignment.title} as ${assignment.status}.`,
+      courseId: assignment.course_id ?? null,
+      summaryKey: `assignment:${assignment.id}:tracking`,
+      importance: /exam|quiz|test/i.test(reminder.type) ? 4 : 3,
+    });
+  }
+
+  res.status(201).json(reminder);
 });
 
 remindersRouter.patch('/:reminderId', async (req: AuthedRequest, res) => {
@@ -118,7 +178,66 @@ remindersRouter.patch('/:reminderId', async (req: AuthedRequest, res) => {
     [req.params.reminderId, req.user!.id, nextTitle, nextReminderAt, nextType, nextStatus]
   );
 
-  res.json(result.rows[0]);
+  const reminder = result.rows[0];
+  const syncedEvent = await upsertCalendarEventForReminder({
+    userId: req.user!.id,
+    title: reminder.title,
+    reminderAt: reminder.reminder_at,
+    type: reminder.type,
+    metadata: reminder.metadata_json ?? {},
+  });
+  if (syncedEvent) {
+    const syncedReminder = await db.query(
+      `update reminders
+       set metadata_json = metadata_json || $2::jsonb
+       where id = $1
+       returning *`,
+      [
+        reminder.id,
+        JSON.stringify({
+          calendarSource: 'google',
+          googleCalendarEventId: syncedEvent.id,
+          googleCalendarHtmlLink: syncedEvent.htmlLink,
+        }),
+      ]
+    );
+    if (syncedReminder.rows[0]) {
+      Object.assign(reminder, syncedReminder.rows[0]);
+    }
+  }
+  await recordStudyEvent({
+    userId: req.user!.id,
+    eventKey: `reminder:${reminder.id}:updated:${reminder.status}`,
+    eventType: reminder.status === 'completed' ? 'assignment_completed' : 'reminder_updated',
+    sourceType: 'reminder',
+    sourceId: reminder.id,
+    payload: {
+      title: reminder.title,
+      type: reminder.type,
+      status: reminder.status,
+    },
+  });
+  const assignment = await upsertAssignmentFromReminder({
+    userId: req.user!.id,
+    reminderId: reminder.id,
+    title: reminder.title,
+    type: reminder.type,
+    reminderAt: reminder.reminder_at,
+    status: reminder.status,
+    metadata: reminder.metadata_json ?? {},
+  });
+  if (assignment && reminder.status === 'completed') {
+    await writeMemorySummary({
+      userId: req.user!.id,
+      summaryType: 'assignment_completed',
+      summary: `Student completed ${assignment.title}.`,
+      courseId: assignment.course_id ?? null,
+      summaryKey: `assignment:${assignment.id}:completed`,
+      importance: 4,
+    });
+  }
+
+  res.json(reminder);
 });
 
 remindersRouter.delete('/:reminderId', async (req: AuthedRequest, res) => {

@@ -86,7 +86,8 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
       writeStoredSession(data);
       setSaved(data);
 
-      const nextPath = isOnboardingComplete(data) ? '/dashboard' : '/onboarding';
+      const nextPath =
+        data.user?.role === 'admin' ? '/admin' : isOnboardingComplete(data) ? '/dashboard' : '/onboarding';
       setStatus(
         mode === 'signup'
           ? data.existingUser
@@ -114,23 +115,22 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
       initial={{ opacity: 0, y: 18 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.45 }}
-      className="relative mx-auto w-full max-w-[480px]"
+      className="auth-form-shell"
     >
-      <div className="absolute inset-0 -z-10 rounded-[32px] bg-[radial-gradient(circle_at_top,rgba(244,162,97,0.16),transparent_60%)] blur-2xl dark:bg-[radial-gradient(circle_at_top,rgba(231,111,81,0.24),transparent_60%)]" />
       <motion.div
         animate={shakeError ? { x: [0, -10, 10, -6, 6, 0] } : { x: 0 }}
         transition={{ duration: 0.38 }}
-        className="rounded-[32px] border border-[var(--auth-card-border)] bg-[var(--auth-card-bg)] p-6 shadow-[var(--auth-card-shadow)] backdrop-blur-xl sm:p-8"
+        className="auth-form-card"
       >
-        <div className="mb-6 flex items-start justify-between gap-4">
+        <div className="auth-form-card__header">
           <div>
-            <p className="text-[0.72rem] font-bold uppercase tracking-[0.24em] text-[var(--marketing-muted)]">
+            <p className="auth-form-card__eyebrow">
               {mode === 'signup' ? 'Create account' : 'Welcome back'}
             </p>
-            <h1 className="mt-3 font-display text-3xl font-bold tracking-tight text-[var(--marketing-heading)]">
+            <h1 className="auth-form-card__title">
               {mode === 'signup' ? 'Build your always-on study system.' : 'Get back to your study flow.'}
             </h1>
-            <p className="mt-3 text-sm leading-7 text-[var(--marketing-copy)]">
+            <p className="auth-form-card__description">
               {mode === 'signup'
                 ? 'Email and password get you in fast. Google stays available for instant sign-in and calendar-connected workflows.'
                 : 'Use your StudyClaw credentials or continue with Google to reopen your dashboard.'}
@@ -151,7 +151,7 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
           <Button
             type="button"
             variant="outline"
-            className="h-12 w-full rounded-2xl border-[var(--marketing-card-border)] bg-[var(--auth-google-bg)] text-[var(--marketing-heading)] hover:bg-[var(--auth-google-hover)]"
+            className="auth-google-button"
             onClick={handleGoogleLogin}
           >
             <span className="mr-3"><GoogleIcon /></span>
@@ -166,7 +166,7 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
 
           <form className="space-y-4" onSubmit={handleSubmit}>
             <label className="block">
-              <span className="mb-2 flex items-center gap-2 text-sm font-semibold text-[var(--marketing-heading)]">
+              <span className="auth-field-label">
                 <Mail className="h-4 w-4 text-primary" />
                 Email
               </span>
@@ -177,12 +177,12 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
                 placeholder="student@campus.edu"
                 autoComplete="email"
                 required
-                className="h-12 w-full rounded-2xl border border-[var(--auth-input-border)] bg-[var(--auth-input-bg)] px-4 text-[var(--marketing-heading)] outline-none transition placeholder:text-[var(--marketing-muted)] focus:border-primary focus:ring-2 focus:ring-primary/20"
+                className="auth-input"
               />
             </label>
 
             <label className="block">
-              <span className="mb-2 flex items-center gap-2 text-sm font-semibold text-[var(--marketing-heading)]">
+              <span className="auth-field-label">
                 <LockKeyhole className="h-4 w-4 text-primary" />
                 Password
               </span>
@@ -194,7 +194,7 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
                 autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
                 minLength={mode === 'signup' ? 8 : undefined}
                 required
-                className="h-12 w-full rounded-2xl border border-[var(--auth-input-border)] bg-[var(--auth-input-bg)] px-4 text-[var(--marketing-heading)] outline-none transition placeholder:text-[var(--marketing-muted)] focus:border-primary focus:ring-2 focus:ring-primary/20"
+                className="auth-input"
               />
             </label>
 
@@ -205,14 +205,14 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: 'auto' }}
                   exit={{ opacity: 0, height: 0 }}
-                  className="overflow-hidden rounded-2xl border border-[var(--marketing-card-border)] bg-[var(--auth-tip-bg)] p-4"
+                  className="auth-tip-card"
                 >
-                  <p className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-[var(--marketing-muted)]">
+                  <p className="auth-tip-card__eyebrow">
                     Password requirements
                   </p>
                   <ul className="space-y-2">
                     {passwordState.map((rule) => (
-                      <li key={rule.label} className="flex items-center gap-2 text-sm text-[var(--marketing-copy)]">
+                      <li key={rule.label} className="auth-tip-card__rule">
                         <CheckCircle2 className={`h-4 w-4 ${rule.passed ? 'text-emerald-500' : 'text-[var(--marketing-muted)]'}`} />
                         <span>{rule.label}</span>
                       </li>
@@ -225,7 +225,7 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
             <Button
               type="submit"
               disabled={isSubmitting}
-              className="h-12 w-full rounded-2xl bg-[var(--auth-button-bg)] text-[var(--auth-button-fg)] shadow-[0_18px_45px_rgba(244,162,97,0.24)] transition hover:translate-y-[-1px] hover:opacity-95"
+              className="auth-submit-button"
             >
               {isSubmitting
                 ? mode === 'signup'
@@ -246,7 +246,7 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
-              className={`mt-4 rounded-2xl border px-4 py-3 text-sm ${
+              className={`auth-status-card ${
                 shakeError
                   ? 'border-red-400/40 bg-red-500/10 text-red-200 dark:text-red-200'
                   : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200'
@@ -259,7 +259,7 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
           ) : null}
         </AnimatePresence>
 
-        <div className="mt-5 flex flex-col gap-2 text-sm text-[var(--marketing-copy)] sm:flex-row sm:items-center sm:justify-between">
+        <div className="auth-form-footer">
           <p>
             {mode === 'signup' ? 'Already have an account?' : 'Need an account?'}{' '}
             <button
@@ -275,12 +275,12 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
           </p>
         </div>
 
-        <div className="mt-4 text-xs text-[var(--marketing-muted)]">
+        <div className="auth-form-legal">
           By continuing, you agree to use StudyClaw for your own coursework and study planning.
         </div>
       </motion.div>
 
-      <div className="mt-4 text-center text-sm text-[var(--marketing-copy)]">
+      <div className="auth-form-backlink">
         <Link href="/" className="font-medium text-primary underline-offset-4 hover:underline">
           Back to StudyClaw
         </Link>

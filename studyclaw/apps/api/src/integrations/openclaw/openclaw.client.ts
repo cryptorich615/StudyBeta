@@ -79,6 +79,13 @@ export class OpenClawClient {
 
     if (!response.ok) {
       const message = data?.error?.message ?? rawText ?? 'Unknown OpenClaw error';
+      console.error('[openclaw] upstream request failed', {
+        status: response.status,
+        agentId: input.agentId ?? null,
+        model: input.model ?? this.defaultModel,
+        feature: input.metadata?.feature ?? null,
+        message,
+      });
       throw new Error(`OpenClaw error ${response.status}: ${message}`);
     }
 

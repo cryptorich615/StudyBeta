@@ -53,6 +53,17 @@ type DashboardData = {
   dueSoon: DashboardTask[];
   nextExam: DashboardTask | null;
   recommendations: string[];
+  weeklyStudyPlan: Array<{
+    dateKey: string;
+    label: string;
+    workload: 'light' | 'steady' | 'heavy';
+    focus: string;
+    blocks: Array<{
+      title: string;
+      detail: string;
+      timeLabel: string;
+    }>;
+  }>;
   calendarEvents: Array<{
     id: string;
     title: string;
@@ -109,6 +120,12 @@ function buildUpcomingExams(data: DashboardData | null) {
   return items;
 }
 
+function buildWeeklyGoal(data: DashboardData | null) {
+  const tasks = data?.todayTasks ?? [];
+  const dueSoon = data?.dueSoon ?? [];
+  return Math.min(100, Math.max(12, (tasks.length * 18) + (dueSoon.length * 8)));
+}
+
 function DashboardPageContent() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [status, setStatus] = useState('');
@@ -124,6 +141,7 @@ function DashboardPageContent() {
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [taskDraft, setTaskDraft] = useState<TaskDraft | null>(null);
   const upcomingExams = buildUpcomingExams(data);
+  const weeklyGoalProgress = buildWeeklyGoal(data);
 
   async function handleGoogleConnect(returnTo: string) {
     try {
@@ -279,307 +297,411 @@ function DashboardPageContent() {
 
   return (
     <>
-      <section className="hero-card hero-card-featured">
-        <div className="hero-copy">
-          <p className="insight-chip">Student bulletin board</p>
-          <h1 className="hero-title">Know what to do today without sorting your whole semester by hand.</h1>
-          <p className="hero-description">
-            StudyClaw ranks today’s pressure, surfaces upcoming exams, and keeps your study board focused on the next work that matters.
-          </p>
-          {data ? (
-            <div className="hero-meta">
-              <span className="insight-chip">{data.integrations.sourceLabel}</span>
-              {data.studentAgent ? <span className="insight-chip">{data.studentAgent.name} · {data.studentAgent.agent_type}</span> : null}
-              <span className="insight-chip">Updated {formatDate(data.generatedAt)}</span>
-            </div>
-          ) : null}
-        </div>
-        <div className="hero-actions">
-          <div className="metric-grid">
-            <div className="metric-tile">
+      <section className="student-dashboard-shell">
+        <header className="student-dashboard-header">
+          <div>
+            <p className="student-dashboard-header__eyebrow">Student dashboard</p>
+            <h1 className="student-dashboard-header__title">Stay on top of today’s work without losing the bigger picture.</h1>
+            <p className="student-dashboard-header__description">
+              StudyClaw keeps today’s tasks, upcoming exams, calendar context, and study momentum in one focused board.
+            </p>
+            {data ? (
+              <div className="student-dashboard-header__chips">
+                <span className="insight-chip">{data.integrations.sourceLabel}</span>
+                {data.studentAgent ? <span className="insight-chip">{data.studentAgent.name} · {data.studentAgent.agent_type}</span> : null}
+                <span className="insight-chip">Updated {formatDate(data.generatedAt)}</span>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="student-dashboard-header__meta">
+            <div className="student-dashboard-header__meta-card">
+              <span>Flashcards</span>
               <strong>{data?.counts.flashcardSets ?? 0}</strong>
-              <span>flashcard sets</span>
             </div>
-            <div className="metric-tile">
+            <div className="student-dashboard-header__meta-card">
+              <span>Quizzes</span>
               <strong>{data?.counts.quizzes ?? 0}</strong>
-              <span>quizzes</span>
             </div>
-            <div className="metric-tile">
+            <div className="student-dashboard-header__meta-card">
+              <span>Knowledge</span>
               <strong>{data?.counts.knowledgeItems ?? 0}</strong>
-              <span>coach knowledge items</span>
             </div>
           </div>
-        </div>
-      </section>
+        </header>
 
-      {loading && !data ? <StatusBanner tone="neutral">Loading your dashboard...</StatusBanner> : null}
-      {status ? <StatusBanner tone="danger">{status}</StatusBanner> : null}
-      {data && !data.onboardingComplete ? (
-        <StatusBanner tone="warning">
-          Your account is signed in, but setup is not finished yet. Use the quick actions below to finish onboarding and start feeding the dashboard real study data.
-        </StatusBanner>
-      ) : null}
-      {data && !data.integrations.calendarConnected ? (
-        <StatusBanner tone="warning">
-          <button type="button" className="inline-edit-button" onClick={() => void handleGoogleConnect('/dashboard')}>
-            Connect Google Calendar
-          </button>{' '}
-          to see upcoming events alongside your study priorities.
-        </StatusBanner>
-      ) : null}
+        {loading && !data ? <StatusBanner tone="neutral">Loading your dashboard...</StatusBanner> : null}
+        {status ? <StatusBanner tone="danger">{status}</StatusBanner> : null}
+        {data && !data.onboardingComplete ? (
+          <StatusBanner tone="warning">
+            Your account is signed in, but setup is not finished yet. Use the shortcuts below to finish onboarding and start feeding the dashboard real study data.
+          </StatusBanner>
+        ) : null}
+        {data && !data.integrations.calendarConnected ? (
+          <StatusBanner tone="warning">
+            <button type="button" className="inline-edit-button" onClick={() => void handleGoogleConnect('/dashboard')}>
+              Connect Google Calendar
+            </button>{' '}
+            to layer classes, exams, and deadlines onto your board.
+          </StatusBanner>
+        ) : null}
 
-      <section className="board-ribbon">
-        <article className="ribbon-tile">
-          <span className="preview-pill">Focus</span>
-          <strong>{data?.todayTasks[0]?.title ?? 'No urgent task'}</strong>
-          <p className="muted-copy" style={{ margin: '6px 0 0' }}>
-            {data?.todayTasks[0] ? `${data.todayTasks[0].type} · ${data.todayTasks[0].urgencyLabel}` : 'Your board is quiet right now.'}
-          </p>
-        </article>
-        <article className="ribbon-tile">
-          <span className="preview-pill">Upcoming exams</span>
-          <strong>{upcomingExams[0]?.title ?? 'Nothing scheduled'}</strong>
-          <p className="muted-copy" style={{ margin: '6px 0 0' }}>
-            {upcomingExams[0] ? formatDate(upcomingExams[0].reminder_at) : 'Add exam reminders to see them here.'}
-          </p>
-        </article>
-      </section>
-
-      <section className="board-grid">
-        <section className="priority-card">
-          <div className="section-head">
-            <div>
-              <p className="eyebrow">Today</p>
-              <h2 className="section-title">Today&apos;s tasks</h2>
+        <section className="student-dashboard-ribbon">
+          <article className="student-dashboard-ribbon__card">
+            <span className="preview-pill">Today’s focus</span>
+            <strong>{data?.todayTasks[0]?.title ?? 'Nothing urgent right now'}</strong>
+            <p className="muted-copy" style={{ margin: '6px 0 0' }}>
+              {data?.todayTasks[0] ? `${data.todayTasks[0].type} · ${data.todayTasks[0].urgencyLabel}` : 'Your board is clear for the moment.'}
+            </p>
+          </article>
+          <article className="student-dashboard-ribbon__card">
+            <span className="preview-pill">Next exam</span>
+            <strong>{upcomingExams[0]?.title ?? 'Nothing scheduled yet'}</strong>
+            <p className="muted-copy" style={{ margin: '6px 0 0' }}>
+              {upcomingExams[0] ? formatDate(upcomingExams[0].reminder_at) : 'Add exam reminders to keep this visible.'}
+            </p>
+          </article>
+          <article className="student-dashboard-ribbon__card">
+            <span className="preview-pill">Weekly momentum</span>
+            <strong>{weeklyGoalProgress}% in motion</strong>
+            <div className="student-dashboard-progress">
+              <div className="student-dashboard-progress__track">
+                <div className="student-dashboard-progress__fill" style={{ width: `${weeklyGoalProgress}%` }} />
+              </div>
             </div>
-          </div>
-          <ul className="priority-list">
-            {(data?.todayTasks ?? []).length ? (
-              data?.todayTasks.map((task) => (
-                <li key={task.id} className="priority-item">
-                  {editingTaskId === task.id && taskDraft ? (
-                    <div className="task-editor">
-                      <input
-                        value={taskDraft.title}
-                        onChange={(event) =>
-                          setTaskDraft((current) => (current ? { ...current, title: event.target.value } : current))
-                        }
-                        className="task-editor-input"
-                        placeholder="Task title"
-                      />
-                      <div className="task-editor-grid">
-                        <input
-                          value={taskDraft.type}
-                          onChange={(event) =>
-                            setTaskDraft((current) => (current ? { ...current, type: event.target.value } : current))
-                          }
-                          className="task-editor-input"
-                          placeholder="Task type"
-                        />
-                        <input
-                          type="datetime-local"
-                          value={taskDraft.reminderAt}
-                          onChange={(event) =>
-                            setTaskDraft((current) => (current ? { ...current, reminderAt: event.target.value } : current))
-                          }
-                          className="task-editor-input"
-                        />
-                      </div>
-                      <div className="task-action-row">
-                        <button
-                          type="button"
-                          className="task-action-button task-action-button-primary"
-                          onClick={() => void saveTask(task.id)}
-                          disabled={taskActionId === task.id}
-                        >
-                          {taskActionId === task.id ? 'Saving...' : 'Save'}
-                        </button>
-                        <button
-                          type="button"
-                          className="task-action-button"
-                          onClick={cancelEditingTask}
-                          disabled={taskActionId === task.id}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="task-main">
-                        <div>
-                          <strong>{task.title}</strong>
-                          <span>{task.type} · {task.urgencyLabel}</span>
-                        </div>
-                        <div className="task-meta-stack">
-                          <div className="task-meta">{formatDate(task.reminder_at)}</div>
+          </article>
+        </section>
+
+        <section className="student-dashboard-grid">
+          <section className="student-dashboard-main">
+            <section className="student-dashboard-panel student-dashboard-panel--focus">
+              <div className="section-head">
+                <div>
+                  <p className="eyebrow">Today</p>
+                  <h2 className="section-title">Today&apos;s tasks</h2>
+                </div>
+              </div>
+              <ul className="priority-list">
+                {(data?.todayTasks ?? []).length ? (
+                  data?.todayTasks.map((task) => (
+                    <li key={task.id} className="priority-item">
+                      {editingTaskId === task.id && taskDraft ? (
+                        <div className="task-editor">
+                          <input
+                            value={taskDraft.title}
+                            onChange={(event) =>
+                              setTaskDraft((current) => (current ? { ...current, title: event.target.value } : current))
+                            }
+                            className="task-editor-input"
+                            placeholder="Task title"
+                          />
+                          <div className="task-editor-grid">
+                            <input
+                              value={taskDraft.type}
+                              onChange={(event) =>
+                                setTaskDraft((current) => (current ? { ...current, type: event.target.value } : current))
+                              }
+                              className="task-editor-input"
+                              placeholder="Task type"
+                            />
+                            <input
+                              type="datetime-local"
+                              value={taskDraft.reminderAt}
+                              onChange={(event) =>
+                                setTaskDraft((current) => (current ? { ...current, reminderAt: event.target.value } : current))
+                              }
+                              className="task-editor-input"
+                            />
+                          </div>
                           <div className="task-action-row">
                             <button
                               type="button"
-                              className="task-action-button"
-                              onClick={() => beginEditingTask(task)}
+                              className="task-action-button task-action-button-primary"
+                              onClick={() => void saveTask(task.id)}
                               disabled={taskActionId === task.id}
                             >
-                              Edit
+                              {taskActionId === task.id ? 'Saving...' : 'Save'}
                             </button>
                             <button
                               type="button"
-                              className="task-action-button task-action-button-danger"
-                              onClick={() => void deleteTask(task.id)}
+                              className="task-action-button"
+                              onClick={cancelEditingTask}
                               disabled={taskActionId === task.id}
                             >
-                              {taskActionId === task.id ? 'Deleting...' : 'Delete'}
+                              Cancel
                             </button>
                           </div>
                         </div>
-                      </div>
-                    </>
-                  )}
-                </li>
-              ))
-            ) : (
-              <li className="priority-item priority-empty">
-                <div>
-                  <strong>No tasks due today</strong>
-                  <span>Add reminders or connect more academic inputs to get sharper rankings.</span>
-                </div>
-              </li>
-            )}
-          </ul>
-        </section>
-
-        <section className="secondary-card">
-          <p className="eyebrow">Priority messages</p>
-          <div className="timeline">
-            {(data?.recommendations ?? []).length ? (
-              data?.recommendations.map((item) => (
-                <div key={item} className="timeline-item">
-                  <p className="muted-copy" style={{ margin: 0 }}>{item}</p>
-                </div>
-              ))
-            ) : (
-              <p className="muted-copy">No priority messages yet. Add more study inputs to sharpen your board.</p>
-            )}
-          </div>
-        </section>
-
-        <section className="secondary-card">
-          <p className="eyebrow">Upcoming Events</p>
-          {data?.integrations.googleEmail ? (
-            data.calendarEvents.length ? (
-              <div className="stack-list">
-                {data.calendarEvents.slice(0, 3).map((event) => (
-                  <article key={event.id} className="stack-item">
+                      ) : (
+                        <div className="task-main">
+                          <div>
+                            <strong>{task.title}</strong>
+                            <span>{task.type} · {task.urgencyLabel}</span>
+                          </div>
+                          <div className="task-meta-stack">
+                            <div className="task-meta">{formatDate(task.reminder_at)}</div>
+                            <div className="task-action-row">
+                              <button
+                                type="button"
+                                className="task-action-button"
+                                onClick={() => beginEditingTask(task)}
+                                disabled={taskActionId === task.id}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="task-action-button task-action-button-danger"
+                                onClick={() => void deleteTask(task.id)}
+                                disabled={taskActionId === task.id}
+                              >
+                                {taskActionId === task.id ? 'Deleting...' : 'Delete'}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </li>
+                  ))
+                ) : (
+                  <li className="priority-item priority-empty">
                     <div>
-                      <strong>{event.title}</strong>
-                      <p className="muted-copy" style={{ margin: '4px 0 0' }}>
-                        {event.startsAt ? formatDate(event.startsAt) : 'Date unavailable'}
-                      </p>
+                      <strong>No tasks due today</strong>
+                      <span>Add reminders or connect more academic inputs to sharpen this board.</span>
                     </div>
-                  </article>
-                ))}
-                <Link href="/calendar" className="ghost-button text-sm mt-2">
-                  View Calendar →
-                </Link>
+                  </li>
+                )}
+              </ul>
+            </section>
+
+            <section className="student-dashboard-panel">
+              <div className="section-head">
+                <div>
+                  <p className="eyebrow">Weekly plan</p>
+                  <h2 className="section-title">Suggested study rhythm for the next few days</h2>
+                </div>
               </div>
-            ) : (
-              <p className="muted-copy">No upcoming events in the next 3 days</p>
-            )
-          ) : (
-            <button type="button" className="ghost-button" onClick={() => void handleGoogleConnect('/dashboard')}>
-              Connect Google Calendar →
-            </button>
-          )}
-        </section>
-      </section>
+              {(data?.weeklyStudyPlan ?? []).length ? (
+                <div className="student-dashboard-plan-grid">
+                  {data?.weeklyStudyPlan.map((day) => (
+                    <article key={day.dateKey} className={`student-dashboard-plan-card is-${day.workload}`}>
+                      <div className="student-dashboard-plan-card__header">
+                        <div>
+                          <p className="student-dashboard-plan-card__day">{day.label}</p>
+                          <strong>{day.focus}</strong>
+                        </div>
+                        <span className={`student-dashboard-plan-card__pill is-${day.workload}`}>
+                          {day.workload}
+                        </span>
+                      </div>
+                      <div className="student-dashboard-plan-card__blocks">
+                        {day.blocks.map((block) => (
+                          <div key={`${day.dateKey}-${block.title}`} className="student-dashboard-plan-card__block">
+                            <div className="student-dashboard-plan-card__time">{block.timeLabel}</div>
+                            <div>
+                              <strong>{block.title}</strong>
+                              <p>{block.detail}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted-copy">Add reminders, exams, or calendar events to generate a stronger weekly study rhythm.</p>
+              )}
+            </section>
 
-      <section className="board-grid">
-        <section className="secondary-card">
-          <p className="eyebrow">Quick actions</p>
-          <h2 className="section-title">Make the board useful</h2>
-          <p className="muted-copy">
-            The dashboard API already returns a setup path, but this screen was not rendering it. Fresh accounts looked inactive even though the backend had actions ready.
-          </p>
-          <div className="actions">
-            {(data?.quickActions ?? []).map((action) => (
-              <Link key={action.href} href={action.href} className="ghost-button">
-                {action.label}
-              </Link>
-            ))}
-          </div>
-        </section>
-
-        <section className="secondary-card">
-          <p className="eyebrow">Due soon</p>
-          <div className="stack-list">
-            {(data?.dueSoon ?? []).length ? (
-              data?.dueSoon.map((task) => (
-                <article key={task.id} className="stack-item">
+            <section className="student-dashboard-double">
+              <section className="student-dashboard-panel">
+                <div className="section-head">
                   <div>
-                    <strong>{task.title}</strong>
-                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>{task.type} · {task.urgencyLabel}</p>
+                    <p className="eyebrow">Shortcuts</p>
+                    <h2 className="section-title">What to do next</h2>
                   </div>
-                  <span className="settings-badge">{formatDate(task.reminder_at)}</span>
-                </article>
-              ))
-            ) : (
-              <p className="muted-copy">
-                No near-term work is connected yet. Finish onboarding, add reminders, or connect calendar data to populate this list.
-              </p>
-            )}
-          </div>
-        </section>
+                </div>
+                <div className="student-dashboard-shortcuts">
+                  {(data?.quickActions ?? []).length ? (
+                    data?.quickActions.map((action) => (
+                      <Link key={action.href} href={action.href} className="student-dashboard-shortcut">
+                        <strong>{action.label}</strong>
+                        <span>Open</span>
+                      </Link>
+                    ))
+                  ) : (
+                    <div className="study-library-empty">
+                      <strong>No shortcuts yet</strong>
+                      <p>Finish setup and add more study data to unlock clearer next steps here.</p>
+                    </div>
+                  )}
+                </div>
+              </section>
 
-        <section className="secondary-card">
-          <p className="eyebrow">Upcoming exams</p>
-          {upcomingExams.length ? (
-            <div className="stack-list">
-              {upcomingExams.map((task) => (
-                <article key={task.id} className="stack-item">
+              <section className="student-dashboard-panel">
+                <div className="section-head">
                   <div>
-                    <strong>{task.title}</strong>
-                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>{task.type}</p>
+                    <p className="eyebrow">Priority messages</p>
+                    <h2 className="section-title">What to keep in mind</h2>
                   </div>
-                  <span className="settings-badge">{formatDate(task.reminder_at)}</span>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <p className="muted-copy">No upcoming exams are scheduled yet.</p>
-          )}
-        </section>
-      </section>
+                </div>
+                <div className="timeline">
+                  {(data?.recommendations ?? []).length ? (
+                    data?.recommendations.map((item) => (
+                      <div key={item} className="timeline-item">
+                        <p className="muted-copy" style={{ margin: 0 }}>{item}</p>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="muted-copy">No priority messages yet. Add more study inputs to sharpen the board.</p>
+                  )}
+                </div>
+              </section>
+            </section>
+          </section>
 
-      <section className="board-grid">
-        <section className="secondary-card">
-          <p className="eyebrow">Calendar</p>
-          <h2 className="section-title">Upcoming Google Calendar events</h2>
-          <p className="muted-copy">
-            {data?.integrations.googleEmail
-              ? `Connected as ${data.integrations.googleEmail}.`
-              : 'Connect Google during sign-in to surface live study blocks and exams.'}
-          </p>
-          <div className="stack-list">
-            {(data?.calendarEvents ?? []).length ? (
-              data?.calendarEvents.map((event) => (
-                <article key={event.id} className="stack-item">
-                  <div>
-                    <strong>{event.title}</strong>
-                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>
-                      {event.startsAt ? formatDate(event.startsAt) : 'Date unavailable'}
-                    </p>
-                  </div>
-                  {event.htmlLink ? (
-                    <Link href={event.htmlLink} target="_blank" rel="noreferrer" className="ghost-button">
-                      Open
+          <aside className="student-dashboard-side">
+            <section className="student-dashboard-panel">
+              <div className="section-head">
+                <div>
+                  <p className="eyebrow">Due soon</p>
+                  <h2 className="section-title">Coming up next</h2>
+                </div>
+              </div>
+              <div className="stack-list">
+                {(data?.dueSoon ?? []).length ? (
+                  data?.dueSoon.map((task) => (
+                    <article key={task.id} className="stack-item">
+                      <div>
+                        <strong>{task.title}</strong>
+                        <p className="muted-copy" style={{ margin: '4px 0 0' }}>{task.type} · {task.urgencyLabel}</p>
+                      </div>
+                      <span className="settings-badge">{formatDate(task.reminder_at)}</span>
+                    </article>
+                  ))
+                ) : (
+                  <p className="muted-copy">No near-term work is connected yet. Add reminders or calendar data to populate this list.</p>
+                )}
+              </div>
+            </section>
+
+            <section className="student-dashboard-panel">
+              <div className="section-head">
+                <div>
+                  <p className="eyebrow">Upcoming exams</p>
+                  <h2 className="section-title">Tests on deck</h2>
+                </div>
+              </div>
+              {upcomingExams.length ? (
+                <div className="stack-list">
+                  {upcomingExams.map((task) => (
+                    <article key={task.id} className="stack-item">
+                      <div>
+                        <strong>{task.title}</strong>
+                        <p className="muted-copy" style={{ margin: '4px 0 0' }}>{task.type}</p>
+                      </div>
+                      <span className="settings-badge">{formatDate(task.reminder_at)}</span>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted-copy">No upcoming exams are scheduled yet.</p>
+              )}
+            </section>
+
+            <section className="student-dashboard-panel">
+              <div className="section-head">
+                <div>
+                  <p className="eyebrow">Calendar</p>
+                  <h2 className="section-title">Upcoming events</h2>
+                </div>
+              </div>
+              {data?.integrations.googleEmail ? (
+                data.calendarEvents.length ? (
+                  <div className="stack-list">
+                    {data.calendarEvents.slice(0, 4).map((event) => (
+                      <article key={event.id} className="stack-item">
+                        <div>
+                          <strong>{event.title}</strong>
+                          <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                            {event.startsAt ? formatDate(event.startsAt) : 'Date unavailable'}
+                          </p>
+                        </div>
+                        {event.htmlLink ? (
+                          <Link href={event.htmlLink} target="_blank" rel="noreferrer" className="ghost-button">
+                            Open
+                          </Link>
+                        ) : null}
+                      </article>
+                    ))}
+                    <Link href="/calendar" className="ghost-button">
+                      View calendar
                     </Link>
-                  ) : null}
-                </article>
-              ))
-            ) : (
-              <p className="muted-copy">No upcoming Google Calendar events are available yet.</p>
-            )}
-          </div>
+                  </div>
+                ) : (
+                  <p className="muted-copy">No upcoming Google Calendar events are available yet.</p>
+                )
+              ) : (
+                <button type="button" className="ghost-button" onClick={() => void handleGoogleConnect('/dashboard')}>
+                  Connect Google Calendar
+                </button>
+              )}
+            </section>
+          </aside>
+        </section>
+
+        <section className="student-dashboard-bottom">
+          <section className="student-dashboard-panel">
+            <div className="section-head">
+              <div>
+                <p className="eyebrow">Activity</p>
+                <h2 className="section-title">Recent study activity</h2>
+              </div>
+            </div>
+            <div className="timeline">
+              {(data?.activityFeed ?? []).length ? (
+                data?.activityFeed.slice(0, 6).map((item) => (
+                  <div key={`${item.action_type}-${item.created_at}-${item.summary}`} className="timeline-item">
+                    <strong>{item.summary}</strong>
+                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>{formatDate(item.created_at)}</p>
+                  </div>
+                ))
+              ) : (
+                <p className="muted-copy">Activity will show up here as you chat, generate study tools, and save new materials.</p>
+              )}
+            </div>
+          </section>
+
+          <section className="student-dashboard-panel">
+            <div className="section-head">
+              <div>
+                <p className="eyebrow">Heartbeat</p>
+                <h2 className="section-title">Board status</h2>
+              </div>
+            </div>
+            {data ? (
+              <div className="student-dashboard-heartbeat">
+                <div className="student-dashboard-heartbeat__summary">
+                  <strong>{data.heartbeat.status}</strong>
+                  <p className="muted-copy" style={{ margin: '6px 0 0' }}>{data.heartbeat.summary}</p>
+                </div>
+                <div className="student-dashboard-heartbeat__meta">
+                  <div className="student-dashboard-heartbeat__meta-card">
+                    <span>Last checked</span>
+                    <strong>{formatDate(data.heartbeat.lastEvaluatedAt)}</strong>
+                  </div>
+                  <div className="student-dashboard-heartbeat__meta-card">
+                    <span>Next refresh</span>
+                    <strong>{formatDate(data.heartbeat.nextRunAt)}</strong>
+                  </div>
+                  <div className="student-dashboard-heartbeat__meta-card">
+                    <span>Cadence</span>
+                    <strong>Every {data.heartbeat.cadenceMinutes} min</strong>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </section>
         </section>
       </section>
     </>

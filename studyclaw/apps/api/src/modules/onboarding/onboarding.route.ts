@@ -15,6 +15,14 @@ import {
 import { getGoogleConnectionStatus } from '../../lib/google-service';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
 import { syncUserModelRuntimeConfig } from '../../lib/model-settings';
+import {
+  assignTestingTier,
+  attachByokUsage,
+  attachLocalUsage,
+  attachManagedMiniMaxUsage,
+  getUserUsageSnapshot,
+  isManagedMiniMaxModelKey,
+} from '../../lib/managed-usage';
 
 export const onboardingRouter = Router();
 const LOCAL_PROVIDER_PLACEHOLDER_KEYS: Record<string, string> = {
@@ -44,14 +52,14 @@ const DEFAULT_ONBOARDING_MODELS = [
   },
   {
     key: 'minimax/MiniMax-M2.7',
-    name: 'MiniMax M2.7',
+    name: 'MiniMax M2.7 (configured)',
     provider: 'minimax',
     oauthAvailable: false,
     available: true,
   },
   {
     key: 'minimax/MiniMax-M2.5',
-    name: 'MiniMax M2.5',
+    name: 'MiniMax M2.5 (configured)',
     provider: 'minimax',
     oauthAvailable: false,
     available: true,
@@ -107,6 +115,30 @@ async function loadOnboardingModelsFast() {
     const configuredDefaults = await loadConfiguredOpenClawDefaults().catch(() => []);
     return mergeOnboardingModels(configuredDefaults);
   }
+}
+
+function sortTestingPreferredModels<T extends { key: string; provider?: string; isFree?: boolean; name?: string }>(models: T[]) {
+  const priority = new Map<string, number>([
+    ['minimax/MiniMax-M2.7', 0],
+    ['minimax/MiniMax-M2.5', 1],
+    ['openrouter/auto', 2],
+    ['openrouter/free', 3],
+    ['ollama/lfm2.5-thinking:latest', 4],
+  ]);
+
+  return [...models].sort((left, right) => {
+    const leftPriority = priority.get(left.key) ?? 100;
+    const rightPriority = priority.get(right.key) ?? 100;
+    if (leftPriority !== rightPriority) {
+      return leftPriority - rightPriority;
+    }
+
+    if (!!left.isFree !== !!right.isFree) {
+      return left.isFree ? -1 : 1;
+    }
+
+    return String(left.name ?? left.key).localeCompare(String(right.name ?? right.key));
+  });
 }
 
 async function ensureAgentProfile(userId: string, modelKey?: string | null, agentType?: AgentType | null) {
@@ -217,13 +249,9 @@ onboardingRouter.get('/options', requireAuth, async (_req, res) => {
   const taggedModels = (models as any[]).map((m: any) => ({
     ...m,
     isFree: FREE_MODEL_KEYS.has(m.key),
-  })).sort((a: any, b: any) => {
-    if (a.isFree && !b.isFree) return -1;
-    if (!a.isFree && b.isFree) return 1;
-    return 0;
-  });
+  }));
   res.json({
-    models: taggedModels,
+    models: sortTestingPreferredModels(taggedModels),
     oauthAvailable: models.some((model) => model.oauthAvailable),
     agentPresets: Object.values(QUICK_START_AGENTS).map((preset) => ({
       key: preset.key,
@@ -236,12 +264,13 @@ onboardingRouter.get('/options', requireAuth, async (_req, res) => {
 onboardingRouter.get('/status', requireAuth, async (req: AuthedRequest, res) => {
   await ensurePlatformSchema();
   await ensurePersonalAgent({ userId: req.user!.id, email: req.user!.email ?? `${req.user!.id}@local.invalid` });
-  const [profileResult, agentResult, credentialResult, studentAgentResult, googleStatus] = await Promise.all([
+  const [profileResult, agentResult, credentialResult, studentAgentResult, googleStatus, usageProfile] = await Promise.all([
     db.query(`select * from student_profiles where user_id = $1`, [req.user!.id]),
     db.query(`select * from agent_profiles where user_id = $1`, [req.user!.id]),
     db.query(`select * from agents where user_id = $1`, [req.user!.id]),
     db.query(`select provider_id, oauth_connected, api_key from user_model_credentials where user_id = $1`, [req.user!.id]),
     getGoogleConnectionStatus(req.user!.id),
+    getUserUsageSnapshot(req.user!.id),
   ]);
 
   const credential = credentialResult.rows[0]
@@ -258,6 +287,7 @@ onboardingRouter.get('/status', requireAuth, async (req: AuthedRequest, res) => 
     agent: agentResult.rows[0] ?? null,
     studentAgent: studentAgentResult.rows[0] ?? null,
     credentials: credential,
+    usageProfile,
     google: googleStatus,
     workspace: {
       agentId: buildUserAgentId(req.user!.id),
@@ -267,11 +297,37 @@ onboardingRouter.get('/status', requireAuth, async (req: AuthedRequest, res) => 
   });
 });
 
+onboardingRouter.post('/testing-tier', requireAuth, async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+  const tier = String(req.body?.tier ?? '').trim() as 'tier_1' | 'tier_2' | 'tier_3';
+  if (!['tier_1', 'tier_2', 'tier_3'].includes(tier)) {
+    return res.status(400).json({
+      error: 'bad_request',
+      message: 'tier must be one of tier_1, tier_2, or tier_3',
+    });
+  }
+
+  const usageProfile = await assignTestingTier({
+    userId: req.user!.id,
+    tier,
+  });
+
+  return res.json({
+    ok: true,
+    usageProfile,
+  });
+});
+
 onboardingRouter.post('/model-config', requireAuth, async (req: AuthedRequest, res) => {
   try {
     await ensurePlatformSchema();
 
-    const { modelKey, apiKey, agentPreset } = req.body as { modelKey?: string; apiKey?: string; agentPreset?: AgentType };
+    const { modelKey, apiKey, agentPreset, usageMode } = req.body as {
+      modelKey?: string;
+      apiKey?: string;
+      agentPreset?: AgentType;
+      usageMode?: 'managed' | 'byok';
+    };
     if (!modelKey) {
       return res.status(400).json({ error: 'bad_request', message: 'modelKey is required' });
     }
@@ -299,28 +355,68 @@ onboardingRouter.post('/model-config', requireAuth, async (req: AuthedRequest, r
       personaName: agent.persona_name,
       tone: agent.tone,
     });
-    const existingCredential = await db.query(`select api_key from user_model_credentials where user_id = $1`, [req.user!.id]);
+    const managedConfiguredMiniMax = model.provider === 'minimax' && isManagedMiniMaxModelKey(model.key) && usageMode !== 'byok';
+    const usageSnapshot = managedConfiguredMiniMax ? await getUserUsageSnapshot(req.user!.id) : null;
+    const existingCredential = managedConfiguredMiniMax
+      ? { rows: [] }
+      : await db.query(`select api_key from user_model_credentials where user_id = $1`, [req.user!.id]);
     const nextApiKey =
-      apiKey?.trim() ||
-      existingCredential.rows[0]?.api_key ||
-      LOCAL_PROVIDER_PLACEHOLDER_KEYS[model.provider] ||
-      null;
+      managedConfiguredMiniMax
+        ? null
+        : apiKey?.trim() ||
+          existingCredential.rows[0]?.api_key ||
+          LOCAL_PROVIDER_PLACEHOLDER_KEYS[model.provider] ||
+          null;
 
-    if (!nextApiKey) {
-      return res.status(400).json({ error: 'bad_request', message: 'apiKey is required for the first model setup' });
+    if (managedConfiguredMiniMax) {
+      await attachManagedMiniMaxUsage({
+        userId: req.user!.id,
+        modelKey: model.key,
+        tier: ['tier_1', 'tier_2', 'tier_3'].includes(String(usageSnapshot?.tier ?? ''))
+          ? (usageSnapshot?.tier as 'tier_1' | 'tier_2' | 'tier_3')
+          : undefined,
+      });
+      await db.query(
+        `insert into user_model_credentials (user_id, provider_id, api_key, oauth_connected, updated_at)
+         values ($1, $2, null, false, now())
+         on conflict (user_id) do update set
+           provider_id = excluded.provider_id,
+           api_key = excluded.api_key,
+           oauth_connected = excluded.oauth_connected,
+           updated_at = now()`,
+        [req.user!.id, model.provider]
+      );
+    } else {
+      if (!nextApiKey) {
+        return res.status(400).json({ error: 'bad_request', message: 'apiKey is required for the first model setup' });
+      }
+
+      if (model.provider === 'ollama') {
+        await attachLocalUsage({
+          userId: req.user!.id,
+          providerId: model.provider,
+          modelKey: model.key,
+        });
+      } else {
+        await attachByokUsage({
+          userId: req.user!.id,
+          providerId: model.provider,
+          modelKey: model.key,
+        });
+      }
+
+      await db.query(
+        `insert into user_model_credentials (user_id, provider_id, api_key, oauth_connected, updated_at)
+         values ($1, $2, $3, false, now())
+         on conflict (user_id) do update set
+           provider_id = excluded.provider_id,
+           api_key = excluded.api_key,
+           oauth_connected = excluded.oauth_connected,
+           updated_at = now()`,
+        [req.user!.id, model.provider, nextApiKey]
+      );
+      await bindUserAgentCredential({ userId: req.user!.id, provider: model.provider, apiKey: nextApiKey });
     }
-
-    await db.query(
-      `insert into user_model_credentials (user_id, provider_id, api_key, oauth_connected, updated_at)
-       values ($1, $2, $3, false, now())
-       on conflict (user_id) do update set
-         provider_id = excluded.provider_id,
-         api_key = excluded.api_key,
-         oauth_connected = excluded.oauth_connected,
-         updated_at = now()`,
-      [req.user!.id, model.provider, nextApiKey]
-    );
-    await bindUserAgentCredential({ userId: req.user!.id, provider: model.provider, apiKey: nextApiKey });
     await syncUserModelRuntimeConfig({
       userId: req.user!.id,
       email: req.user!.email ?? `${req.user!.id}@local.invalid`,
@@ -329,11 +425,13 @@ onboardingRouter.post('/model-config', requireAuth, async (req: AuthedRequest, r
 
     await db.query(`update agent_profiles set model_key = $2 where user_id = $1`, [req.user!.id, modelKey]);
     await db.query(`update student_profiles set onboarding_complete = true where user_id = $1`, [req.user!.id]);
+    const refreshedUsageProfile = await getUserUsageSnapshot(req.user!.id);
 
     res.json({
       ok: true,
       oauthAvailable: model.oauthAvailable,
       agentId: agent.openclaw_agent_id,
+      usageProfile: refreshedUsageProfile,
     });
   } catch (error) {
     console.error('Onboarding model-config failed:', error);

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { db } from './db';
+import { updateOpenClawSkillToggle } from './openclaw-control';
 import { decryptToken, encryptToken } from './token-crypto';
 
 export type GoogleAuthPurpose = 'signin' | 'connect';
@@ -15,8 +16,14 @@ const GOOGLE_SIGNIN_SCOPES = [
 const GOOGLE_CONNECT_SCOPES = [
   ...GOOGLE_SIGNIN_SCOPES,
   'https://www.googleapis.com/auth/calendar.readonly',
+  'https://www.googleapis.com/auth/calendar.events',
   'https://www.googleapis.com/auth/drive.readonly',
 ];
+
+const CALENDAR_READ_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
+const CALENDAR_WRITE_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+const DRIVE_READ_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+const TOKEN_REFRESH_BUFFER_MS = 60_000;
 
 type GoogleAuthState = {
   purpose: GoogleAuthPurpose;
@@ -33,6 +40,20 @@ type StoredGoogleToken = {
   scope: string;
   token_type: string;
   expires_at: string;
+};
+
+export type GoogleIntegrationState = 'not_connected' | 'connected' | 'reconnect_required';
+
+export type GoogleIntegrationStatus = {
+  status: GoogleIntegrationState;
+  connected: boolean;
+  needsReconnect: boolean;
+  googleEmail: string | null;
+  scopes: string[];
+  expiresAt: string | null;
+  canReadCalendar: boolean;
+  canWriteCalendar: boolean;
+  canReadDrive: boolean;
 };
 
 function getGoogleClient() {
@@ -83,6 +104,49 @@ export function decodeGoogleAuthState(rawState: string | undefined) {
 async function getStoredGoogleToken(userId: string) {
   const result = await db.query(`select * from user_google_tokens where user_id = $1`, [userId]);
   return (result.rows[0] as StoredGoogleToken | undefined) ?? null;
+}
+
+function parseStoredScopes(scope: string | null | undefined) {
+  return String(scope ?? '')
+    .split(/\s+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function hasScope(scopes: string[], scope: string) {
+  return scopes.includes(scope);
+}
+
+function tokenIsExpired(expiresAt: string | Date | null | undefined, bufferMs = TOKEN_REFRESH_BUFFER_MS) {
+  if (!expiresAt) {
+    return true;
+  }
+
+  return new Date(expiresAt).getTime() <= Date.now() + bufferMs;
+}
+
+function buildIntegrationStatus(input: {
+  status: GoogleIntegrationState;
+  googleEmail?: string | null;
+  scopes?: string[];
+  expiresAt?: string | null;
+}) {
+  const scopes = input.scopes ?? [];
+  const canReadCalendar = hasScope(scopes, CALENDAR_READ_SCOPE) || hasScope(scopes, CALENDAR_WRITE_SCOPE);
+  const canWriteCalendar = hasScope(scopes, CALENDAR_WRITE_SCOPE);
+  const canReadDrive = hasScope(scopes, DRIVE_READ_SCOPE);
+
+  return {
+    status: input.status,
+    connected: input.status === 'connected',
+    needsReconnect: input.status === 'reconnect_required',
+    googleEmail: input.googleEmail ?? null,
+    scopes,
+    expiresAt: input.expiresAt ?? null,
+    canReadCalendar,
+    canWriteCalendar,
+    canReadDrive,
+  } satisfies GoogleIntegrationStatus;
 }
 
 async function googleApiFetch<T>(userId: string, url: string, init?: RequestInit) {
@@ -168,58 +232,150 @@ export async function saveUserGoogleTokens(input: {
   );
 }
 
-export async function getGoogleConnectionStatus(userId: string) {
-  const stored = await getStoredGoogleToken(userId);
-  return {
-    connected: Boolean(stored),
-    googleEmail: stored?.google_email ?? null,
-    scopes: stored?.scope?.split(/\s+/).filter(Boolean) ?? [],
-  };
-}
-
-export async function getAccessToken(userId: string) {
+export async function refreshGoogleTokenIfNeeded(userId: string) {
   const stored = await getStoredGoogleToken(userId);
   if (!stored) {
     return null;
   }
 
+  const accessToken = decryptToken(stored.access_token);
+  if (accessToken && !tokenIsExpired(stored.expires_at)) {
+    return {
+      accessToken,
+      scopes: parseStoredScopes(stored.scope),
+      expiresAt: stored.expires_at,
+      refreshed: false,
+    };
+  }
+
+  const refreshToken = decryptToken(stored.refresh_token);
+  if (!refreshToken) {
+    return null;
+  }
+
   const client = getGoogleClient();
   client.setCredentials({
-    access_token: decryptToken(stored.access_token) ?? undefined,
-    refresh_token: decryptToken(stored.refresh_token) ?? undefined,
+    access_token: accessToken ?? undefined,
+    refresh_token: refreshToken,
     expiry_date: new Date(stored.expires_at).getTime(),
   });
 
-  // Check if token is expired
-  const now = Date.now();
-  const expiry = new Date(stored.expires_at).getTime();
-  
-  if (expiry <= now && stored.refresh_token) {
-    // Refresh the token
-    const refreshed = await client.refreshAccessToken();
-    const { access_token, refresh_token, expiry_date, token_type } = client.credentials;
-    
+  try {
+    await client.refreshAccessToken();
+    const { access_token, refresh_token, expiry_date, token_type, scope } = client.credentials;
+    if (!access_token) {
+      return null;
+    }
+
     await db.query(
       `update user_google_tokens
        set access_token = $2,
            refresh_token = coalesce($3, refresh_token),
            token_type = coalesce($4, token_type),
-           expires_at = $5,
+           scope = coalesce($5, scope),
+           expires_at = $6,
            updated_at = now()
        where user_id = $1`,
       [
         userId,
-        access_token ? encryptToken(access_token) : stored.access_token,
+        encryptToken(access_token),
         refresh_token ? encryptToken(refresh_token) : null,
         token_type ?? stored.token_type,
+        scope ?? stored.scope,
         expiry_date ? new Date(expiry_date) : new Date(stored.expires_at),
       ]
     );
-    
-    return access_token ?? stored.access_token;
+
+    return {
+      accessToken: access_token,
+      scopes: parseStoredScopes(scope ?? stored.scope),
+      expiresAt: expiry_date ? new Date(expiry_date).toISOString() : stored.expires_at,
+      refreshed: true,
+    };
+  } catch (error) {
+    console.warn('[google] token refresh failed', {
+      userId,
+      message: error instanceof Error ? error.message : 'Unknown refresh error',
+    });
+    return null;
+  }
+}
+
+export async function getGoogleIntegration(userId: string): Promise<GoogleIntegrationStatus> {
+  const stored = await getStoredGoogleToken(userId);
+  if (!stored) {
+    return buildIntegrationStatus({ status: 'not_connected' });
   }
 
-  return decryptToken(stored.access_token);
+  const refreshed = await refreshGoogleTokenIfNeeded(userId);
+  const scopes = refreshed?.scopes ?? parseStoredScopes(stored.scope);
+  const expiresAt = refreshed?.expiresAt ?? stored.expires_at;
+  const hasCalendarAccess = hasScope(scopes, CALENDAR_READ_SCOPE) || hasScope(scopes, CALENDAR_WRITE_SCOPE);
+  const hasSchedulingAccess = hasScope(scopes, CALENDAR_WRITE_SCOPE);
+  const isExpired = tokenIsExpired(expiresAt, 0);
+
+  if (!hasCalendarAccess || !hasSchedulingAccess || !refreshed && isExpired) {
+    return buildIntegrationStatus({
+      status: 'reconnect_required',
+      googleEmail: stored.google_email,
+      scopes,
+      expiresAt,
+    });
+  }
+
+  return buildIntegrationStatus({
+    status: 'connected',
+    googleEmail: stored.google_email,
+    scopes,
+    expiresAt,
+  });
+}
+
+export async function getGoogleConnectionStatus(userId: string) {
+  return getGoogleIntegration(userId);
+}
+
+export async function isGoogleConnected(userId: string) {
+  const status = await getGoogleIntegration(userId);
+  return status.connected;
+}
+
+export async function getAccessToken(userId: string) {
+  const refreshed = await refreshGoogleTokenIfNeeded(userId);
+  if (!refreshed?.accessToken) {
+    return null;
+  }
+
+  return refreshed.accessToken;
+}
+
+export async function disconnectGoogleIntegration(userId: string) {
+  await db.query(`delete from user_google_tokens where user_id = $1`, [userId]);
+  await syncGoogleSkillForUser(userId).catch(() => undefined);
+}
+
+export async function syncGoogleSkillForUser(userId: string) {
+  const status = await getGoogleIntegration(userId);
+
+  try {
+    await updateOpenClawSkillToggle({
+      userId,
+      skillName: 'gog',
+      enabled: status.connected,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    if (
+      /Personal agent .* not found/i.test(message) ||
+      /Unknown skill:\s*gog/i.test(message)
+    ) {
+      return status;
+    }
+
+    throw error;
+  }
+
+  return status;
 }
 
 export async function listUpcomingCalendarEvents(userId: string, maxResults = 5) {
@@ -244,6 +400,34 @@ export async function listUpcomingCalendarEvents(userId: string, maxResults = 5)
     endsAt: item.end?.dateTime ?? item.end?.date ?? null,
     htmlLink: item.htmlLink ?? null,
   }));
+}
+
+export async function getUpcomingCalendarItemsForStudent(userId: string, options?: {
+  maxResults?: number;
+}) {
+  const integration = await getGoogleIntegration(userId);
+  if (!integration.connected || !integration.canReadCalendar) {
+    return {
+      status: integration.status,
+      items: [],
+    };
+  }
+
+  try {
+    return {
+      status: integration.status,
+      items: await listUpcomingCalendarEvents(userId, Math.min(Math.max(Number(options?.maxResults ?? 5), 1), 12)),
+    };
+  } catch (error) {
+    console.warn('[google] calendar fetch failed', {
+      userId,
+      message: error instanceof Error ? error.message : 'Unknown calendar error',
+    });
+    return {
+      status: 'reconnect_required' as const,
+      items: [],
+    };
+  }
 }
 
 export async function listRecentDriveFiles(userId: string, pageSize = 5) {
@@ -288,4 +472,128 @@ export async function createGoogleDoc(userId: string, title: string, bodyText: s
   }
 
   return doc;
+}
+
+export async function createCalendarEvent(userId: string, input: {
+  title: string;
+  startsAt: string;
+  endsAt?: string | null;
+  description?: string | null;
+  timeZone?: string | null;
+}) {
+  const integration = await getGoogleIntegration(userId);
+  if (!integration.connected || !integration.canWriteCalendar) {
+    throw new Error('Google Calendar needs to be connected again before StudyClaw can schedule events.');
+  }
+
+  const startDate = new Date(input.startsAt);
+  if (Number.isNaN(startDate.getTime())) {
+    throw new Error('startsAt must be a valid ISO timestamp');
+  }
+
+  const endDate =
+    input.endsAt && !Number.isNaN(new Date(input.endsAt).getTime())
+      ? new Date(input.endsAt)
+      : new Date(startDate.getTime() + 60 * 60 * 1000);
+
+  return googleApiFetch<{
+    id: string;
+    summary?: string;
+    htmlLink?: string;
+    start?: { dateTime?: string };
+    end?: { dateTime?: string };
+  }>(userId, 'https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+    method: 'POST',
+    body: JSON.stringify({
+      summary: input.title,
+      description: input.description ?? '',
+      start: {
+        dateTime: startDate.toISOString(),
+        timeZone: input.timeZone ?? 'UTC',
+      },
+      end: {
+        dateTime: endDate.toISOString(),
+        timeZone: input.timeZone ?? 'UTC',
+      },
+    }),
+  });
+}
+
+function shouldSyncReminderType(type: string) {
+  return /assignment|exam|quiz|test|project|paper|essay|lab|study_session|meeting/i.test(type);
+}
+
+export async function upsertCalendarEventForReminder(input: {
+  userId: string;
+  title: string;
+  reminderAt: string | Date;
+  type: string;
+  metadata?: Record<string, unknown> | null;
+  timeZone?: string | null;
+}) {
+  if (!shouldSyncReminderType(input.type)) {
+    return null;
+  }
+
+  const integration = await getGoogleIntegration(input.userId);
+  if (!integration.connected || !integration.canWriteCalendar) {
+    return null;
+  }
+
+  const startAt = input.reminderAt instanceof Date ? input.reminderAt : new Date(input.reminderAt);
+  if (Number.isNaN(startAt.getTime())) {
+    return null;
+  }
+
+  const existingEventId =
+    typeof input.metadata?.googleCalendarEventId === 'string' && input.metadata.googleCalendarEventId.trim()
+      ? input.metadata.googleCalendarEventId.trim()
+      : null;
+  const eventPayload = {
+    summary: input.title,
+    description: `Synced by StudyClaw (${input.type.replace(/_/g, ' ')})`,
+    start: {
+      dateTime: startAt.toISOString(),
+      timeZone: input.timeZone ?? 'UTC',
+    },
+    end: {
+      dateTime: new Date(startAt.getTime() + 60 * 60 * 1000).toISOString(),
+      timeZone: input.timeZone ?? 'UTC',
+    },
+  };
+
+  try {
+    const event = await googleApiFetch<{
+      id: string;
+      htmlLink?: string;
+      summary?: string;
+      start?: { dateTime?: string };
+      end?: { dateTime?: string };
+    }>(
+      input.userId,
+      existingEventId
+        ? `https://www.googleapis.com/calendar/v3/calendars/primary/events/${existingEventId}`
+        : 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      {
+        method: existingEventId ? 'PATCH' : 'POST',
+        body: JSON.stringify(eventPayload),
+      }
+    );
+
+    return {
+      id: event.id,
+      htmlLink: event.htmlLink ?? null,
+      title: event.summary ?? input.title,
+      startsAt: event.start?.dateTime ?? startAt.toISOString(),
+      endsAt: event.end?.dateTime ?? null,
+    };
+  } catch (error) {
+    console.warn('[google] reminder calendar sync failed', {
+      userId: input.userId,
+      title: input.title,
+      type: input.type,
+      message: error instanceof Error ? error.message : 'Unknown reminder sync error',
+    });
+    return null;
+  }
 }

@@ -1,9 +1,11 @@
 import { Router } from 'express';
-import { hashPassword, issueAccessToken, verifyPassword } from '../../lib/auth';
+import { hashPassword, issueAccessToken, requireAuth, type AuthedRequest, verifyPassword } from '../../lib/auth';
 import { db } from '../../lib/db';
 import { ensureAdminAgent } from '../../lib/user-agent';
-import { buildGoogleAuthUrl, decodeGoogleAuthState, exchangeGoogleCode, saveUserGoogleTokens } from '../../lib/google-service';
+import { buildGoogleAuthUrl, decodeGoogleAuthState, exchangeGoogleCode, saveUserGoogleTokens, syncGoogleSkillForUser } from '../../lib/google-service';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
+import { getUserUsageSnapshot } from '../../lib/managed-usage';
+import { logAdminAuditEvent } from '../../lib/admin-ops';
 
 export const authRouter = Router();
 
@@ -22,6 +24,26 @@ function sanitizeFrontendPath(value: string | undefined, fallbackPath: string) {
 
   return value;
 }
+
+authRouter.get('/me', requireAuth, async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+  const [userResult, usageProfileResult, studentProfileResult] = await Promise.all([
+    db.query(`select id, email, full_name, role from users where id = $1 limit 1`, [req.user!.id]),
+    getUserUsageSnapshot(req.user!.id),
+    db.query(`select onboarding_complete from student_profiles where user_id = $1 limit 1`, [req.user!.id]),
+  ]);
+
+  const user = userResult.rows[0];
+  if (!user) {
+    return res.status(404).json({ error: 'not_found', message: 'User not found' });
+  }
+
+  return res.json({
+    user,
+    onboardingComplete: resolveOnboardingComplete(user, studentProfileResult.rows[0]?.onboarding_complete),
+    usageProfile: usageProfileResult,
+  });
+});
 
 authRouter.get('/google', (req, res) => {
   const url = buildGoogleAuthUrl({ purpose: 'signin' });
@@ -61,6 +83,7 @@ authRouter.get('/google/callback', async (req, res) => {
         tokenType: tokens.token_type ?? 'Bearer',
         expiresAt: new Date(tokens.expiry_date),
       });
+      await syncGoogleSkillForUser(state.userId).catch(() => undefined);
 
       const returnTo = sanitizeFrontendPath(state.returnTo, '/settings');
       const separator = returnTo.includes('?') ? '&' : '?';
@@ -133,10 +156,23 @@ authRouter.get('/google/callback', async (req, res) => {
 
     const accessToken = issueAccessToken(user);
     const onboardingComplete = resolveOnboardingComplete(user, user.onboarding_complete);
+    const usageProfile = await getUserUsageSnapshot(user.id);
+    if (user.role === 'admin') {
+      await logAdminAuditEvent({
+        actorUserId: user.id,
+        targetUserId: user.id,
+        eventType: isNewUser ? 'admin_account_created' : 'admin_login',
+        entityType: 'session',
+        entityId: user.id,
+        summary: isNewUser ? 'Admin account authenticated with Google for the first time.' : 'Admin signed in with Google.',
+        metadata: { authProvider: 'google' },
+      });
+    }
     const session = {
       user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role ?? 'student' },
       accessToken,
       onboardingComplete,
+      usageProfile,
     };
 
     const encodedSession = Buffer.from(JSON.stringify(session), 'utf8').toString('base64url');
@@ -173,11 +209,24 @@ authRouter.post('/signup', async (req, res) => {
       await db.query(`update users set password_hash = $2 where id = $1`, [user.id, hashPassword(password)]);
     }
 
+    const usageProfile = await getUserUsageSnapshot(user.id);
+    if ((user.role ?? 'student') === 'admin') {
+      await logAdminAuditEvent({
+        actorUserId: user.id,
+        targetUserId: user.id,
+        eventType: 'admin_login',
+        entityType: 'session',
+        entityId: user.id,
+        summary: 'Admin signed in through the email auth path.',
+        metadata: { authProvider: 'email' },
+      });
+    }
     return res.json({ 
       user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role ?? 'student' }, 
       accessToken: issueAccessToken(user), 
       existingUser: true,
-      onboardingComplete: resolveOnboardingComplete(user, user.onboarding_complete)
+      onboardingComplete: resolveOnboardingComplete(user, user.onboarding_complete),
+      usageProfile,
     });
   }
 
@@ -189,11 +238,13 @@ authRouter.post('/signup', async (req, res) => {
   );
 
   const user = created.rows[0];
+  const usageProfile = await getUserUsageSnapshot(user.id);
   res.status(201).json({ 
     user, 
     accessToken: issueAccessToken(user), 
     existingUser: false,
-    onboardingComplete: resolveOnboardingComplete(user, false)
+    onboardingComplete: resolveOnboardingComplete(user, false),
+    usageProfile,
   });
 });
 
@@ -220,9 +271,22 @@ authRouter.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'invalid_credentials', message: 'Invalid email or password' });
   }
 
+  const usageProfile = await getUserUsageSnapshot(user.id);
+  if ((user.role ?? 'student') === 'admin') {
+    await logAdminAuditEvent({
+      actorUserId: user.id,
+      targetUserId: user.id,
+      eventType: 'admin_login',
+      entityType: 'session',
+      entityId: user.id,
+      summary: 'Admin signed in with email credentials.',
+      metadata: { authProvider: 'email' },
+    });
+  }
   res.json({ 
     user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role ?? 'student' }, 
     accessToken: issueAccessToken(user),
-    onboardingComplete: resolveOnboardingComplete(user, user.onboarding_complete)
+    onboardingComplete: resolveOnboardingComplete(user, user.onboarding_complete),
+    usageProfile,
   });
 });

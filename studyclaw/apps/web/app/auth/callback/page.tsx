@@ -47,7 +47,7 @@ function AuthCallbackContent() {
         onboardingComplete: parsed.onboardingComplete,
       };
       writeStoredSession(nextSession);
-      router.replace(isOnboardingComplete(nextSession) ? '/dashboard' : '/onboarding');
+      router.replace(parsed.user.role === 'admin' ? '/admin' : isOnboardingComplete(nextSession) ? '/dashboard' : '/onboarding');
     } catch {
       router.replace('/login');
     }

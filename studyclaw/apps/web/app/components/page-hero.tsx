@@ -12,14 +12,14 @@ export default function PageHero({
   actions?: React.ReactNode;
 }) {
   return (
-    <section className="hero-card hero-card-featured">
-      <div className="hero-copy">
-        <p className="insight-chip">{badge}</p>
+    <section className="hero-card hero-card-featured page-hero">
+      <div className="hero-copy page-hero__copy">
+        <p className="insight-chip page-hero__badge">{badge}</p>
         <h1 className="hero-title">{title}</h1>
         <p className="hero-description">{description}</p>
-        {meta ? <div className="hero-meta">{meta}</div> : null}
+        {meta ? <div className="hero-meta page-hero__meta">{meta}</div> : null}
       </div>
-      {actions ? <div className="hero-actions">{actions}</div> : null}
+      {actions ? <div className="hero-actions page-hero__actions">{actions}</div> : null}
     </section>
   );
 }
