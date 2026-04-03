@@ -8,27 +8,22 @@ import { Button } from './ui/button';
 import { ACCOUNT_REFRESH_EVENT, apiFetch } from '../../lib/api';
 import { readStoredSession, writeStoredSession, clearStoredSession, isOnboardingComplete, type StoredSession } from '../../lib/session';
 import { cn } from '../../lib/utils';
-import { LayoutDashboard, Brain, MessageSquare, Calendar, Settings, LogOut, GraduationCap, Clock3, Globe } from 'lucide-react';
-
-const navLinks = [
-  { href: '/dashboard', label: 'Dashboard', shortLabel: 'Board', icon: LayoutDashboard },
-  { href: '/coach', label: 'Backpack', shortLabel: 'Pack', icon: Brain },
-  { href: '/chat', label: 'Chat', shortLabel: 'Chat', icon: MessageSquare },
-  { href: '/browser', label: 'Browser', shortLabel: 'Browser', icon: Globe },
-  { href: '/grades', label: 'Grades', shortLabel: 'Grades', icon: GraduationCap },
-  { href: '/schedule', label: 'Schedule', shortLabel: 'Schedule', icon: Clock3 },
-  { href: '/calendar', label: 'Calendar', shortLabel: 'Calendar', icon: Calendar },
-  { href: '/settings', label: 'Settings', shortLabel: 'Settings', icon: Settings },
-];
-
-function isActivePath(pathname: string, href: string) {
-  if (href === '/') return pathname === '/';
-  return pathname.startsWith(href);
-}
+import { LayoutDashboard, LogOut, Menu, Palette } from 'lucide-react';
+import { appNavLinks, isActivePath } from './app-nav';
+import { useDashboardLayout } from './dashboard-layout-context';
 
 export default function AppChrome({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const {
+    dashboardLayout,
+    toggleDashboardLayout,
+    sidebarCollapsed,
+    toggleSidebarCollapsed,
+    mobileSidebarOpen,
+    setMobileSidebarOpen,
+    closeMobileSidebar,
+  } = useDashboardLayout();
   const [session, setSession] = useState<StoredSession | null>(null);
   const [mounted, setMounted] = useState(false);
   const [accountLoading, setAccountLoading] = useState(false);
@@ -44,20 +39,23 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
     pathname === '/auth' || pathname === '/auth/callback' || pathname === '/login' || pathname === '/signup';
   const isOnboardingRoute = pathname === '/onboarding';
   const isAdminRoute = pathname.startsWith('/admin');
+  const isDashboardRoute = pathname === '/dashboard';
   const shouldLockToOnboarding = sessionResolved && !!session && !onboardingComplete;
   const shouldBlockPrivateRoute = sessionResolved && !session && !isPublicRoute && !isOnboardingRoute;
   const shouldHoldRender =
     !sessionResolved ||
     shouldBlockPrivateRoute ||
     (shouldLockToOnboarding && !isOnboardingRoute);
+  const showDashboardLayoutControls = mounted && !!session && onboardingComplete && !isAdminRoute && isDashboardRoute;
+  const useAlternateDashboardLayout = showDashboardLayoutControls && dashboardLayout === 'alternate';
   const primaryLinks = mounted
     ? session
       ? onboardingComplete
-        ? navLinks
+        ? appNavLinks
         : []
-      : [{ href: '/', label: 'Home', shortLabel: 'Home', icon: LayoutDashboard }, ...navLinks]
+      : [{ href: '/', label: 'Home', shortLabel: 'Home', icon: LayoutDashboard }, ...appNavLinks]
     : isPublicRoute
-      ? [{ href: '/', label: 'Home', shortLabel: 'Home', icon: LayoutDashboard }, ...navLinks]
+      ? [{ href: '/', label: 'Home', shortLabel: 'Home', icon: LayoutDashboard }, ...appNavLinks]
       : [];
   const brandHref = mounted ? (session ? (onboardingComplete ? '/dashboard' : '/onboarding') : '/') : isPublicRoute ? '/' : '/onboarding';
 
@@ -121,6 +119,10 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
     window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   }, [pathname]);
 
+  useEffect(() => {
+    closeMobileSidebar();
+  }, [closeMobileSidebar, pathname]);
+
   const handleLogout = () => {
     clearStoredSession();
     setSession(null);
@@ -136,6 +138,24 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
           windowRemaining: session.usageProfile.remainingInWindow ?? null,
         }
       : null;
+
+  const dashboardSidebarLabel = (() => {
+    if (!useAlternateDashboardLayout) {
+      return 'Open dashboard sidebar';
+    }
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 1023px)').matches) {
+      return mobileSidebarOpen ? 'Close dashboard sidebar' : 'Open dashboard sidebar';
+    }
+    return sidebarCollapsed ? 'Expand dashboard sidebar' : 'Collapse dashboard sidebar';
+  })();
+
+  const handleDashboardSidebarToggle = () => {
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 1023px)').matches) {
+      setMobileSidebarOpen(!mobileSidebarOpen);
+      return;
+    }
+    toggleSidebarCollapsed();
+  };
 
   useEffect(() => {
     if (!sessionResolved) {
@@ -222,7 +242,7 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
               </div>
             </Link>
 
-            {!isPublicRoute && primaryLinks.length ? (
+            {!isPublicRoute && primaryLinks.length && !useAlternateDashboardLayout ? (
               <nav className="hidden md:flex items-center gap-1">
                 {primaryLinks.map((link) => (
                   <Link
@@ -297,18 +317,54 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
                 <LogOut className="w-5 h-5" />
               </Button>
             )}
+
+            {showDashboardLayoutControls ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  'rounded-2xl transition-all duration-200',
+                  dashboardLayout === 'alternate' && 'bg-primary/10 text-primary hover:bg-primary/15'
+                )}
+                onClick={toggleDashboardLayout}
+                aria-label="Switch dashboard layout"
+                title="Switch dashboard layout"
+              >
+                <Palette className="w-5 h-5" />
+              </Button>
+            ) : null}
+
+            {showDashboardLayoutControls && dashboardLayout === 'alternate' ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="rounded-2xl transition-all duration-200 hover:bg-secondary"
+                onClick={handleDashboardSidebarToggle}
+                aria-label={dashboardSidebarLabel}
+                title={dashboardSidebarLabel}
+              >
+                <Menu className="w-5 h-5" />
+              </Button>
+            ) : null}
             
             <ThemeToggle />
           </div>
         </div>
       </header>
 
-      <main className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-32 pt-12">
+      <main
+        className={cn(
+          'relative z-10 mx-auto pb-32',
+          useAlternateDashboardLayout
+            ? 'max-w-none px-0 pt-8'
+            : 'max-w-7xl px-4 sm:px-6 lg:px-8 pt-12'
+        )}
+      >
         {children}
       </main>
 
       {/* Mobile Dock */}
-      <nav className={cn("fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-md md:hidden", (isPublicRoute || !primaryLinks.length) && "hidden")}>
+      <nav className={cn("fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-md md:hidden", (isPublicRoute || !primaryLinks.length || useAlternateDashboardLayout) && "hidden")}>
         <div className="flex items-center justify-around p-2 rounded-3xl border border-border/50 bg-background/80 backdrop-blur-2xl shadow-2xl shadow-foreground/10">
           {primaryLinks.map((link) => {
             const Icon = link.icon;
