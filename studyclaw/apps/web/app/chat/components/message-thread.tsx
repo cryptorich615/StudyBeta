@@ -84,7 +84,7 @@ export default function MessageThread({
             <span />
             <span />
           </span>
-          <span className="study-chat-typing__label">{agentName} is thinking through it…</span>
+          <span className="study-chat-typing__label">{agentName} is typing…</span>
         </div>
       ) : null}
 

@@ -8,12 +8,15 @@ import { Button } from './ui/button';
 import { ACCOUNT_REFRESH_EVENT, apiFetch } from '../../lib/api';
 import { readStoredSession, writeStoredSession, clearStoredSession, isOnboardingComplete, type StoredSession } from '../../lib/session';
 import { cn } from '../../lib/utils';
-import { LayoutDashboard, Brain, MessageSquare, Calendar, Settings, LogOut } from 'lucide-react';
+import { LayoutDashboard, Brain, MessageSquare, Calendar, Settings, LogOut, GraduationCap, Clock3, Globe } from 'lucide-react';
 
 const navLinks = [
   { href: '/dashboard', label: 'Dashboard', shortLabel: 'Board', icon: LayoutDashboard },
   { href: '/coach', label: 'Backpack', shortLabel: 'Pack', icon: Brain },
   { href: '/chat', label: 'Chat', shortLabel: 'Chat', icon: MessageSquare },
+  { href: '/browser', label: 'Browser', shortLabel: 'Browser', icon: Globe },
+  { href: '/grades', label: 'Grades', shortLabel: 'Grades', icon: GraduationCap },
+  { href: '/schedule', label: 'Schedule', shortLabel: 'Schedule', icon: Clock3 },
   { href: '/calendar', label: 'Calendar', shortLabel: 'Calendar', icon: Calendar },
   { href: '/settings', label: 'Settings', shortLabel: 'Settings', icon: Settings },
 ];
@@ -26,14 +29,19 @@ function isActivePath(pathname: string, href: string) {
 export default function AppChrome({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [session, setSession] = useState<StoredSession | null>(() => readStoredSession());
+  const [session, setSession] = useState<StoredSession | null>(null);
   const [mounted, setMounted] = useState(false);
   const [accountLoading, setAccountLoading] = useState(false);
   const sessionResolved = mounted;
   const onboardingComplete = isOnboardingComplete(session);
   const isPublicRoute =
-    pathname === '/' || pathname === '/auth' || pathname === '/login' || pathname === '/signup';
-  const isAuthRoute = pathname === '/auth' || pathname === '/login' || pathname === '/signup';
+    pathname === '/'
+    || pathname === '/auth'
+    || pathname === '/auth/callback'
+    || pathname === '/login'
+    || pathname === '/signup';
+  const isAuthRoute =
+    pathname === '/auth' || pathname === '/auth/callback' || pathname === '/login' || pathname === '/signup';
   const isOnboardingRoute = pathname === '/onboarding';
   const isAdminRoute = pathname.startsWith('/admin');
   const shouldLockToOnboarding = sessionResolved && !!session && !onboardingComplete;

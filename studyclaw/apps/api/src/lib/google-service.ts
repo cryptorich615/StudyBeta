@@ -29,6 +29,7 @@ type GoogleAuthState = {
   purpose: GoogleAuthPurpose;
   userId?: string;
   returnTo?: string;
+  frontendOrigin?: string;
 };
 
 type StoredGoogleToken = {

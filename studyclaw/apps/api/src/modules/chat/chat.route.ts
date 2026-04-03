@@ -24,6 +24,28 @@ import {
   upsertAssignmentFromReminder,
   writeMemorySummary,
 } from '../../lib/student-memory';
+import {
+  openLibraryGetBookDetails,
+  openLibraryGetSubjectBooks,
+  openLibrarySearchBooks,
+  type NormalizedBook,
+} from '../../lib/openlibrary';
+import {
+  calculateRequiredFinalExamScore,
+  createGradeItem,
+  parseEstimatedGradeIntent,
+  parseFinalTargetIntent,
+  parseGradeEntryIntent,
+  resolveCourseSummaryByName,
+} from '../../lib/grade-tracker';
+import {
+  buildScheduleContext,
+  findClassAfterLunch,
+  findScheduleEntryAtTime,
+  findScheduleEntryByQuery,
+  findScheduleEntryForPeriod,
+  parseScheduleIntent,
+} from '../../lib/class-scheduler';
 
 export const chatRouter = Router();
 chatRouter.use(requireAuth);
@@ -65,6 +87,16 @@ type ResearchResultCard = {
 type AssistantCapabilityBadge = {
   key: string;
   label: string;
+};
+
+type FallbackResearchResult = {
+  assistantText: string;
+  card: ResearchResultCard;
+};
+
+type FallbackLibraryResult = {
+  assistantText: string;
+  books: NormalizedBook[];
 };
 
 const TIMEZONE_ABBREVIATION_TO_OFFSET_MINUTES: Record<string, number> = {
@@ -213,6 +245,130 @@ function summarizeResearchText(text: string) {
   return firstParagraph.slice(0, 320).trim();
 }
 
+function buildFallbackLibraryQuery(rawQuery: string) {
+  return rawQuery
+    .replace(/^use the open library tools first[^:]*:\s*/i, '')
+    .replace(/^find (me )?(a |an )?/i, '')
+    .replace(/^find textbook[:,\s-]*/i, '')
+    .replace(/^library[:,\s-]*/i, '')
+    .trim();
+}
+
+function looksLikeLibraryRequest(message: string, studyMode?: string | null) {
+  if (studyMode === 'library') {
+    return true;
+  }
+
+  const normalized = message.toLowerCase();
+  return /\b(textbook|text book|book|edition|isbn|reading list|library|novel|author)\b/.test(normalized);
+}
+
+function inferLibrarySubject(query: string) {
+  const normalized = query.toLowerCase();
+  const match = normalized.match(
+    /\b(algebra|geometry|calculus|biology|chemistry|physics|history|literature|english|economics|psychology|statistics|government|civics)\b/
+  );
+  return match?.[1] ?? null;
+}
+
+function describeBookForStudent(book: NormalizedBook, index: number) {
+  const why = book.reason ?? book.description ?? 'Useful for study support and topic review.';
+  const authors = book.authors.length ? ` by ${book.authors.slice(0, 2).join(', ')}` : '';
+  const year = book.firstPublishYear ?? book.publishYear;
+  const coverLine = book.cover?.preferredUrl ? `  Cover: ${book.cover.preferredUrl}` : null;
+  return [
+    `${index === 0 ? 'Best match' : `Alternative ${index}`}: ${book.title}${authors}${year ? ` (${year})` : ''}`,
+    `  Why it helps: ${why}`,
+    `  Open Library: ${book.openLibraryUrl ?? 'Unavailable'}`,
+    coverLine,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+async function performFallbackLibraryLookup(rawQuery: string): Promise<FallbackLibraryResult | null> {
+  const query = buildFallbackLibraryQuery(rawQuery);
+  if (!query) {
+    return null;
+  }
+
+  const subject = inferLibrarySubject(query);
+  const prefersSubjectShelf =
+    Boolean(subject) && /\b(textbook|text book|book|beginner|easier|alternative|study guide)\b/i.test(query);
+
+  let books: NormalizedBook[] = [];
+  if (prefersSubjectShelf && subject) {
+    const subjectResult = await openLibraryGetSubjectBooks({
+      subject,
+      limit: 8,
+      details: true,
+    });
+    books = subjectResult.results;
+  }
+
+  if (!books.length) {
+    const searchResult = await openLibrarySearchBooks({
+      q: subject && prefersSubjectShelf ? subject : query,
+      subject,
+      limit: 5,
+    });
+    books = searchResult.results;
+  }
+
+  if (!books.length) {
+    return {
+      assistantText: [
+        `I could not find a strong Open Library textbook match for "${query}".`,
+        '',
+        'Next action:',
+        '- Try a more specific title, author, subject, or ISBN.',
+        '- Ask for an easier alternative, edition comparison, or a reading list by subject.',
+      ].join('\n'),
+      books: [],
+    };
+  }
+
+  const detailedBooks = await Promise.all(
+    books.slice(0, 5).map(async (book) => {
+      if (!book.openLibraryWorkKey && !book.openLibraryEditionKey && !book.isbn[0]) {
+        return book;
+      }
+
+      try {
+        const details = await openLibraryGetBookDetails({
+          workKey: book.openLibraryWorkKey,
+          editionKey: book.openLibraryEditionKey,
+          isbn: book.isbn[0] ?? null,
+        });
+        return details.book ?? book;
+      } catch {
+        return book;
+      }
+    })
+  );
+
+  const bestMatch = detailedBooks[0];
+  const alternatives = detailedBooks.slice(1, 5);
+  const assistantText = [
+    `Here are Open Library textbook matches for "${query}".`,
+    '',
+    describeBookForStudent(bestMatch, 0),
+    ...(alternatives.length
+      ? ['', ...alternatives.map((book, index) => describeBookForStudent(book, index + 1))]
+      : []),
+    '',
+    'Suggested next action:',
+    '- Ask me to build a study guide from one of these books.',
+    '- Ask me to compare editions.',
+    '- Ask me to find an easier alternative or a more advanced option.',
+  ].join('\n');
+
+  return {
+    assistantText,
+    books: detailedBooks,
+  };
+}
+
 function buildResearchTitle(text: string, sources: ResearchSource[]) {
   const firstSentence =
     text
@@ -296,6 +452,221 @@ function buildResearchResultCard(assistantText: string, raw: unknown): ResearchR
   };
 }
 
+function buildFallbackResearchQuery(input: string) {
+  return input
+    .replace(/^use the browser tool to research this carefully, verify the answer from the web, include direct source links, mention the sources you checked, and summarize what matters for a student:\s*/i, '')
+    .replace(/^research this on the web[:,\s-]*/i, '')
+    .replace(/^research\s+/i, '')
+    .trim();
+}
+
+function stripHtml(value: string) {
+  return value
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function decodeHtml(value: string) {
+  return value
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
+}
+
+function extractMetaDescription(html: string) {
+  const metaMatch =
+    html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i) ||
+    html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']description["']/i) ||
+    html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
+
+  return metaMatch?.[1] ? decodeHtml(metaMatch[1]).trim() : '';
+}
+
+function extractPageTitle(html: string) {
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return titleMatch?.[1] ? decodeHtml(stripHtml(titleMatch[1])).trim() : '';
+}
+
+async function fetchText(url: string) {
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'StudyClawResearchBot/1.0',
+      Accept: 'text/html,application/xhtml+xml',
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Research fetch failed with status ${response.status}`);
+  }
+
+  return response.text();
+}
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'StudyClawResearchBot/1.0',
+      Accept: 'application/json',
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Research fetch failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+function parseDuckDuckGoResults(html: string) {
+  const matches = Array.from(
+    html.matchAll(/<a[^>]+class=["'][^"']*result__a[^"']*["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)
+  );
+
+  return matches
+    .map((match) => {
+      const href = match[1] ? decodeHtml(match[1]) : '';
+      const label = match[2] ? stripHtml(match[2]) : '';
+      if (!href || !/^https?:\/\//i.test(href) || !label) {
+        return null;
+      }
+
+      try {
+        const hostname = new URL(href).hostname.replace(/^www\./, '');
+        return {
+          label,
+          url: href,
+          hostname,
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter((item): item is ResearchSource => Boolean(item))
+    .slice(0, 5);
+}
+
+async function performFallbackWebResearch(rawQuery: string): Promise<FallbackResearchResult | null> {
+  const query = buildFallbackResearchQuery(rawQuery);
+  if (!query) {
+    return null;
+  }
+
+  const apiResult = await fetchJson<any>(
+    `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1`
+  );
+  const sources = Array.from(
+    new Map(
+      [
+        apiResult?.AbstractURL
+          ? {
+              label: apiResult?.Heading || buildSourceLabel(String(apiResult.AbstractURL)),
+              url: String(apiResult.AbstractURL),
+            }
+          : null,
+        ...(Array.isArray(apiResult?.Results)
+          ? apiResult.Results.map((result: any) => ({
+              label: stripHtml(String(result?.Text ?? result?.Result ?? '')),
+              url: String(result?.FirstURL ?? ''),
+            }))
+          : []),
+        ...(Array.isArray(apiResult?.RelatedTopics)
+          ? apiResult.RelatedTopics.flatMap((topic: any) =>
+              Array.isArray(topic?.Topics) ? topic.Topics : [topic]
+            ).map((topic: any) => ({
+              label: stripHtml(String(topic?.Text ?? topic?.Result ?? '')),
+              url: String(topic?.FirstURL ?? ''),
+            }))
+          : []),
+      ]
+        .filter((item): item is { label: string; url: string } => Boolean(item?.url))
+        .filter((item) => /^https?:\/\//i.test(item.url))
+        .map((item) => {
+          try {
+            const hostname = new URL(item.url).hostname.replace(/^www\./, '');
+            return [item.url, { label: item.label || buildSourceLabel(item.url), url: item.url, hostname }] as const;
+          } catch {
+            return null;
+          }
+        })
+        .filter((item): item is readonly [string, ResearchSource] => Boolean(item))
+    ).values()
+  ).slice(0, 5);
+
+  if (!sources.length) {
+    const searchHtml = await fetchText(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`);
+    const htmlSources = parseDuckDuckGoResults(searchHtml);
+    if (!htmlSources.length) {
+      return null;
+    }
+    sources.push(...htmlSources.slice(0, 5 - sources.length));
+  }
+
+  const checkedSources = await Promise.all(
+    sources.slice(0, 3).map(async (source) => {
+      try {
+        const pageHtml = await fetchText(source.url);
+        return {
+          ...source,
+          pageTitle: extractPageTitle(pageHtml),
+          summary: extractMetaDescription(pageHtml),
+        };
+      } catch {
+        return {
+          ...source,
+          pageTitle: '',
+          summary: '',
+        };
+      }
+    })
+  );
+
+  const summaryLines = checkedSources.map((source) => {
+    const detail = source.summary || source.pageTitle || `Opened ${source.hostname} for source verification.`;
+    return `- ${source.label}: ${detail}`;
+  });
+
+  const assistantText = [
+    `Here is a web research summary for "${query}."`,
+    '',
+    ...summaryLines,
+    '',
+    'Sources checked:',
+    ...checkedSources.map((source) => `- ${source.label}: ${source.url}`),
+  ].join('\n');
+
+  const card: ResearchResultCard = {
+    kind: 'research_result',
+    title: query.length > 88 ? `${query.slice(0, 88).trim()}…` : query,
+    summary: checkedSources
+      .map((source) => source.summary || source.pageTitle)
+      .filter(Boolean)
+      .join(' ')
+      .slice(0, 320) || `Checked ${checkedSources.length} web source${checkedSources.length === 1 ? '' : 's'} for ${query}.`,
+    sources: checkedSources.map(({ label, url, hostname }) => ({ label, url, hostname })),
+    pageTitle: checkedSources[0]?.pageTitle || null,
+    checkedAt: new Date().toISOString(),
+    screenshots: [],
+    screenshotUrl: null,
+    screenshotAlt: 'Research fallback result',
+  };
+
+  return {
+    assistantText,
+    card,
+  };
+}
+
 function buildAssistantCapabilityBadges(input: {
   isResearchRequest?: boolean;
   hasAttachments?: boolean;
@@ -344,6 +715,19 @@ function looksLikeReminderStatusQuestion(message: string) {
       normalized
     ) || /\b(status|show|check|find)\b/.test(normalized)
   );
+}
+
+function normalizeChatFailureMessage(messageText: string) {
+  const normalized = messageText.trim();
+  if (/OpenClaw error 500:/i.test(normalized) || /internal error/i.test(normalized)) {
+    return 'StudyClaw could not get a response from OpenClaw just now. Please try again.';
+  }
+
+  if (/timed out/i.test(normalized)) {
+    return 'StudyClaw timed out waiting for OpenClaw. Please try again.';
+  }
+
+  return normalized || 'StudyClaw could not send this chat message right now.';
 }
 
 function looksLikeReminderIntent(message: string) {
@@ -803,7 +1187,7 @@ async function tryHandleReminderStatusQuestion(input: {
   const friendlyTime = formatReminderTime(latest.reminder_at, input.timezone);
   let assistantText = `I found your latest reminder, "${latest.title}", scheduled for ${friendlyTime}.`;
 
-  if (latest.status === 'scheduled') {
+  if (latest.status === 'scheduled' || latest.status === 'pending') {
     assistantText +=
       ' It looks like it was saved, but automatic reminder delivery is not firing yet in this workspace, so you would not have received a push or timed notification.';
   } else {
@@ -1125,6 +1509,7 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
   const trimmedMessage = message?.trim() ?? '';
   const isResearchRequest =
     studyMode === 'research' || /use the browser tool to research|research this on the web/i.test(trimmedMessage);
+  const isLibraryRequest = looksLikeLibraryRequest(trimmedMessage, studyMode);
 
   if (!trimmedMessage && !normalizedAttachments.length) {
     return res.status(400).json({ error: 'bad_request', message: 'message or document text is required' });
@@ -1246,7 +1631,7 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
 
   try {
     const context = isAdmin
-      ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] } }
+      ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] }, grades: { line: 'Grade tracker: unavailable for admin mode.', conceptLine: 'Wrong-answer patterns: unavailable for admin mode.' }, schedule: { line: 'Schedule: unavailable for admin mode.', todayLine: 'Today\'s classes: unavailable for admin mode.', detailLine: 'Relevant class detail: unavailable for admin mode.', context: null, referencedEntry: null } }
       : await buildStudyContext(req.user!.id, { query: effectiveMessage });
     const reminderStatusReply = trimmedMessage
       ? await tryHandleReminderStatusQuestion({
@@ -1269,6 +1654,244 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
             capabilityBadges: buildAssistantCapabilityBadges({
               reminderLookup: true,
             }),
+          }),
+        ]
+      );
+      await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+      return res.json({
+        threadId: activeThreadId,
+        openclawSessionId,
+        assistantMessage: assistantText,
+      });
+    }
+
+    const directGradeEntry = trimmedMessage ? parseGradeEntryIntent(trimmedMessage) : null;
+    if (directGradeEntry) {
+      try {
+        const gradeResult = await createGradeItem(req.user!.id, directGradeEntry);
+        const assistantText = normalizeAssistantIdentity(
+          `I saved ${gradeResult.course.name}: ${gradeResult.item.title} at ${gradeResult.summary.estimatedPercent?.toFixed(1) ?? 'N/A'}% overall (${gradeResult.summary.letterGrade ?? 'N/A'} estimate).`,
+          agent.persona_name
+        );
+
+        await db.query(
+          `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+          [
+            activeThreadId,
+            assistantText,
+            JSON.stringify({
+              gradeTracked: true,
+              courseId: gradeResult.course.id,
+              estimatedPercent: gradeResult.summary.estimatedPercent,
+              letterGrade: gradeResult.summary.letterGrade,
+              capabilityBadges: buildAssistantCapabilityBadges({}),
+            }),
+          ]
+        );
+        await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+        return res.json({
+          threadId: activeThreadId,
+          openclawSessionId,
+          assistantMessage: assistantText,
+          artifacts: [
+            {
+              type: 'grade_summary',
+              course: gradeResult.course.name,
+              estimatedPercent: gradeResult.summary.estimatedPercent,
+              letterGrade: gradeResult.summary.letterGrade,
+            },
+          ],
+        });
+      } catch (gradeError) {
+        return res.status(400).json({
+          error: 'grade_track_failed',
+          message: gradeError instanceof Error ? gradeError.message : 'Failed to save that grade.',
+        });
+      }
+    }
+
+    const scheduleIntent = trimmedMessage ? parseScheduleIntent(trimmedMessage) : null;
+    if (scheduleIntent) {
+      const scheduleData = await buildScheduleContext(req.user!.id, {
+        query: trimmedMessage,
+        timezone: context.profile?.timezone ?? null,
+      });
+      const activeContext = scheduleData.context;
+      let assistantText = scheduleData.line.replace(/^Schedule:\s*/, '');
+
+      if (scheduleIntent.type === 'current') {
+        if (activeContext.status === 'in_class' && activeContext.currentClass) {
+          const current = activeContext.currentClass;
+          assistantText = `You are in ${current.className} right now${current.teacherName ? ` with ${current.teacherName}` : ''}${current.roomNumber ? ` in room ${current.roomNumber}` : ''}.`;
+        } else {
+          assistantText = activeContext.message;
+        }
+      }
+
+      if (scheduleIntent.type === 'current_teacher') {
+        if (activeContext.status === 'in_class' && activeContext.currentClass) {
+          assistantText = activeContext.currentClass.teacherName
+            ? `Right now you have ${activeContext.currentClass.className} with ${activeContext.currentClass.teacherName}.`
+            : `You are in ${activeContext.currentClass.className} right now, but there is no teacher saved for that class yet.`;
+        } else if (activeContext.nextClass) {
+          assistantText = activeContext.nextClass.teacherName
+            ? `You are between classes. Next up is ${activeContext.nextClass.className} with ${activeContext.nextClass.teacherName}.`
+            : `You are between classes. Next up is ${activeContext.nextClass.className}, but there is no teacher saved for it yet.`;
+        } else {
+          assistantText = activeContext.message;
+        }
+      }
+
+      if (scheduleIntent.type === 'next') {
+        if (activeContext.nextClass) {
+          const next = activeContext.nextClass;
+          assistantText = `${next.className} is next${next.startTime ? ` at ${next.startTime}` : ''}${next.roomNumber ? ` in room ${next.roomNumber}` : ''}${next.teacherName ? ` with ${next.teacherName}` : ''}.`;
+        } else {
+          assistantText = activeContext.message;
+        }
+      }
+
+      if (scheduleIntent.type === 'today') {
+        assistantText = scheduleData.todayLine.replace(/^Today's classes:\s*/, '');
+      }
+
+      if (scheduleIntent.type === 'teacher' && scheduleIntent.query) {
+        const match = findScheduleEntryByQuery(scheduleData.context.todaySchedule, scheduleIntent.query)
+          ?? findScheduleEntryByQuery((scheduleData.context.todaySchedule.length ? scheduleData.context.todaySchedule : []), scheduleIntent.query)
+          ?? scheduleData.referencedEntry;
+        assistantText = match
+          ? `${match.className}${match.teacherName ? ` is taught by ${match.teacherName}` : ' does not have a saved teacher yet.'}`
+          : `I could not find a saved class matching ${scheduleIntent.query}.`;
+      }
+
+      if (scheduleIntent.type === 'room' && scheduleIntent.query) {
+        const match = findScheduleEntryByQuery(scheduleData.context.todaySchedule, scheduleIntent.query) ?? scheduleData.referencedEntry;
+        assistantText = match
+          ? `${match.className}${match.roomNumber ? ` is in room ${match.roomNumber}` : ' does not have a saved room yet.'}`
+          : `I could not find a saved class matching ${scheduleIntent.query}.`;
+      }
+
+      if (scheduleIntent.type === 'notes' && scheduleIntent.query) {
+        const match = findScheduleEntryByQuery(scheduleData.context.todaySchedule, scheduleIntent.query) ?? scheduleData.referencedEntry;
+        assistantText = match
+          ? `${match.className}${match.notes ? ` notes: ${match.notes}` : ' does not have any saved schedule notes yet.'}`
+          : `I could not find a saved class matching ${scheduleIntent.query}.`;
+      }
+
+      if (scheduleIntent.type === 'period' && scheduleIntent.query) {
+        const match = findScheduleEntryForPeriod(scheduleData.context.todaySchedule, scheduleIntent.query);
+        assistantText = match
+          ? `During period ${scheduleIntent.query}, you have ${match.className}${match.teacherName ? ` with ${match.teacherName}` : ''}${match.roomNumber ? ` in room ${match.roomNumber}` : ''}.`
+          : `I could not find a class for period ${scheduleIntent.query} today.`;
+      }
+
+      if (scheduleIntent.type === 'time' && scheduleIntent.query) {
+        const match = findScheduleEntryAtTime(scheduleData.context.todaySchedule, scheduleIntent.query);
+        assistantText = match
+          ? `At ${scheduleIntent.query}, you have ${match.className}${match.teacherName ? ` with ${match.teacherName}` : ''}${match.roomNumber ? ` in room ${match.roomNumber}` : ''}.`
+          : `I could not find a class block covering ${scheduleIntent.query} today.`;
+      }
+
+      if (scheduleIntent.type === 'after_lunch') {
+        const match = findClassAfterLunch(scheduleData.context.todaySchedule);
+        assistantText = match
+          ? `After lunch, you have ${match.className}${match.teacherName ? ` with ${match.teacherName}` : ''}${match.roomNumber ? ` in room ${match.roomNumber}` : ''}.`
+          : 'I could not find a saved lunch block followed by another class today.';
+      }
+
+      assistantText = normalizeAssistantIdentity(assistantText, agent.persona_name);
+      await db.query(
+        `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+        [
+          activeThreadId,
+          assistantText,
+          JSON.stringify({
+            scheduleLookup: true,
+            status: activeContext.status,
+            capabilityBadges: buildAssistantCapabilityBadges({}),
+          }),
+        ]
+      );
+      await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+      return res.json({
+        threadId: activeThreadId,
+        openclawSessionId,
+        assistantMessage: assistantText,
+      });
+    }
+
+    const estimatedGradeCourse = trimmedMessage ? parseEstimatedGradeIntent(trimmedMessage) : null;
+    if (estimatedGradeCourse) {
+      const summary = await resolveCourseSummaryByName(req.user!.id, estimatedGradeCourse);
+      if (!summary) {
+        return res.status(404).json({
+          error: 'grade_not_found',
+          message: `I could not find a tracked course named ${estimatedGradeCourse}.`,
+        });
+      }
+
+      const assistantText = normalizeAssistantIdentity(
+        `${summary.courseName} is currently estimated at ${summary.estimatedPercent?.toFixed(1) ?? 'N/A'}% (${summary.letterGrade ?? 'N/A'}). ${summary.warnings[0] ?? 'This is an estimate based on the grades you have entered so far.'}`,
+        agent.persona_name
+      );
+      await db.query(
+        `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+        [
+          activeThreadId,
+          assistantText,
+          JSON.stringify({
+            gradeSummaryLookup: true,
+            courseId: summary.courseId,
+            capabilityBadges: buildAssistantCapabilityBadges({}),
+          }),
+        ]
+      );
+      await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+      return res.json({
+        threadId: activeThreadId,
+        openclawSessionId,
+        assistantMessage: assistantText,
+      });
+    }
+
+    const finalTargetIntent = trimmedMessage ? parseFinalTargetIntent(trimmedMessage) : null;
+    if (finalTargetIntent?.courseName) {
+      const summary = await resolveCourseSummaryByName(req.user!.id, finalTargetIntent.courseName);
+      if (!summary) {
+        return res.status(404).json({
+          error: 'grade_not_found',
+          message: `I could not find a tracked course named ${finalTargetIntent.courseName}.`,
+        });
+      }
+
+      const usedCategoryWeight = summary.categoryBreakdown.reduce((sum, item) => sum + (item.weight ?? 0), 0);
+      const finalTarget = calculateRequiredFinalExamScore({
+        currentPercent: summary.estimatedPercent,
+        targetPercent: finalTargetIntent.targetPercent,
+        finalWeightPercent: summary.finalExamWeight,
+        remainingWeightPercent: summary.finalExamWeight === null && summary.weighted ? Math.max(0, 100 - usedCategoryWeight) : null,
+      });
+
+      const assistantText = normalizeAssistantIdentity(
+        finalTarget.requiredOnFinal === null
+          ? `I can estimate your final target for ${summary.courseName} once you add either the final exam weight or more grade structure. ${finalTarget.assumptions.join(' ')}`
+          : `For ${summary.courseName}, you would need about ${finalTarget.requiredOnFinal.toFixed(1)}% on the final to reach ${finalTargetIntent.targetLabel}. ${finalTarget.assumptions.join(' ') || 'This is based on your current tracked grades.'}`,
+        agent.persona_name
+      );
+
+      await db.query(
+        `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+        [
+          activeThreadId,
+          assistantText,
+          JSON.stringify({
+            finalTarget: true,
+            courseId: summary.courseId,
+            capabilityBadges: buildAssistantCapabilityBadges({}),
           }),
         ]
       );
@@ -1446,6 +2069,47 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
       });
     }
 
+    if (studyMode === 'library' && isLibraryRequest) {
+      try {
+        const directLibrary = await performFallbackLibraryLookup(trimmedMessage);
+        if (directLibrary) {
+          const assistantText = normalizeAssistantIdentity(directLibrary.assistantText, agent.persona_name);
+
+          await db.query(
+            `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+            [
+              activeThreadId,
+              assistantText,
+              JSON.stringify({
+                capabilityBadges: buildAssistantCapabilityBadges({}),
+                libraryFallbackUsed: true,
+                openLibraryResultCount: directLibrary.books.length,
+                studyMode: 'library',
+              }),
+            ]
+          );
+          await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+          return res.json({
+            threadId: activeThreadId,
+            openclawSessionId,
+            assistantMessage: assistantText,
+            artifacts: [
+              {
+                type: 'library_result',
+                resultCount: directLibrary.books.length,
+              },
+            ],
+          });
+        }
+      } catch (libraryError) {
+        console.error('[chat] direct library lookup failed', {
+          userId: req.user!.id,
+          message: libraryError instanceof Error ? libraryError.message : 'Unknown direct library error',
+        });
+      }
+    }
+
     await ensureManagedUsageReservation('chat', {
       attachmentCount: normalizedAttachments.length,
     });
@@ -1463,6 +2127,7 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
         threadId: activeThreadId,
       },
       userId: req.user!.id,
+      timeoutMs: isLibraryRequest ? 25_000 : undefined,
     });
     const assistantText = normalizeAssistantIdentity(reply.text, agent.persona_name);
     const researchResult = isResearchRequest ? buildResearchResultCard(assistantText, reply.raw) : null;
@@ -1567,6 +2232,7 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
     });
   } catch (error) {
     const messageText = error instanceof Error ? error.message : 'Unknown OpenClaw error';
+    const normalizedMessage = normalizeChatFailureMessage(messageText);
     await completeManagedUsage(false, {
       error: messageText,
     });
@@ -1589,6 +2255,115 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
         detail: error.detail,
       });
     }
-    return res.status(502).json({ error: 'openclaw_error', message: messageText });
+    if (isResearchRequest) {
+      try {
+        const fallbackResearch = await performFallbackWebResearch(trimmedMessage);
+        if (fallbackResearch) {
+          const assistantText = normalizeAssistantIdentity(fallbackResearch.assistantText, agent.persona_name);
+          const researchResult = fallbackResearch.card;
+
+          await db.query(
+            `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+            [
+              activeThreadId,
+              assistantText,
+              JSON.stringify({
+                capabilityBadges: buildAssistantCapabilityBadges({
+                  isResearchRequest: true,
+                  researchResult,
+                }),
+                researchResult,
+                researchFallbackUsed: true,
+              }),
+            ]
+          );
+          await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+          return res.json({
+            threadId: activeThreadId,
+            openclawSessionId,
+            assistantMessage: assistantText,
+            artifacts: [
+              {
+                type: 'research_result',
+                title: researchResult.title,
+                sourceCount: researchResult.sources.length,
+                hasScreenshot: false,
+              },
+            ],
+          });
+        }
+      } catch (fallbackError) {
+        console.error('[chat] fallback web research failed', {
+          userId: req.user!.id,
+          message: fallbackError instanceof Error ? fallbackError.message : 'Unknown fallback research error',
+        });
+      }
+
+      const assistantText = normalizeAssistantIdentity(
+        'I could not use browser research just now because the research service is temporarily unavailable. Please try again in a moment.',
+        agent.persona_name
+      );
+
+      await db.query(
+        `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+        [
+          activeThreadId,
+          assistantText,
+          JSON.stringify({
+            capabilityBadges: buildAssistantCapabilityBadges({}),
+            researchUnavailable: true,
+          }),
+        ]
+      );
+      await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+      return res.json({
+        threadId: activeThreadId,
+        openclawSessionId,
+        assistantMessage: assistantText,
+        artifacts: [],
+      });
+    }
+    if (isLibraryRequest) {
+      try {
+        const fallbackLibrary = await performFallbackLibraryLookup(trimmedMessage);
+        if (fallbackLibrary) {
+          const assistantText = normalizeAssistantIdentity(fallbackLibrary.assistantText, agent.persona_name);
+
+          await db.query(
+            `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+            [
+              activeThreadId,
+              assistantText,
+              JSON.stringify({
+                capabilityBadges: buildAssistantCapabilityBadges({}),
+                libraryFallbackUsed: true,
+                openLibraryResultCount: fallbackLibrary.books.length,
+              }),
+            ]
+          );
+          await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+          return res.json({
+            threadId: activeThreadId,
+            openclawSessionId,
+            assistantMessage: assistantText,
+            artifacts: [
+              {
+                type: 'library_result',
+                resultCount: fallbackLibrary.books.length,
+              },
+            ],
+          });
+        }
+      } catch (fallbackError) {
+        console.error('[chat] fallback library lookup failed', {
+          userId: req.user!.id,
+          message: fallbackError instanceof Error ? fallbackError.message : 'Unknown fallback library error',
+        });
+      }
+    }
+    return res.status(502).json({ error: 'openclaw_error', message: normalizedMessage });
   }
 });

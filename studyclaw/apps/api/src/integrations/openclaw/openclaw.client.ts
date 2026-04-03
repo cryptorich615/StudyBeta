@@ -8,6 +8,7 @@ export type OpenClawSendMessageInput = {
   model?: string;
   metadata?: Record<string, unknown>;
   userId?: string;
+  timeoutMs?: number;
 };
 
 export type OpenClawSendMessageResult = {
@@ -34,6 +35,7 @@ export class OpenClawClient {
 
     for (const baseUrl of getCandidateBaseUrls(this.baseUrl)) {
       try {
+        const timeoutMs = input.timeoutMs ?? this.timeoutMs;
         response = await fetch(`${baseUrl}/v1/responses`, {
           method: 'POST',
           headers: {
@@ -50,13 +52,14 @@ export class OpenClawClient {
               sessionId: input.sessionId,
             }),
           }),
-          signal: AbortSignal.timeout(this.timeoutMs),
+          signal: AbortSignal.timeout(timeoutMs),
         });
         break;
       } catch (error) {
         lastError = error;
         if (error instanceof Error && error.name === 'TimeoutError') {
-          throw new Error(`OpenClaw request timed out after ${this.timeoutMs}ms`);
+          const timeoutMs = input.timeoutMs ?? this.timeoutMs;
+          throw new Error(`OpenClaw request timed out after ${timeoutMs}ms`);
         }
       }
     }

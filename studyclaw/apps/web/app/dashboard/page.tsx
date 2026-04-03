@@ -48,6 +48,23 @@ type DashboardData = {
     quizzes: number;
     conversations: number;
     knowledgeItems: number;
+    gradeItems: number;
+    scheduleEntries?: number;
+  };
+  scheduleSummary: {
+    entriesTracked: number;
+    currentClass?: { className: string; roomNumber?: string | null; teacherName?: string | null; startTime?: string | null; endTime?: string | null } | null;
+    nextClass?: { className: string; roomNumber?: string | null; teacherName?: string | null; startTime?: string | null } | null;
+    status: string;
+    todayCount: number;
+    message: string;
+  };
+  gradeSummary: {
+    overallAverage: number | null;
+    coursesTracked: number;
+    strongestCourse?: { courseName: string; estimatedPercent: number | null; letterGrade: string | null } | null;
+    courseNeedingAttention?: { courseName: string; estimatedPercent: number | null; letterGrade: string | null } | null;
+    topConcepts: Array<{ concept: string; misses: number }>;
   };
   todayTasks: DashboardTask[];
   dueSoon: DashboardTask[];
@@ -129,13 +146,7 @@ function buildWeeklyGoal(data: DashboardData | null) {
 function DashboardPageContent() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [status, setStatus] = useState('');
-  const [hasSession, setHasSession] = useState<boolean | null>(() => {
-    if (typeof window === 'undefined') {
-      return null;
-    }
-
-    return !!readStoredSession()?.user?.id;
-  });
+  const [hasSession, setHasSession] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
   const [taskActionId, setTaskActionId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
@@ -327,6 +338,14 @@ function DashboardPageContent() {
               <span>Knowledge</span>
               <strong>{data?.counts.knowledgeItems ?? 0}</strong>
             </div>
+            <div className="student-dashboard-header__meta-card">
+              <span>Grades</span>
+              <strong>{data?.counts.gradeItems ?? 0}</strong>
+            </div>
+            <div className="student-dashboard-header__meta-card">
+              <span>Schedule</span>
+              <strong>{data?.scheduleSummary.entriesTracked ?? 0}</strong>
+            </div>
           </div>
         </header>
 
@@ -347,6 +366,17 @@ function DashboardPageContent() {
         ) : null}
 
         <section className="student-dashboard-ribbon">
+          <article className="student-dashboard-ribbon__card">
+            <span className="preview-pill">Current class</span>
+            <strong>{data?.scheduleSummary.currentClass?.className ?? 'No active class right now'}</strong>
+            <p className="muted-copy" style={{ margin: '6px 0 0' }}>
+              {data?.scheduleSummary.currentClass
+                ? `${data.scheduleSummary.currentClass.startTime ?? ''}${data.scheduleSummary.currentClass.endTime ? `-${data.scheduleSummary.currentClass.endTime}` : ''}${data.scheduleSummary.currentClass.roomNumber ? ` · Room ${data.scheduleSummary.currentClass.roomNumber}` : ''}`
+                : data?.scheduleSummary.nextClass
+                  ? `Next: ${data.scheduleSummary.nextClass.className}${data.scheduleSummary.nextClass.startTime ? ` at ${data.scheduleSummary.nextClass.startTime}` : ''}`
+                  : data?.scheduleSummary.message ?? 'Add your class blocks to keep this visible.'}
+            </p>
+          </article>
           <article className="student-dashboard-ribbon__card">
             <span className="preview-pill">Today’s focus</span>
             <strong>{data?.todayTasks[0]?.title ?? 'Nothing urgent right now'}</strong>

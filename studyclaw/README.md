@@ -64,6 +64,22 @@ Relevant files:
 - `apps/api/src/lib/user-agent.ts`
 - `apps/api/src/lib/openclaw-control.ts`
 - `apps/api/src/lib/openclaw-config.ts`
+- `apps/api/src/lib/openlibrary.ts`
+
+## Open Library Student Library
+
+StudyClaw now includes an Open Library-powered student library feature for textbook lookup, subject reading lists, edition comparison, cover URLs, and book-based research.
+
+- Open Library client and normalization:
+  - `apps/api/src/lib/openlibrary.ts`
+- OpenClaw plugin source:
+  - `../openclaw-home/extensions/openlibrary-student-tools`
+- OpenClaw skill source:
+  - `../openclaw-home/skills/study-library`
+- Student chat entry points:
+  - `apps/web/app/chat/page.tsx`
+
+See `docs/openlibrary.md` for setup, prompts, and limitations.
 
 ## StudyClaw Agent Model
 
@@ -168,6 +184,10 @@ STUDYCLAW_ADMIN_EMAIL=you@example.com
 STUDYCLAW_STUDENT_DAILY_AGENT_ACTIONS=150
 GOOGLE_TOKEN_ENCRYPTION_KEY=replace-with-a-long-random-secret
 NODE_TLS_REJECT_UNAUTHORIZED=0
+OPENLIBRARY_CONTACT_EMAIL=you@example.com
+OPENLIBRARY_USER_AGENT_NAME=StudyClaw
+OPENLIBRARY_TIMEOUT_MS=7500
+OPENLIBRARY_ENABLE_SEARCH_INSIDE=false
 ```
 
 Frontend variable:
@@ -602,6 +622,63 @@ pnpm exec tsc -p apps/web/tsconfig.json --noEmit
 - Onboarding UI: `apps/web/app/onboarding/page.tsx`
 - Admin routes: `apps/api/src/modules/admin/admin.route.ts`
 
+## Grade Tracker
+
+StudyClaw includes a built-in grade tracker and wrong-answer review flow.
+
+- Student UI: `/grades`
+- API route: `apps/api/src/modules/grades/grades.route.ts`
+- Core grade logic: `apps/api/src/lib/grade-tracker.ts`
+- Docs: `docs/grades.md`
+
+Example prompts:
+
+- `Add my biology quiz grade: 18/25`
+- `What's my estimated grade in Algebra II?`
+- `What do I need on the final in Chemistry to get a B?`
+- `Help me understand the questions I got wrong on my chemistry test`
+
+## Class Scheduler
+
+StudyClaw also includes a recurring class scheduler so the app and agent can use the student’s timetable.
+
+- Student UI: `/schedule`
+- API route: `apps/api/src/modules/schedule/schedule.route.ts`
+- Core schedule logic: `apps/api/src/lib/class-scheduler.ts`
+- Docs: `docs/schedule.md`
+
+Example prompts:
+
+- `What class am I in right now?`
+- `What class do I have next?`
+- `Who is my teacher for chemistry?`
+- `What room is Algebra in?`
+- `What do I have during 3rd period?`
+
+## Browser Access
+
+- Student UI: `/browser`
+- API route: `apps/api/src/modules/browser/browser.route.ts`
+- Core browser logic: `apps/api/src/lib/browser-session.ts`, `apps/api/src/lib/browser-provider.ts`, `apps/api/src/lib/browser-config.ts`
+- Docs: `docs/browser.md`
+
+Environment variables (documented in `docs/browser.md`):
+
+```
+BROWSER_BASE_URL=https://your-remote-browser-host
+BROWSER_PROVIDER=novnc
+BROWSER_EMBED_ALLOWED=true
+BROWSER_TIMEOUT_MINUTES=30
+BROWSER_RESTRICTIONS_ENABLED=false
+```
+
+Example prompts:
+
+- `Launch the StudyClaw browser`
+- `Open the remote browser to research a textbook`
+- `Refresh my browser session`
+
+
 ## Current Gaps
 
 The current system is running and testable, but still has a few practical gaps:
@@ -631,4 +708,3 @@ The current system is running and testable, but still has a few practical gaps:
 - `apps/api/src/modules/onboarding/onboarding.route.ts`
 - `apps/api/src/modules/dashboard/dashboard.route.ts`
 - `apps/api/src/modules/admin/admin.route.ts`
-

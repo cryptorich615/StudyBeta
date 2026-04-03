@@ -71,8 +71,42 @@ const actionItemScheduleOptions: Array<{ key: ActionItemSchedulePreset; label: s
   { key: 'this_weekend', label: 'This weekend · 10 AM' },
 ];
 
+const coachPersonalities = [
+  {
+    key: 'quick_start_2',
+    name: 'Willow',
+    emoji: '🌿',
+    tagline: 'Calm and steady',
+    description: 'Best when you want patient explanations, step-by-step help, and less pressure.',
+  },
+  {
+    key: 'quick_start_1',
+    name: 'Dixie',
+    emoji: '⚡',
+    tagline: 'Fast and motivating',
+    description: 'Best when you want momentum, quick check-ins, and a push to get moving.',
+  },
+] as const;
+
 function createAssetId(file: File) {
   return `${file.name}-${file.size}-${file.lastModified}`;
+}
+
+function formatSavedDate(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return 'Recently saved';
+  }
+
+  return parsed.toLocaleDateString([], {
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+function buildNotePreview(note: SavedNote | null) {
+  const source = note?.metadata.summary || note?.processedText || note?.originalText || '';
+  return source.replace(/\s+/g, ' ').trim().slice(0, 180);
 }
 
 export default function CoachPage() {
@@ -99,6 +133,13 @@ export default function CoachPage() {
   const [actionItemSchedules, setActionItemSchedules] = useState<Record<string, ActionItemSchedulePreset>>({});
   const [schedulingActionItemKey, setSchedulingActionItemKey] = useState<string | null>(null);
   const [scheduledActionItems, setScheduledActionItems] = useState<string[]>([]);
+  const [showPasteText, setShowPasteText] = useState(false);
+  const [showSavedKnowledge, setShowSavedKnowledge] = useState(false);
+  const [showStudyOutputs, setShowStudyOutputs] = useState(false);
+  const [historySearch, setHistorySearch] = useState('');
+  const [historySectionFilter, setHistorySectionFilter] = useState('all');
+  const [historyDateFilter, setHistoryDateFilter] = useState<'all' | '7d' | '30d'>('all');
+  const [activeAgentType, setActiveAgentType] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -111,7 +152,9 @@ export default function CoachPage() {
   }, []);
 
   useEffect(() => {
-    setHasSession(!!readStoredSession()?.user?.id);
+    const storedSession = readStoredSession();
+    setHasSession(!!storedSession?.user?.id);
+    setActiveAgentType(storedSession?.user?.agent_type ?? null);
   }, []);
 
   useEffect(() => {
@@ -137,6 +180,12 @@ export default function CoachPage() {
   useEffect(() => {
     setScheduledActionItems([]);
   }, [selectedDocumentId]);
+
+  useEffect(() => {
+    if (coachText.trim()) {
+      setShowPasteText(true);
+    }
+  }, [coachText]);
 
   async function loadKnowledge() {
     const response = await apiFetch('/api/coach/knowledge');
@@ -311,6 +360,48 @@ export default function CoachPage() {
 
   const recentFlashcardSets = studyLibrary.flashcardSets.slice(0, 4);
   const recentQuizzes = studyLibrary.quizzes.slice(0, 4);
+  const noteSections = useMemo(
+    () => Array.from(new Set(savedNotes.map((note) => note.sectionName || 'Unsorted'))).sort((left, right) => left.localeCompare(right)),
+    [savedNotes]
+  );
+  const filteredSavedNotes = useMemo(() => {
+    const normalizedSearch = historySearch.trim().toLowerCase();
+    const now = Date.now();
+
+    return savedNotes.filter((note) => {
+      if (historySectionFilter !== 'all' && note.sectionName !== historySectionFilter) {
+        return false;
+      }
+
+      if (historyDateFilter !== 'all') {
+        const createdAt = new Date(note.createdAt).getTime();
+        if (Number.isFinite(createdAt)) {
+          const maxAge = historyDateFilter === '7d' ? 7 * 24 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000;
+          if (now - createdAt > maxAge) {
+            return false;
+          }
+        }
+      }
+
+      if (!normalizedSearch) {
+        return true;
+      }
+
+      const searchSurface = [
+        note.title,
+        note.sectionName,
+        note.metadata.summary,
+        note.processedText,
+        note.originalText,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+
+      return searchSurface.includes(normalizedSearch);
+    });
+  }, [historyDateFilter, historySearch, historySectionFilter, savedNotes]);
+  const activePersonality = coachPersonalities.find((personality) => personality.key === activeAgentType) ?? coachPersonalities[0];
 
   function buildActionItemKey(assetId: string, actionItem: string) {
     return `${assetId}:${actionItem}`;
@@ -473,17 +564,22 @@ export default function CoachPage() {
       <section className="backpack-shell">
         <header className="backpack-header">
           <div>
-            <p className="backpack-header__eyebrow">{isIntroFlow ? 'First-time Backpack' : 'Backpack workspace'}</p>
+            <p className="backpack-header__eyebrow">{isIntroFlow ? 'First-time Backpack' : 'Backpack'}</p>
             <h1 className="backpack-header__title">
-              {isIntroFlow ? 'Set up your study workspace.' : 'Add material, organize notes, and build study tools from one place.'}
+              {isIntroFlow ? 'Drop in one note and let Backpack do the rest.' : 'Turn class notes into something you can study right away.'}
             </h1>
             <p className="backpack-header__description">
-              Backpack is your intake and study-prep workspace. Drop in class material, clean it up, save the useful parts, and turn the best notes into flashcards and quizzes.
+              Start with one note, transcript, or PDF. Backpack cleans it up, pulls out next steps, saves useful class details, and turns strong notes into flashcards or quizzes.
             </p>
+            <div className="actions" style={{ marginTop: '1rem' }}>
+              <a href="#backpack-composer">Add notes</a>
+              <Link href="/chat" className="ghost-button">Study chat</Link>
+              <a href="#backpack-history" className="ghost-button">Open history</a>
+            </div>
           </div>
           <div className="backpack-header__meta">
             <div className="backpack-header__meta-card">
-              <span>Saved notes</span>
+              <span>Notes saved</span>
               <strong>{savedNotes.length}</strong>
             </div>
             <div className="backpack-header__meta-card">
@@ -493,35 +589,33 @@ export default function CoachPage() {
           </div>
         </header>
 
-        <section className="backpack-workflow-strip" aria-label="Backpack workflow">
+        <section className="backpack-workflow-strip backpack-quick-start" aria-label="Backpack quick start">
           <article className="backpack-workflow-step">
-            <p>Add material</p>
-            <strong>Upload notes or paste extracted text</strong>
+            <p>Step 1</p>
+            <strong>Add notes or a transcript</strong>
           </article>
           <article className="backpack-workflow-step">
-            <p>Organize notes</p>
-            <strong>Keep processed notes grouped by section</strong>
+            <p>Step 2</p>
+            <strong>Review the summary and next steps</strong>
           </article>
           <article className="backpack-workflow-step">
-            <p>Generate study tools</p>
-            <strong>Create flashcards and quizzes from saved notes</strong>
+            <p>Step 3</p>
+            <strong>Make flashcards, a quiz, or tasks</strong>
           </article>
         </section>
 
         {feedback ? <StatusBanner tone="warning">{feedback}</StatusBanner> : null}
         {generationStatus ? <GenerationStatusCard status={generationStatus} /> : null}
-        {!assets.length ? (
-          <StatusBanner tone="neutral">
-            Text files and PDFs can be processed directly here. Scanned images, image-only PDFs, and audio still need pasted OCR or transcript text before Backpack can summarize them reliably.
-          </StatusBanner>
-        ) : null}
 
         <section className="backpack-workspace-grid">
-          <aside className="backpack-intake-panel">
+          <aside className="backpack-intake-panel" id="backpack-composer">
             <div className="backpack-panel-head">
               <div>
-                <p className="eyebrow">Main workspace</p>
-                <h2 className="section-title">Add material to Backpack</h2>
+                <p className="eyebrow">Start here</p>
+                <h2 className="section-title">Add one note to Backpack</h2>
+                <p className="muted-copy" style={{ margin: '0.4rem 0 0' }}>
+                  Only the title and one source are required. Everything else is optional.
+                </p>
               </div>
               <span className="settings-badge">{assets.length ? `${assets.length} item${assets.length === 1 ? '' : 's'} attached` : 'Ready'}</span>
             </div>
@@ -529,14 +623,14 @@ export default function CoachPage() {
             <div className="backpack-intake-panel__body">
               <div className="form-field">
                 <label htmlFor="coach-title">Note title</label>
-                <input id="coach-title" value={coachTitle} onChange={(event) => setCoachTitle(event.target.value)} />
+                <input id="coach-title" value={coachTitle} onChange={(event) => setCoachTitle(event.target.value)} placeholder="Example: Biology lecture notes" />
               </div>
 
               <div className="backpack-intake-panel__upload">
                 <div>
-                  <p className="eyebrow">Upload notes</p>
+                  <p className="eyebrow">Upload a file</p>
                   <p className="muted-copy" style={{ margin: '6px 0 0' }}>
-                    Add text files, PDFs, transcripts, or cleaned notes. Backpack will use whatever text is available.
+                    Add a PDF, text file, transcript, or cleaned note. Backpack uses any text it can find.
                   </p>
                 </div>
                 <div className="upload-zone">
@@ -558,39 +652,57 @@ export default function CoachPage() {
                 </div>
               ) : null}
 
-              <div className="form-field">
-                <label htmlFor="coach-text">Transcript or extracted text</label>
-                <textarea
-                  id="coach-text"
-                  value={coachText}
-                  onChange={(event) => setCoachText(event.target.value)}
-                  rows={11}
-                  placeholder="Paste OCR, transcript, or cleaned class notes here."
-                />
-              </div>
+              <button
+                type="button"
+                className="ghost-button backpack-inline-toggle"
+                onClick={() => setShowPasteText((current) => !current)}
+              >
+                {showPasteText ? 'Hide pasted text' : 'Paste text instead'}
+              </button>
+
+              {showPasteText ? (
+                <div className="form-field">
+                  <label htmlFor="coach-text">Pasted text</label>
+                  <textarea
+                    id="coach-text"
+                    value={coachText}
+                    onChange={(event) => setCoachText(event.target.value)}
+                    rows={10}
+                    placeholder="Paste OCR, a transcript, or cleaned class notes here."
+                  />
+                </div>
+              ) : (
+                <p className="muted-copy">Need to paste OCR or a transcript? Open “Paste text instead.”</p>
+              )}
 
               <div className="actions backpack-primary-actions">
                 <button type="button" onClick={processCoachNotes} disabled={processing}>
-                  {processing ? 'Processing...' : 'Summarize Backpack'}
+                  {processing ? 'Saving and cleaning up...' : 'Save and clean up notes'}
                 </button>
               </div>
+
+              {!assets.length && !coachText.trim() ? (
+                <StatusBanner tone="neutral">
+                  Start with whatever you have. Backpack works best with readable text, but you can still upload first and paste cleaned text later.
+                </StatusBanner>
+              ) : null}
 
               {(coachSummary || knowledgeDrafts.length) ? (
                 <div className="backpack-intake-results">
                   {coachSummary ? (
                     <div className="summary-card">
-                      <p className="eyebrow">Processed summary</p>
+                      <p className="eyebrow">What Backpack found</p>
                       <p className="muted-copy">{coachSummary}</p>
                       {actionItems.length ? (
                         <>
-                          <p className="eyebrow">Action items</p>
+                          <p className="eyebrow">Suggested next steps</p>
                           <div className="backpack-action-list">
                             {actionItems.map((item) => (
                               <div key={item} className="backpack-action-card">
                                 <div>
                                   <strong>{item}</strong>
                                   <p className="muted-copy" style={{ margin: '6px 0 0' }}>
-                                    Turn this into a real study task so it shows up on your dashboard and reminders board.
+                                    Add this to your task list so it shows up on your dashboard and reminders board.
                                   </p>
                                 </div>
                                 <div className="backpack-action-card__controls">
@@ -615,7 +727,7 @@ export default function CoachPage() {
                                     disabled={!selectedDocumentId || schedulingActionItemKey === buildActionItemKey(selectedDocumentId ?? 'draft', item)}
                                     onClick={() => selectedDocumentId ? void addActionItemToTasks(selectedDocumentId, item) : null}
                                   >
-                                    {schedulingActionItemKey === buildActionItemKey(selectedDocumentId ?? 'draft', item) ? 'Adding...' : 'Add to tasks'}
+                                    {schedulingActionItemKey === buildActionItemKey(selectedDocumentId ?? 'draft', item) ? 'Adding...' : 'Add to task list'}
                                   </button>
                                 </div>
                               </div>
@@ -628,7 +740,7 @@ export default function CoachPage() {
 
                   {knowledgeDrafts.length ? (
                     <div className="summary-card">
-                      <p className="eyebrow">Save useful details</p>
+                      <p className="eyebrow">Save useful class details</p>
                       <div className="stack-list">
                         {knowledgeDrafts.map((item) => (
                           <article key={`${item.title}-${item.detail}`} className="stack-item">
@@ -653,103 +765,225 @@ export default function CoachPage() {
             <section className="backpack-overview-panel">
               <div className="backpack-panel-head">
                 <div>
-                  <p className="eyebrow">Overview</p>
-                  <h3 style={{ margin: 0 }}>Workspace totals</h3>
+                  <p className="eyebrow">Next move</p>
+                  <h3 style={{ margin: 0 }}>{selectedDocument ? 'Use this note now' : 'Pick what you want Backpack to help with'}</h3>
                 </div>
               </div>
-              <div className="backpack-stat-grid">
-                <div className="backpack-stat-card">
-                  <strong>{savedNotes.length}</strong>
-                  <span>saved notes</span>
+              {selectedDocument ? (
+                <div className="summary-card backpack-focus-card">
+                  <p className="eyebrow">Selected note</p>
+                  <strong>{selectedDocument.title}</strong>
+                  <p className="muted-copy" style={{ margin: '0.5rem 0 0' }}>
+                    {selectedDocument.sectionName} · {formatSavedDate(selectedDocument.createdAt)}
+                  </p>
+                  <p className="muted-copy" style={{ marginTop: '0.75rem' }}>
+                    {buildNotePreview(selectedDocument) || 'This note is ready. Open it below to review the full text, tasks, and study actions.'}
+                  </p>
+                  <div className="actions" style={{ marginTop: '1rem' }}>
+                    <button type="button" onClick={() => void generateStudyAsset('flashcards')} disabled={generatingAsset !== null}>
+                      {generatingAsset === 'flashcards' ? 'Creating flashcards...' : 'Make flashcards'}
+                    </button>
+                    <button type="button" onClick={() => void generateStudyAsset('quiz')} disabled={generatingAsset !== null}>
+                      {generatingAsset === 'quiz' ? 'Creating quiz...' : 'Make quiz'}
+                    </button>
+                    <Link href="/chat" className="ghost-button">Open study chat</Link>
+                  </div>
+                  {noteActionStatus ? <StatusBanner tone={noteActionStatus.tone}>{noteActionStatus.message}</StatusBanner> : null}
                 </div>
-                <div className="backpack-stat-card">
-                  <strong>{groupedSavedNotes.length}</strong>
-                  <span>sections</span>
+              ) : (
+                <div className="backpack-empty-state">
+                  <strong>No note selected yet</strong>
+                  <p>Process your first note, then Backpack will help you turn it into tasks, flashcards, or a quiz.</p>
+                  <a href="#backpack-composer" className="primary-link-button">Add a note</a>
                 </div>
-                <div className="backpack-stat-card">
-                  <strong>{studyLibrary.flashcardSets.length}</strong>
-                  <span>flashcard sets</span>
-                </div>
-                <div className="backpack-stat-card">
-                  <strong>{studyLibrary.quizzes.length}</strong>
-                  <span>quizzes</span>
-                </div>
-              </div>
-            </section>
-
-            <section className="backpack-helper-row">
-              <article className="backpack-helper-card">
-                <p className="eyebrow">Capture</p>
-                <strong>Bring in raw material fast</strong>
-                <p className="muted-copy">Use Backpack to collect class notes, transcripts, and cleaned text in one workspace.</p>
-              </article>
-              <article className="backpack-helper-card">
-                <p className="eyebrow">Organize</p>
-                <strong>Keep processed notes grouped</strong>
-                <p className="muted-copy">Saved notes stay grouped by section so the right lecture or worksheet is easy to reopen.</p>
-              </article>
-              <article className="backpack-helper-card">
-                <p className="eyebrow">Study</p>
-                <strong>Turn notes into active recall</strong>
-                <p className="muted-copy">Generate flashcards and quizzes directly from the notes that are already cleaned and useful.</p>
-              </article>
+              )}
             </section>
 
             <section className="secondary-card">
               <div className="backpack-panel-head">
                 <div>
-                  <p className="eyebrow">Saved knowledge</p>
-                  <h3 style={{ margin: 0 }}>Reusable details</h3>
+                  <p className="eyebrow">Coach style</p>
+                  <h3 style={{ margin: 0 }}>Choose the vibe that fits your mood</h3>
+                </div>
+                <Link href="/onboarding" className="ghost-button">Change</Link>
+              </div>
+              <div className="backpack-personality-grid">
+                {coachPersonalities.map((personality) => (
+                  <article
+                    key={personality.key}
+                    className={`backpack-personality-card${activePersonality.key === personality.key ? ' is-active' : ''}`}
+                  >
+                    <div className="backpack-personality-card__badge">
+                      <span>{personality.emoji}</span>
+                      <span>{personality.tagline}</span>
+                    </div>
+                    <strong>{personality.name}</strong>
+                    <p className="muted-copy" style={{ margin: '0.6rem 0 0' }}>{personality.description}</p>
+                    {activePersonality.key === personality.key ? <span className="settings-badge">Current</span> : null}
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            <section className="secondary-card">
+              <div className="backpack-panel-head">
+                <div>
+                  <p className="eyebrow">More from Backpack</p>
+                  <h3 style={{ margin: 0 }}>Hide the extra stuff until you need it</h3>
                 </div>
               </div>
               <div className="stack-list">
-                {knowledgeItems.slice(0, 4).map((item) => (
-                  <article key={item.id} className="stack-item">
-                    <div>
-                      <strong>{item.title}</strong>
-                      <p className="muted-copy" style={{ margin: '4px 0 0' }}>{item.detail}</p>
+                <article className="stack-item">
+                  <div>
+                    <strong>Saved class details</strong>
+                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                      Keep grading rules, exam dates, and class preferences handy.
+                    </p>
+                  </div>
+                  <button type="button" className="chat-mini-button" onClick={() => setShowSavedKnowledge((current) => !current)}>
+                    {showSavedKnowledge ? 'Hide' : 'Show'}
+                  </button>
+                </article>
+                {showSavedKnowledge ? (
+                  <div className="summary-card">
+                    <div className="stack-list">
+                      {knowledgeItems.slice(0, 4).map((item) => (
+                        <article key={item.id} className="stack-item">
+                          <div>
+                            <strong>{item.title}</strong>
+                            <p className="muted-copy" style={{ margin: '4px 0 0' }}>{item.detail}</p>
+                          </div>
+                        </article>
+                      ))}
+                      {!knowledgeItems.length ? (
+                        <p className="muted-copy">Save one useful class detail after your next note so Backpack can reuse it later.</p>
+                      ) : null}
                     </div>
-                  </article>
-                ))}
-                {!knowledgeItems.length ? <p className="muted-copy">Save useful details here so class logistics and study preferences stay reusable.</p> : null}
+                  </div>
+                ) : null}
+
+                <article className="stack-item">
+                  <div>
+                    <strong>Recent study sets</strong>
+                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                      Jump back into the flashcards and quizzes Backpack already made for you.
+                    </p>
+                  </div>
+                  <button type="button" className="chat-mini-button" onClick={() => setShowStudyOutputs((current) => !current)}>
+                    {showStudyOutputs ? 'Hide' : 'Show'}
+                  </button>
+                </article>
+                {showStudyOutputs ? (
+                  <div className="backpack-study-library">
+                    <div className="summary-card">
+                      <p className="eyebrow">Recent flashcards</p>
+                      <div className="stack-list">
+                        {recentFlashcardSets.length ? recentFlashcardSets.map((set) => (
+                          <article key={set.id} className="stack-item">
+                            <div>
+                              <strong>{set.title}</strong>
+                              <p className="muted-copy" style={{ margin: '4px 0 0' }}>{set.cards.length} cards</p>
+                            </div>
+                          </article>
+                        )) : <p className="muted-copy">No flashcards yet. Make one from a saved note when you are ready.</p>}
+                      </div>
+                    </div>
+                    <div className="summary-card">
+                      <p className="eyebrow">Recent quizzes</p>
+                      <div className="stack-list">
+                        {recentQuizzes.length ? recentQuizzes.map((quiz) => (
+                          <article key={quiz.id} className="stack-item">
+                            <div>
+                              <strong>{quiz.title}</strong>
+                              <p className="muted-copy" style={{ margin: '4px 0 0' }}>{quiz.questions.length} questions</p>
+                            </div>
+                          </article>
+                        )) : <p className="muted-copy">No quizzes yet. Make one from a saved note when you are ready.</p>}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             </section>
           </div>
         </section>
 
-        <section className="backpack-library-grid">
+        <section className="backpack-library-grid" id="backpack-history">
           <section className="secondary-card">
             <div className="backpack-panel-head">
               <div>
-                <p className="eyebrow">Saved notes</p>
-                <h2 className="section-title">Organized note library</h2>
+                <p className="eyebrow">Backpack history</p>
+                <h2 className="section-title">Search your saved notes</h2>
                 <p className="muted-copy" style={{ margin: '6px 0 0' }}>
-                  Reopen processed notes by section, then generate study tools from the one you want to review next.
+                  Reopen any note by class or date, then pick one to turn into a task, flashcards, or a quiz.
                 </p>
               </div>
             </div>
 
             {savedNotes.length ? (
               <div className="backpack-note-workspace">
-                <div className="backpack-note-groups">
-                  {groupedSavedNotes.map((group) => (
-                    <div key={group.sectionName} className="backpack-note-group">
-                      <p className="eyebrow" style={{ marginBottom: '0.5rem' }}>{group.sectionName}</p>
-                      <div className="backpack-note-chip-grid">
-                        {group.notes.map((asset) => (
-                          <button
-                            key={asset.id}
-                            type="button"
-                            onClick={() => setSelectedDocumentId(asset.id)}
-                            className={asset.id === selectedDocument?.id ? 'backpack-note-chip is-active' : 'backpack-note-chip'}
-                          >
-                            <strong>{asset.title}</strong>
-                            <span>{asset.processedText ? 'Processed note' : 'Saved note'}</span>
-                          </button>
-                        ))}
+                <div className="backpack-history-toolbar">
+                  <div className="form-field">
+                    <label htmlFor="backpack-history-search">Search notes</label>
+                    <input
+                      id="backpack-history-search"
+                      value={historySearch}
+                      onChange={(event) => setHistorySearch(event.target.value)}
+                      placeholder="Search by title, class, or note text"
+                    />
+                  </div>
+                  <div className="form-field">
+                    <label htmlFor="backpack-section-filter">Class</label>
+                    <select
+                      id="backpack-section-filter"
+                      value={historySectionFilter}
+                      onChange={(event) => setHistorySectionFilter(event.target.value)}
+                    >
+                      <option value="all">All classes</option>
+                      {noteSections.map((sectionName) => (
+                        <option key={sectionName} value={sectionName}>
+                          {sectionName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="form-field">
+                    <label htmlFor="backpack-date-filter">Saved</label>
+                    <select
+                      id="backpack-date-filter"
+                      value={historyDateFilter}
+                      onChange={(event) => setHistoryDateFilter(event.target.value as 'all' | '7d' | '30d')}
+                    >
+                      <option value="all">Any time</option>
+                      <option value="7d">Last 7 days</option>
+                      <option value="30d">Last 30 days</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="backpack-history-list">
+                  {filteredSavedNotes.length ? filteredSavedNotes.map((asset) => (
+                    <button
+                      key={asset.id}
+                      type="button"
+                      onClick={() => setSelectedDocumentId(asset.id)}
+                      className={asset.id === selectedDocument?.id ? 'backpack-history-card is-active' : 'backpack-history-card'}
+                    >
+                      <div className="backpack-history-card__meta">
+                        <span className="settings-badge">{asset.sectionName}</span>
+                        <span className="muted-copy">{formatSavedDate(asset.createdAt)}</span>
                       </div>
+                      <strong>{asset.title}</strong>
+                      <p className="muted-copy" style={{ margin: '0.5rem 0 0' }}>
+                        {buildNotePreview(asset) || 'Saved note ready to open.'}
+                      </p>
+                    </button>
+                  )) : (
+                    <div className="backpack-empty-state">
+                      <strong>No notes match that filter yet</strong>
+                      <p>Try a broader search or switch the date range.</p>
                     </div>
-                  ))}
+                  )}
                 </div>
 
                 {selectedDocument ? (
@@ -757,14 +991,14 @@ export default function CoachPage() {
                     <p className="eyebrow">Open note</p>
                     <strong>{selectedDocument.title}</strong>
                     <p className="muted-copy" style={{ margin: '6px 0 0' }}>
-                      Section: {selectedDocument.sectionName}
+                      {selectedDocument.sectionName} · Saved {formatSavedDate(selectedDocument.createdAt)}
                     </p>
                     <div className="actions">
                       <button type="button" onClick={() => void generateStudyAsset('flashcards')} disabled={generatingAsset !== null}>
-                        {generatingAsset === 'flashcards' ? 'Creating flashcards...' : 'Create flashcards'}
+                        {generatingAsset === 'flashcards' ? 'Creating flashcards...' : 'Make flashcards'}
                       </button>
                       <button type="button" onClick={() => void generateStudyAsset('quiz')} disabled={generatingAsset !== null}>
-                        {generatingAsset === 'quiz' ? 'Creating quiz...' : 'Create quiz'}
+                        {generatingAsset === 'quiz' ? 'Creating quiz...' : 'Make quiz'}
                       </button>
                       <Link href="/study" className="ghost-button">Open study library</Link>
                     </div>
@@ -807,7 +1041,7 @@ export default function CoachPage() {
                                     disabled={isScheduled || isSubmitting}
                                     onClick={() => void addActionItemToTasks(selectedDocument.id, item)}
                                   >
-                                    {isSubmitting ? 'Adding...' : isScheduled ? 'Added' : 'Add to tasks'}
+                                    {isSubmitting ? 'Adding...' : isScheduled ? 'Added' : 'Add to task list'}
                                   </button>
                                 </div>
                               </div>
@@ -833,7 +1067,7 @@ export default function CoachPage() {
                         className="ghost-button backpack-note-toggle"
                         onClick={() => setShowFullSelectedNote((current) => !current)}
                       >
-                        {showFullSelectedNote ? 'Show less' : 'Show more'}
+                        {showFullSelectedNote ? 'Show less' : 'Show full note'}
                       </button>
                     ) : null}
                   </div>
@@ -841,52 +1075,19 @@ export default function CoachPage() {
               </div>
             ) : (
               <div className="backpack-empty-state">
-                <strong>No saved notes yet</strong>
-                <p>Process your first note in the intake workspace to start building an organized study library.</p>
+                <strong>Your Backpack history is empty for now</strong>
+                <p>Save your first note above and it will appear here with a preview, class tag, and study actions.</p>
+                <a href="#backpack-composer" className="primary-link-button">Add a note</a>
               </div>
             )}
           </section>
-
-          <section className="secondary-card">
-            <div className="backpack-panel-head">
-              <div>
-                <p className="eyebrow">Study library</p>
-                <h3 style={{ margin: 0 }}>Recent outputs from Backpack</h3>
-              </div>
-              <Link href="/study" className="ghost-button">Open full library</Link>
-            </div>
-
-            <div className="backpack-study-library">
-              <div className="summary-card">
-                <p className="eyebrow">Recent flashcards</p>
-                <div className="stack-list">
-                  {recentFlashcardSets.length ? recentFlashcardSets.map((set) => (
-                    <article key={set.id} className="stack-item">
-                      <div>
-                        <strong>{set.title}</strong>
-                        <p className="muted-copy" style={{ margin: '4px 0 0' }}>{set.cards.length} cards</p>
-                      </div>
-                    </article>
-                  )) : <p className="muted-copy">No flashcard sets yet. Open a saved note and create one from here.</p>}
-                </div>
-              </div>
-
-              <div className="summary-card">
-                <p className="eyebrow">Recent quizzes</p>
-                <div className="stack-list">
-                  {recentQuizzes.length ? recentQuizzes.map((quiz) => (
-                    <article key={quiz.id} className="stack-item">
-                      <div>
-                        <strong>{quiz.title}</strong>
-                        <p className="muted-copy" style={{ margin: '4px 0 0' }}>{quiz.questions.length} questions</p>
-                      </div>
-                    </article>
-                  )) : <p className="muted-copy">No quizzes yet. Process a note and create one when you are ready.</p>}
-                </div>
-              </div>
-            </div>
-          </section>
         </section>
+
+        <nav className="backpack-bottom-bar" aria-label="Backpack quick actions">
+          <a href="#backpack-composer" className="backpack-bottom-bar__primary">Add notes</a>
+          <a href="#backpack-history" className="ghost-button">History</a>
+          <Link href="/chat" className="ghost-button">Chat</Link>
+        </nav>
       </section>
     </>
   );

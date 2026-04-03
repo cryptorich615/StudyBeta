@@ -74,7 +74,7 @@ export async function runReminderWorkerOnce() {
     `select id, user_id, title, type, reminder_at, metadata_json
      from reminders
      where reminder_at <= now()
-       and status = 'scheduled'
+       and status in ('pending', 'scheduled')
        and delivered = false
      order by reminder_at asc
      for update skip locked`
@@ -90,7 +90,7 @@ export async function runReminderWorkerOnce() {
         `select id
          from reminders
          where id = $1
-           and status = 'scheduled'
+           and status in ('pending', 'scheduled')
            and delivered = false
          for update skip locked`,
         [reminder.id]

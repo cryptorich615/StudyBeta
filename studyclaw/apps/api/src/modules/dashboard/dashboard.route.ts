@@ -4,6 +4,8 @@ import { requireAuth, type AuthedRequest } from '../../lib/auth';
 import { getGoogleConnectionStatus, listUpcomingCalendarEvents } from '../../lib/google-service';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
 import { buildWeeklyStudyPlan } from '../../lib/weekly-study-plan';
+import { listGradeDashboard } from '../../lib/grade-tracker';
+import { getScheduleSnapshot } from '../../lib/class-scheduler';
 
 type ReminderRow = {
   id: string;
@@ -89,6 +91,8 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
     studentAgentResult,
     activityResult,
     googleStatus,
+    gradesSnapshot,
+    scheduleSnapshot,
   ] = await Promise.all([
     db.query(
       `select id, title, type, status, reminder_at, metadata_json
@@ -119,6 +123,27 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
       [userId]
     ),
     getGoogleConnectionStatus(userId),
+    listGradeDashboard(userId).catch(() => ({
+      courses: [],
+      items: [],
+      settings: [],
+      wrongAnswers: [],
+      reviewPatterns: [],
+      overallAverage: null,
+    })),
+    getScheduleSnapshot(userId).catch(() => ({
+      entries: [],
+      context: {
+        status: 'no_schedule' as const,
+        now: new Date().toISOString(),
+        today: 'monday' as const,
+        timezone: 'UTC',
+        currentClass: null,
+        nextClass: null,
+        todaySchedule: [],
+        message: 'No classes are scheduled yet.',
+      },
+    })),
   ]);
 
   const reminders = (remindersResult.rows as ReminderRow[])
@@ -138,6 +163,7 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
     quizzes: quizzesResult.rows[0]?.count ?? 0,
     conversations: threadsResult.rows[0]?.count ?? 0,
     knowledgeItems: knowledgeItemsResult.rows[0]?.count ?? 0,
+    gradeItems: gradesSnapshot.items.length,
   };
 
   const calendarEvents = googleStatus.connected ? await listUpcomingCalendarEvents(userId, 5).catch(() => []) : [];
@@ -166,6 +192,27 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
     },
     studentAgent: studentAgentResult.rows[0] ?? null,
     counts,
+    scheduleSummary: {
+      entriesTracked: scheduleSnapshot.entries.length,
+      currentClass: scheduleSnapshot.context.currentClass,
+      nextClass: scheduleSnapshot.context.nextClass,
+      status: scheduleSnapshot.context.status,
+      todayCount: scheduleSnapshot.context.todaySchedule.length,
+      message: scheduleSnapshot.context.message,
+    },
+    gradeSummary: {
+      overallAverage: gradesSnapshot.overallAverage,
+      coursesTracked: gradesSnapshot.courses.length,
+      strongestCourse:
+        [...gradesSnapshot.courses]
+          .filter((course: any) => course.estimatedPercent !== null)
+          .sort((left: any, right: any) => (right.estimatedPercent ?? 0) - (left.estimatedPercent ?? 0))[0] ?? null,
+      courseNeedingAttention:
+        [...gradesSnapshot.courses]
+          .filter((course: any) => course.estimatedPercent !== null)
+          .sort((left: any, right: any) => (left.estimatedPercent ?? 0) - (right.estimatedPercent ?? 0))[0] ?? null,
+      topConcepts: gradesSnapshot.reviewPatterns.slice(0, 3),
+    },
     todayTasks: todayTasks.map((task) => ({
       ...task,
       urgencyLabel: describeUrgency(task.reminder_at),
@@ -187,6 +234,8 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
     quickActions: [
       { label: 'Open Coach', href: '/coach' },
       { label: 'Generate flashcards', href: '/study' },
+      { label: 'View schedule', href: '/schedule' },
+      { label: 'Track grades', href: '/grades' },
       { label: 'Complete setup', href: '/onboarding' },
       { label: 'Review settings', href: '/settings' },
     ],

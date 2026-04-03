@@ -3,6 +3,7 @@ import { db } from '../../lib/db';
 import { requireAuth, type AuthedRequest } from '../../lib/auth';
 import { upsertCalendarEventForReminder } from '../../lib/google-service';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
+import { normalizeReminderStatus, normalizeReminderType } from '../../lib/reminder-types';
 import { recordStudyEvent, upsertAssignmentFromReminder, writeMemorySummary } from '../../lib/student-memory';
 
 export const remindersRouter = Router();
@@ -47,11 +48,23 @@ remindersRouter.post('/', async (req: AuthedRequest, res) => {
     });
   }
 
+  const normalizedType = normalizeReminderType(type);
+  const metadataJson = {
+    ...(metadata ?? {}),
+    ...(normalizedType.preservedRequestedType ? { requestedType: normalizedType.preservedRequestedType } : {}),
+  };
+
   const result = await db.query(
-    `insert into reminders (user_id, title, reminder_at, type, delivered, metadata_json)
-     values ($1, $2, $3, $4, false, $5)
+    `insert into reminders (user_id, title, reminder_at, type, status, delivered, metadata_json)
+     values ($1, $2, $3, $4, 'pending', false, $5)
      returning *`,
-    [req.user!.id, title.trim(), parsedReminderAt.toISOString(), type, JSON.stringify(metadata ?? {})]
+    [
+      req.user!.id,
+      title.trim(),
+      parsedReminderAt.toISOString(),
+      normalizedType.normalizedType,
+      JSON.stringify(metadataJson),
+    ]
   );
 
   const reminder = result.rows[0];
@@ -143,8 +156,8 @@ remindersRouter.patch('/:reminderId', async (req: AuthedRequest, res) => {
   }
 
   const nextTitle = typeof title === 'string' ? title.trim() : current.title;
-  const nextType = typeof type === 'string' ? type.trim() : current.type;
-  const nextStatus = typeof status === 'string' ? status.trim() : current.status;
+  const nextType = typeof type === 'string' ? normalizeReminderType(type).normalizedType : current.type;
+  const nextStatus = typeof status === 'string' ? normalizeReminderStatus(status) : normalizeReminderStatus(current.status);
 
   if (!nextTitle || !nextType) {
     return res.status(400).json({

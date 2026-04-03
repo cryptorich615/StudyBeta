@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import AuthForm from '../components/auth-form';
@@ -8,10 +8,15 @@ import { isOnboardingComplete, readStoredSession } from '../../lib/session';
 
 export default function AuthPage() {
   const router = useRouter();
-  const requestedMode =
-    typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('mode') === 'login'
-      ? 'login'
-      : 'signup';
+  const [requestedMode, setRequestedMode] = useState<'login' | 'signup'>('signup');
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    setRequestedMode(new URLSearchParams(window.location.search).get('mode') === 'login' ? 'login' : 'signup');
+  }, []);
 
   useEffect(() => {
     const session = readStoredSession();

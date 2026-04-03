@@ -57,13 +57,7 @@ function CalendarPageContent() {
   const [showSuccess, setShowSuccess] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const searchParams = useSearchParams();
-  const [hasSession, setHasSession] = useState<boolean | null>(() => {
-    if (typeof window === 'undefined') {
-      return null;
-    }
-
-    return !!readStoredSession()?.user?.id;
-  });
+  const [hasSession, setHasSession] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (typeof window === 'undefined') {

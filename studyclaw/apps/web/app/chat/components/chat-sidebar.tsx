@@ -30,6 +30,15 @@ type ChatSidebarProps = {
 };
 
 export default function ChatSidebar(props: ChatSidebarProps) {
+  const formatThreadDate = (value: string) => {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      return 'Recent session';
+    }
+
+    return parsed.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  };
+
   return (
     <div className="study-chat-sidebar">
       <div className="study-chat-sidebar__brand">
@@ -132,7 +141,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                 onClick={() => props.onSelectThread(thread.id)}
               >
                 <strong>{thread.title || 'Untitled session'}</strong>
-                <span>{new Date(thread.last_message_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
+                <span>{formatThreadDate(thread.last_message_at)}</span>
               </button>
             ))
           ) : (

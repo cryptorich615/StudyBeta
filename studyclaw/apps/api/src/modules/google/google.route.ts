@@ -13,12 +13,71 @@ import {
 export const googleRouter = Router();
 googleRouter.use(requireAuth);
 
+function sanitizeFrontendOrigin(value: string | undefined | null) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function resolveFrontendOrigin(req: any) {
+  const queryOrigin = sanitizeFrontendOrigin(
+    typeof req.query?.frontendOrigin === 'string' ? req.query.frontendOrigin : undefined
+  );
+  if (queryOrigin) {
+    return queryOrigin;
+  }
+
+  const originHeader = sanitizeFrontendOrigin(req.get?.('origin'));
+  if (originHeader) {
+    return originHeader;
+  }
+
+  const referer = req.get?.('referer');
+  if (referer) {
+    const refererOrigin = sanitizeFrontendOrigin(referer);
+    if (refererOrigin) {
+      return refererOrigin;
+    }
+  }
+
+  const forwardedProto = req.get?.('x-forwarded-proto');
+  const forwardedHost = req.get?.('x-forwarded-host');
+  if (forwardedProto && forwardedHost) {
+    const forwardedOrigin = sanitizeFrontendOrigin(`${forwardedProto}://${forwardedHost}`);
+    if (forwardedOrigin) {
+      return forwardedOrigin;
+    }
+  }
+
+  const host = req.get?.('host');
+  if (host) {
+    const inferredOrigin = sanitizeFrontendOrigin(`${req.protocol}://${host}`);
+    if (inferredOrigin) {
+      return inferredOrigin;
+    }
+  }
+
+  return sanitizeFrontendOrigin(process.env.CLIENT_URL || process.env.FRONTEND_URL) || 'http://localhost:3000';
+}
+
 googleRouter.get('/connect', async (req: AuthedRequest, res) => {
   const returnTo = typeof req.query.returnTo === 'string' ? req.query.returnTo : '/settings';
   const url = buildGoogleAuthUrl({
     purpose: 'connect',
     userId: req.user!.id,
     returnTo,
+    frontendOrigin: resolveFrontendOrigin(req),
   });
 
   res.redirect(url);
@@ -30,6 +89,7 @@ googleRouter.get('/connect-url', async (req: AuthedRequest, res) => {
     purpose: 'connect',
     userId: req.user!.id,
     returnTo,
+    frontendOrigin: resolveFrontendOrigin(req),
   });
 
   res.json({ url });

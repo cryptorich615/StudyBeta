@@ -51,6 +51,7 @@ type ChatMessage = {
       key: string;
       label: string;
     }>;
+    researchUnavailable?: boolean;
     researchResult?: {
       kind: 'research_result';
       title: string;
@@ -84,7 +85,7 @@ type CommandHelpers = {
   switchModel: (modelKey: string) => Promise<void>;
 };
 
-type StudyMode = 'general' | 'explain' | 'quiz' | 'plan' | 'flashcards' | 'research';
+type StudyMode = 'general' | 'explain' | 'quiz' | 'plan' | 'flashcards' | 'research' | 'library';
 
 const studyModes: Array<{ key: StudyMode; label: string }> = [
   { key: 'general', label: 'Study chat' },
@@ -93,6 +94,7 @@ const studyModes: Array<{ key: StudyMode; label: string }> = [
   { key: 'plan', label: 'Study plan' },
   { key: 'flashcards', label: 'Flashcards' },
   { key: 'research', label: 'Research' },
+  { key: 'library', label: 'Books' },
 ];
 
 const starterPrompts = [
@@ -126,6 +128,12 @@ const starterPrompts = [
     prompt: 'Research this on the web, verify it carefully, and show me what you found:',
     mode: 'research' as StudyMode,
   },
+  {
+    label: 'Find a textbook',
+    description: 'Search books and textbooks first before broader web research.',
+    prompt: 'Find the best textbook or book for this class topic:',
+    mode: 'library' as StudyMode,
+  },
 ];
 
 const capabilityDefinitions = {
@@ -157,6 +165,13 @@ const capabilityDefinitions = {
     modeTitle: 'Backpack workflow',
     modeSummary: 'Works from uploaded notes, summaries, and saved material instead of only chat context.',
   },
+  library: {
+    label: 'Student library',
+    summary: 'Finds textbooks, editions, subject books, and easier alternatives using Open Library first.',
+    actionLabel: 'Find textbooks',
+    modeTitle: 'Student library',
+    modeSummary: 'Checks Open Library first for textbooks, subject books, editions, and cover-backed book details.',
+  },
 } as const;
 
 const slashCommands = [
@@ -187,6 +202,10 @@ const slashCommands = [
   {
     name: '/research',
     description: 'Switch into web research mode',
+  },
+  {
+    name: '/library',
+    description: 'Switch into textbook and book lookup mode',
   },
 ];
 
@@ -244,6 +263,8 @@ function buildPromptForMode(mode: StudyMode, prompt: string, hasAttachments: boo
     flashcards: 'Turn this into strong study flashcards: ',
     research:
       'Use the browser tool to research this carefully, verify the answer from the web, include direct source links, mention the sources you checked, and summarize what matters for a student: ',
+    library:
+      'Use the Open Library tools first to find the best textbooks, books, editions, subject matches, and easier alternatives for this request. Include cover or Open Library links when useful: ',
   };
 
   if (!trimmed && hasAttachments) {
@@ -292,14 +313,27 @@ function buildResearchActionText(entry: ChatMessage) {
     .trim();
 }
 
+function normalizeChatThread(thread: any): ChatThread | null {
+  const id = typeof thread?.id === 'string' ? thread.id.trim() : '';
+  if (!id) {
+    return null;
+  }
+
+  const lastMessageAt =
+    typeof thread?.last_message_at === 'string' && thread.last_message_at.trim()
+      ? thread.last_message_at
+      : new Date().toISOString();
+
+  return {
+    id,
+    title: typeof thread?.title === 'string' ? thread.title : null,
+    last_message_at: lastMessageAt,
+  };
+}
+
 export default function ChatPage() {
   const router = useRouter();
-  const isIntroFlow =
-    typeof window !== 'undefined' &&
-    (() => {
-      const searchParams = new URLSearchParams(window.location.search);
-      return searchParams.get('intro') === '1' || searchParams.get('bootstrap') === '1';
-    })();
+  const [isIntroFlow, setIsIntroFlow] = useState(false);
 
   const [message, setMessage] = useState('');
   const [sending, setSending] = useState(false);
@@ -327,6 +361,9 @@ export default function ChatPage() {
   useEffect(() => {
     setHasSession(!!readStoredSession()?.user?.id);
     if (typeof window === 'undefined') return;
+
+    const searchParams = new URLSearchParams(window.location.search);
+    setIsIntroFlow(searchParams.get('intro') === '1' || searchParams.get('bootstrap') === '1');
 
     const lastModelKey = window.localStorage.getItem(LAST_KNOWN_MODEL_KEY);
     const lastAgentName = window.localStorage.getItem(LAST_KNOWN_AGENT_NAME);
@@ -430,6 +467,8 @@ export default function ChatPage() {
         ? capabilityDefinitions.flashcards
         : studyMode === 'plan'
           ? capabilityDefinitions.plan
+          : studyMode === 'library'
+            ? capabilityDefinitions.library
           : {
               label: 'Study chat',
               summary: 'Explains, quizzes, and works from your study profile, reminders, and current thread.',
@@ -462,6 +501,13 @@ export default function ChatPage() {
       setStudyMode('plan');
       setMessage('Help me build a realistic study plan for this:');
       setFeedback('Planning mode is ready. Give StudyClaw a deadline, class, or workload to organize.');
+      return;
+    }
+
+    if (capabilityKey === 'library') {
+      setStudyMode('library');
+      setMessage('Find the best textbook or book for this topic:');
+      setFeedback('Book mode is ready. Ask for a textbook, edition comparison, or subject reading list.');
     }
   }
 
@@ -474,8 +520,10 @@ export default function ChatPage() {
         apiFetch('/api/onboarding/options'),
         apiFetch('/api/onboarding/status'),
       ]);
-      const optionsData = await optionsRes.json();
-      const statusData = await statusRes.json();
+      const [optionsData, statusData] = await Promise.all([
+        readApiPayload(optionsRes),
+        readApiPayload(statusRes),
+      ]);
 
       if (optionsRes.ok) {
         const configuredProvider = statusData?.credentials?.providerId;
@@ -499,7 +547,7 @@ export default function ChatPage() {
 
   async function loadUserProfile() {
     const response = await apiFetch('/api/user/profile');
-    const data = await response.json();
+    const data = await readApiPayload(response);
 
     if (!response.ok) {
       return;
@@ -562,29 +610,39 @@ export default function ChatPage() {
 
   async function startBootstrapConversation() {
     const response = await apiFetch('/api/onboarding/bootstrap/start', { method: 'POST' });
-    const data = await response.json();
+    const data = await readApiPayload(response);
 
     if (!response.ok) {
-      setFeedback(data.message || 'Failed to start bootstrap conversation');
+      setFeedback(getApiErrorMessage(data, 'Failed to start bootstrap conversation'));
       return;
     }
 
-    setThreads([data.thread]);
-    setActiveThreadId(data.thread.id);
+    const normalizedThread = normalizeChatThread(data.thread);
+    if (!normalizedThread) {
+      setFeedback('Bootstrap chat started, but the initial thread was malformed.');
+      return;
+    }
+
+    setThreads([normalizedThread]);
+    setActiveThreadId(normalizedThread.id);
     setMessages((data.messages ?? []).map(normalizeChatMessage));
   }
 
   async function loadThreads(preferredThreadId?: string) {
     const res = await apiFetch('/api/chat/threads');
-    const data = await res.json();
+    const data = await readApiPayload(res);
 
     if (!res.ok) {
-      setFeedback(data.message || 'Failed to load recent study sessions');
+      setFeedback(getApiErrorMessage(data, 'Failed to load recent study sessions'));
       return;
     }
 
-    setThreads(data);
-    const nextThreadId = preferredThreadId ?? activeThreadId ?? data[0]?.id ?? null;
+    const normalizedThreads = Array.isArray(data)
+      ? data.map(normalizeChatThread).filter((thread): thread is ChatThread => Boolean(thread))
+      : [];
+
+    setThreads(normalizedThreads);
+    const nextThreadId = preferredThreadId ?? activeThreadId ?? normalizedThreads[0]?.id ?? null;
 
     if (nextThreadId) {
       await loadThread(nextThreadId);
@@ -596,10 +654,10 @@ export default function ChatPage() {
 
   async function loadThread(threadId: string) {
     const res = await apiFetch(`/api/chat/threads/${threadId}`);
-    const data = await res.json();
+    const data = await readApiPayload(res);
 
     if (!res.ok) {
-      setFeedback(data.message || 'Failed to load study session');
+      setFeedback(getApiErrorMessage(data, 'Failed to load study session'));
       return;
     }
 
@@ -624,10 +682,10 @@ export default function ChatPage() {
           messageId,
         }),
       });
-      const data = await response.json();
+      const data = await readApiPayload(response);
 
       if (!response.ok) {
-        throw new Error(data.message || 'Failed to save research to notes');
+        throw new Error(getApiErrorMessage(data, 'Failed to save research to notes'));
       }
 
       setMessages((current) =>
@@ -809,6 +867,14 @@ export default function ChatPage() {
         },
       ],
       [
+        '/library',
+        async (helpers) => {
+          setStudyMode('library');
+          helpers.setFeedback('Book mode is on. Ask for a textbook, subject book list, or edition comparison.');
+          helpers.setMessage('');
+        },
+      ],
+      [
         '/models',
         async (helpers) => {
           await helpers.ensureModelsLoaded();
@@ -894,10 +960,10 @@ export default function ChatPage() {
           })),
         }),
       });
-      const data = await res.json();
+      const data = await readApiPayload(res);
       if (!res.ok) {
         setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
-        throw new Error(data.message || 'Failed to send message');
+        throw new Error(getApiErrorMessage(data, 'Failed to send message'));
       }
 
       setPendingDocuments([]);
@@ -997,6 +1063,11 @@ export default function ChatPage() {
                 key: 'plan',
                 ...capabilityDefinitions.plan,
                 active: studyMode === 'plan',
+              },
+              {
+                key: 'library',
+                ...capabilityDefinitions.library,
+                active: studyMode === 'library',
               },
               {
                 key: 'coach',

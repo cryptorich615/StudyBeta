@@ -269,25 +269,52 @@ export async function updateTopicMastery(input: UpdateTopicMasteryInput) {
     [topic.id, input.userId, nextScore, reviewedAt]
   );
 
-  await db.query(
-    `insert into progress_snapshots (
-       user_id, course_id, topic_id, source_event_id, snapshot_type, metric_key, metric_value, notes
-     )
-     values ($1, $2, $3, $4, $5, $6, $7, $8)
-     on conflict (source_event_id, metric_key) do update set
-       metric_value = excluded.metric_value,
-       notes = excluded.notes`,
-    [
-      input.userId,
-      topic.course_id ?? input.courseId ?? null,
-      topic.id,
-      input.sourceEventId ?? null,
-      'topic_mastery',
-      'mastery_score',
-      nextScore,
-      input.notes ?? null,
-    ]
-  );
+  if (input.sourceEventId) {
+    const updateResult = await db.query(
+      `update progress_snapshots
+       set metric_value = $3,
+           notes = $4
+       where source_event_id = $1
+         and metric_key = $2`,
+      [input.sourceEventId, 'mastery_score', nextScore, input.notes ?? null]
+    );
+
+    if (updateResult.rowCount === 0) {
+      await db.query(
+        `insert into progress_snapshots (
+           user_id, course_id, topic_id, source_event_id, snapshot_type, metric_key, metric_value, notes
+         )
+         values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          input.userId,
+          topic.course_id ?? input.courseId ?? null,
+          topic.id,
+          input.sourceEventId,
+          'topic_mastery',
+          'mastery_score',
+          nextScore,
+          input.notes ?? null,
+        ]
+      );
+    }
+  } else {
+    await db.query(
+      `insert into progress_snapshots (
+         user_id, course_id, topic_id, source_event_id, snapshot_type, metric_key, metric_value, notes
+       )
+       values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        input.userId,
+        topic.course_id ?? input.courseId ?? null,
+        topic.id,
+        null,
+        'topic_mastery',
+        'mastery_score',
+        nextScore,
+        input.notes ?? null,
+      ]
+    );
+  }
 
   console.info('[student-memory] updated topic mastery', {
     userId: input.userId,

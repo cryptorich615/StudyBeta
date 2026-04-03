@@ -1,5 +1,7 @@
 import { db } from './db';
 import { buildStudentContext, renderStudentMemoryContext } from './student-memory';
+import { buildGradeTrackerContext } from './grade-tracker';
+import { buildScheduleContext } from './class-scheduler';
 
 type AgentProfile = {
   openclaw_agent_id: string;
@@ -18,7 +20,26 @@ export async function loadAgentProfile(userId: string): Promise<AgentProfile | n
 }
 
 export async function buildStudyContext(userId: string, options?: { query?: string | null }) {
-  return buildStudentContext(userId, options);
+  const [studentContext, gradeContext, scheduleContext] = await Promise.all([
+    buildStudentContext(userId, options),
+    buildGradeTrackerContext(userId, options?.query).catch(() => ({
+      line: 'Grade tracker: none recorded yet.',
+      conceptLine: 'Wrong-answer patterns: none recorded yet.',
+    })),
+    buildScheduleContext(userId, { query: options?.query ?? null }).catch(() => ({
+      line: 'Schedule: none recorded yet.',
+      todayLine: 'Today\'s classes: none scheduled.',
+      detailLine: 'Relevant class detail: none matched yet.',
+      context: null,
+      referencedEntry: null,
+    })),
+  ]);
+
+  return {
+    ...studentContext,
+    grades: gradeContext,
+    schedule: scheduleContext,
+  };
 }
 
 export function buildStudyInstructions(systemPrompt: string, context: Awaited<ReturnType<typeof buildStudyContext>>) {
@@ -60,6 +81,11 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
       ? 'Upcoming calendar items: Google Calendar needs to be reconnected before StudyClaw can use it.'
       : 'Upcoming calendar items: none available';
   const memoryLines = context.memory ? renderStudentMemoryContext(context.memory) : null;
+  const gradeLine = context.grades?.line ?? 'Grade tracker: none recorded yet.';
+  const wrongAnswerLine = context.grades?.conceptLine ?? 'Wrong-answer patterns: none recorded yet.';
+  const scheduleLine = context.schedule?.line ?? 'Schedule: none recorded yet.';
+  const scheduleTodayLine = context.schedule?.todayLine ?? 'Today\'s classes: none scheduled.';
+  const scheduleDetailLine = context.schedule?.detailLine ?? 'Relevant class detail: none matched yet.';
 
   return [
     systemPrompt.trim(),
@@ -72,6 +98,11 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
     memoryLines?.progressLine ?? 'Relevant progress: none recorded yet',
     memoryLines?.assignmentLine ?? 'Tracked assignments: none recorded',
     memoryLines?.memoryLine ?? 'Long-term memory: none recorded yet',
+    gradeLine,
+    wrongAnswerLine,
+    scheduleLine,
+    scheduleTodayLine,
+    scheduleDetailLine,
     '',
     'Behavior rules:',
     `- Your configured assistant name is ${personaName}.`,
@@ -82,6 +113,11 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
     '- If the student asks for Google Calendar scheduling or live calendar data and Google is not connected, tell them to connect Google Calendar from the Calendar page before promising calendar actions.',
     '- Prefer concrete, prioritized study actions over generic encouragement.',
     '- When the student asks for current facts, source verification, live web research, or screenshots of what you found, use the browser capability instead of relying only on memory.',
+    '- When the student asks for textbooks, books by subject, editions, reading lists, book-based research, or an easier alternative to a dense book, use the Open Library tools first before broader web research.',
+    '- When the student asks about class grades, estimated averages, weighted categories, finals, or target scores, use the stored grade tracker data and say clearly when a result is only an estimate.',
+    '- When the student asks about missed questions or what they keep getting wrong, use the stored wrong-answer review patterns and explain the misconception in a supportive way.',
+    '- When the student asks about what class they have now, next, later today, by period, by time, by teacher, by room, or by notes, use the saved schedule context if it exists.',
+    '- Use the current or upcoming class context when it is genuinely helpful for school-related requests, but do not overstate certainty when the schedule is incomplete.',
     '- For browser-based research, prefer reliable educational or primary sources, summarize what you verified, and include direct source links in plain language whenever they are available.',
     '- Do not browse or continue if the destination is sexual, explicit, or otherwise inappropriate for students; explain briefly that the site is blocked.',
   ].join('\n');

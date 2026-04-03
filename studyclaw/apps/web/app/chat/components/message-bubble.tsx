@@ -9,6 +9,7 @@ type ChatEntry = {
       key: string;
       label: string;
     }>;
+    researchUnavailable?: boolean;
     researchResult?: {
       kind: 'research_result';
       title: string;
@@ -60,6 +61,7 @@ export default function MessageBubble({
 }: MessageBubbleProps) {
   const isAssistant = entry.role === 'assistant';
   const researchResult = entry.metadata?.researchResult;
+  const researchUnavailable = Boolean(entry.metadata?.researchUnavailable);
   const capabilityBadges = entry.metadata?.capabilityBadges ?? [];
   const isSavingResearch = savingResearchId === entry.id;
   const alreadySaved = Boolean(researchResult?.savedToBackpack || researchResult?.savedAssetId);
@@ -231,7 +233,7 @@ export default function MessageBubble({
           ))}
         </div>
       ) : null}
-      {isAssistant ? (
+      {isAssistant && !researchUnavailable ? (
         <div className="study-chat-bubble__actions">
           {assistantActions.map((action) => (
             <button key={action} type="button" className="study-chat-bubble__action" onClick={() => onAction(action)}>

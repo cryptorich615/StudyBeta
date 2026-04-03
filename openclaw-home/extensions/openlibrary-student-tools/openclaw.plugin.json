@@ -1,0 +1,33 @@
+{
+  "id": "openlibrary-student-tools",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "contactEmail": {
+        "type": "string"
+      },
+      "timeoutMs": {
+        "type": "number",
+        "minimum": 1000
+      },
+      "enableSearchInside": {
+        "type": "boolean"
+      }
+    }
+  },
+  "uiHints": {
+    "contactEmail": {
+      "label": "Contact Email",
+      "help": "Email address included in the Open Library user-agent string."
+    },
+    "timeoutMs": {
+      "label": "Timeout",
+      "help": "Request timeout in milliseconds for Open Library API calls."
+    },
+    "enableSearchInside": {
+      "label": "Enable Search Inside",
+      "help": "Turns on Open Library's experimental Search Inside support."
+    }
+  }
+}

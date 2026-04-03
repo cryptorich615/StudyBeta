@@ -21,7 +21,7 @@ export default function ChatHeader({
         <p className="study-chat-header__eyebrow">Study chat</p>
         <h1 className="study-chat-header__title">What are we studying today?</h1>
         <p className="study-chat-header__description">
-          Ask a homework question, paste notes, or use {agentName} for research, planning, reminders, and study tools.
+          Ask a homework question, paste notes, or use {agentName} for research, textbooks, planning, reminders, and study tools.
         </p>
       </div>
 

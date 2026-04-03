@@ -24,9 +24,14 @@ import {
 import {
     hasUsableStudySourceText,
     isRetryableGenerationError,
+    prepareStudySourceText,
     normalizeGenerationErrorMessage,
     normalizeStudySourceText,
 } from '../../lib/study-generation';
+import {
+    buildFallbackFlashcards,
+    buildFallbackQuiz,
+} from '../../lib/study-generation-fallback';
 
 export const studyToolsRouter = Router();
 studyToolsRouter.use(requireAuth);
@@ -440,6 +445,7 @@ studyToolsRouter.post('/flashcards', async (req: AuthedRequest, res) => {
         hasUsableStudySourceText(requestText)
             ? requestText
             : assetText || requestText;
+    const preparedSource = prepareStudySourceText(normalizedText);
 
     if (!normalizedTitle) {
         return res.status(400).json({
@@ -465,7 +471,7 @@ studyToolsRouter.post('/flashcards', async (req: AuthedRequest, res) => {
         });
     }
 
-    const context = await buildStudyContext(req.user!.id, { query: `${normalizedTitle}\n\n${normalizedText.slice(0, 600)}` });
+    const context = await buildStudyContext(req.user!.id, { query: `${normalizedTitle}\n\n${preparedSource.text.slice(0, 600)}` });
     const learnerLevel = audienceLevel || context.profile?.grade_year || context.profile?.school_level || 'current student level';
     const instructions = buildStudyInstructions(agent.system_prompt, context);
     const usageReservation = await reserveManagedUsageEvent({
@@ -501,9 +507,10 @@ Do not make every card use the same direction.
 Do not include any text outside the JSON.
 
 Notes:
-${normalizedText}
+${preparedSource.text}
 `;
     let reply;
+    let usedLocalFallback = false;
     try {
         reply = await requestOpenClawGeneration({
             userId: req.user!.id,
@@ -515,6 +522,8 @@ ${normalizedText}
                 feature: 'flashcards',
                 sourceAssetId,
                 subjectId,
+                sourceLength: preparedSource.originalLength,
+                sourceTruncated: preparedSource.wasTruncated,
             },
             kind: 'flashcards',
         });
@@ -523,37 +532,41 @@ ${normalizedText}
             error,
             kind: 'flashcards',
         });
-        await finalizeManagedUsageEvent({
-            eventId: usageEventId,
-            success: false,
-            metadata: {
-                error: error instanceof Error ? error.message : 'Flashcard generation failed',
-                normalizedMessage: message,
-            },
-        });
         if (error instanceof ManagedUsageLimitError) {
+            await finalizeManagedUsageEvent({
+                eventId: usageEventId,
+                success: false,
+                metadata: {
+                    error: error.message,
+                    normalizedMessage: message,
+                },
+            });
             return res.status(error.statusCode).json({
                 error: error.code,
                 message: error.message,
                 detail: error.detail,
             });
         }
-        return res.status(502).json({
-            error: 'openclaw_error',
-            message,
+        console.warn('[study-tools] falling back to local flashcard generation', {
+            userId: req.user!.id,
+            sourceAssetId: sourceAssetId ?? null,
+            message: error instanceof Error ? error.message : String(error ?? 'Unknown flashcard generation error'),
         });
+        usedLocalFallback = true;
     }
 
     let cards: { front: string; back: string }[] = [];
 
-    try {
-        const parsed = extractJsonPayload(reply.text);
-        cards = normalizeFlashcards(parsed);
-    } catch (_err) {
-        cards = parseFlashcardsFromPlainText(reply.text);
+    if (reply) {
+        try {
+            const parsed = extractJsonPayload(reply.text);
+            cards = normalizeFlashcards(parsed);
+        } catch (_err) {
+            cards = parseFlashcardsFromPlainText(reply.text);
+        }
     }
 
-    if (cards.length < MIN_FLASHCARDS) {
+    if (reply && cards.length < MIN_FLASHCARDS) {
         try {
             const repairedText = await repairStructuredReply(
                 req.user!.id,
@@ -573,6 +586,15 @@ ${normalizedText}
         } catch {
             // Preserve the original validation path below.
         }
+    }
+
+    if (cards.length < MIN_FLASHCARDS) {
+        cards = buildFallbackFlashcards({
+            title: normalizedTitle,
+            text: preparedSource.text,
+            desiredCount: 8,
+        });
+        usedLocalFallback = true;
     }
 
     if (cards.length < MIN_FLASHCARDS) {
@@ -665,9 +687,10 @@ ${normalizedText}
         eventId: usageEventId,
         success: true,
         metadata: {
-            outcome: 'flashcards_generated',
+            outcome: usedLocalFallback ? 'flashcards_generated_fallback' : 'flashcards_generated',
             flashcardSetId: createdSet.id,
             cardCount: cards.length,
+            provider: usedLocalFallback ? 'local_fallback' : getProviderKeyFromModelKey(agent.model_key),
         },
     });
 
@@ -676,11 +699,12 @@ ${normalizedText}
         cards,
         generation: {
             kind: 'flashcards',
-            modelKey: agent.model_key,
-            providerKey: getProviderKeyFromModelKey(agent.model_key),
-            providerLabel: formatProviderLabel(getProviderKeyFromModelKey(agent.model_key)),
+            modelKey: usedLocalFallback ? 'local-study-fallback' : agent.model_key,
+            providerKey: usedLocalFallback ? 'local_fallback' : getProviderKeyFromModelKey(agent.model_key),
+            providerLabel: usedLocalFallback ? 'StudyClaw Fallback' : formatProviderLabel(getProviderKeyFromModelKey(agent.model_key)),
             itemCount: cards.length,
             createdAt: new Date().toISOString(),
+            fallbackUsed: usedLocalFallback,
         },
     });
 });
@@ -705,6 +729,7 @@ studyToolsRouter.post('/quiz', async (req: AuthedRequest, res) => {
         hasUsableStudySourceText(requestText)
             ? requestText
             : assetText || requestText;
+    const preparedSource = prepareStudySourceText(normalizedText);
     const normalizedQuestionCount = clampQuestionCount(questionCount);
 
     if (!normalizedTitle) {
@@ -731,7 +756,7 @@ studyToolsRouter.post('/quiz', async (req: AuthedRequest, res) => {
         });
     }
 
-    const context = await buildStudyContext(req.user!.id, { query: `${normalizedTitle}\n\n${normalizedText.slice(0, 600)}` });
+    const context = await buildStudyContext(req.user!.id, { query: `${normalizedTitle}\n\n${preparedSource.text.slice(0, 600)}` });
     const learnerLevel = audienceLevel || context.profile?.grade_year || context.profile?.school_level || 'current student level';
     const instructions = buildStudyInstructions(agent.system_prompt, context);
     const usageReservation = await reserveManagedUsageEvent({
@@ -778,9 +803,10 @@ Keep the difficulty appropriate for ${learnerLevel}.
 Do not include any text outside the JSON.
 
 Notes:
-${normalizedText}
+${preparedSource.text}
 `;
     let reply;
+    let usedLocalFallback = false;
     try {
         reply = await requestOpenClawGeneration({
             userId: req.user!.id,
@@ -794,6 +820,8 @@ ${normalizedText}
                 subjectId,
                 questionCount: normalizedQuestionCount,
                 mode,
+                sourceLength: preparedSource.originalLength,
+                sourceTruncated: preparedSource.wasTruncated,
             },
             kind: 'quiz',
         });
@@ -802,25 +830,27 @@ ${normalizedText}
             error,
             kind: 'quiz',
         });
-        await finalizeManagedUsageEvent({
-            eventId: usageEventId,
-            success: false,
-            metadata: {
-                error: error instanceof Error ? error.message : 'Quiz generation failed',
-                normalizedMessage: message,
-            },
-        });
         if (error instanceof ManagedUsageLimitError) {
+            await finalizeManagedUsageEvent({
+                eventId: usageEventId,
+                success: false,
+                metadata: {
+                    error: error.message,
+                    normalizedMessage: message,
+                },
+            });
             return res.status(error.statusCode).json({
                 error: error.code,
                 message: error.message,
                 detail: error.detail,
             });
         }
-        return res.status(502).json({
-            error: 'openclaw_error',
-            message,
+        console.warn('[study-tools] falling back to local quiz generation', {
+            userId: req.user!.id,
+            sourceAssetId: sourceAssetId ?? null,
+            message: error instanceof Error ? error.message : String(error ?? 'Unknown quiz generation error'),
         });
+        usedLocalFallback = true;
     }
 
     let questions: {
@@ -831,34 +861,35 @@ ${normalizedText}
         explanation: string;
     }[] = [];
 
-    try {
-        const parsed = extractJsonPayload(reply.text);
-        questions = normalizeQuizQuestions(parsed);
-    } catch (_err) {
+    if (reply) {
         try {
-            const repairedText = await repairStructuredReply(
-                req.user!.id,
-                agent.openclaw_agent_id,
-                agent.model_key,
-                instructions,
-                reply.text,
-                'quiz'
-            );
-            const repairedParsed = extractJsonPayload(repairedText);
-            questions = normalizeQuizQuestions(repairedParsed);
-        } catch {
-            await finalizeManagedUsageEvent({
-                eventId: usageEventId,
-                success: false,
-                metadata: {
-                    outcome: 'parse_error',
-                },
-            });
-            return res.status(500).json({
-                error: 'parse_error',
-                message: 'StudyClaw generated a quiz reply that could not be read safely. Please try again.',
-            });
+            const parsed = extractJsonPayload(reply.text);
+            questions = normalizeQuizQuestions(parsed);
+        } catch (_err) {
+            try {
+                const repairedText = await repairStructuredReply(
+                    req.user!.id,
+                    agent.openclaw_agent_id,
+                    agent.model_key,
+                    instructions,
+                    reply.text,
+                    'quiz'
+                );
+                const repairedParsed = extractJsonPayload(repairedText);
+                questions = normalizeQuizQuestions(repairedParsed);
+            } catch {
+                usedLocalFallback = true;
+            }
         }
+    }
+
+    if (questions.length < MIN_QUIZ_QUESTIONS) {
+        questions = buildFallbackQuiz({
+            title: normalizedTitle,
+            text: preparedSource.text,
+            questionCount: normalizedQuestionCount,
+        });
+        usedLocalFallback = true;
     }
 
     if (questions.length < MIN_QUIZ_QUESTIONS) {
@@ -961,9 +992,10 @@ ${normalizedText}
         eventId: usageEventId,
         success: true,
         metadata: {
-            outcome: 'quiz_generated',
+            outcome: usedLocalFallback ? 'quiz_generated_fallback' : 'quiz_generated',
             quizId: createdQuiz.id,
             questionCount: questions.length,
+            provider: usedLocalFallback ? 'local_fallback' : getProviderKeyFromModelKey(agent.model_key),
         },
     });
 
@@ -972,11 +1004,12 @@ ${normalizedText}
         questions,
         generation: {
             kind: 'quiz',
-            modelKey: agent.model_key,
-            providerKey: getProviderKeyFromModelKey(agent.model_key),
-            providerLabel: formatProviderLabel(getProviderKeyFromModelKey(agent.model_key)),
+            modelKey: usedLocalFallback ? 'local-study-fallback' : agent.model_key,
+            providerKey: usedLocalFallback ? 'local_fallback' : getProviderKeyFromModelKey(agent.model_key),
+            providerLabel: usedLocalFallback ? 'StudyClaw Fallback' : formatProviderLabel(getProviderKeyFromModelKey(agent.model_key)),
             itemCount: questions.length,
             createdAt: new Date().toISOString(),
+            fallbackUsed: usedLocalFallback,
         },
     });
 });

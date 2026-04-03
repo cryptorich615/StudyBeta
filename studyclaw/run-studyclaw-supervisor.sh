@@ -91,6 +91,7 @@ build_web() {
   log "Building StudyClaw web"
   (
     cd "$ROOT_DIR/apps/web"
+    rm -rf .next
     exec "$NEXT_BIN" build >>"$LOG_DIR/web-build.log" 2>&1
   )
 }

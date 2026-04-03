@@ -68,7 +68,12 @@ export function getApiErrorMessage(payload: any, fallback: string) {
 }
 
 export async function beginGoogleConnect(returnTo: string) {
-  const response = await apiFetch(`/api/google/connect-url?returnTo=${encodeURIComponent(returnTo)}`);
+  const params = new URLSearchParams({ returnTo });
+  if (typeof window !== 'undefined') {
+    params.set('frontendOrigin', window.location.origin);
+  }
+
+  const response = await apiFetch(`/api/google/connect-url?${params.toString()}`);
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok || !payload?.url) {

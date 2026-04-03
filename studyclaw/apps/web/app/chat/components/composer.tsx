@@ -107,7 +107,7 @@ export default function Composer(props: ComposerProps) {
             }
           }}
           rows={4}
-          placeholder="Ask a question, paste notes, or switch to Research mode when you want StudyClaw to browse and verify the answer."
+          placeholder="Ask a question, paste notes, switch to Research for live sources, or use Books mode when you want StudyClaw to find textbooks and editions."
           className="study-chat-composer__textarea"
         />
 

@@ -283,7 +283,7 @@ coachRouter.post('/assets/:assetId/action-items/reminder', async (req: AuthedReq
          and coalesce(metadata_json->>'source', '') = 'backpack_action_item'
          and coalesce(metadata_json->>'sourceAssetId', '') = $3
          and coalesce(metadata_json->>'actionItem', '') = $4
-         and status <> 'completed'
+         and status in ('pending', 'scheduled', 'sent')
        order by reminder_at asc
        limit 1`,
       [req.user!.id, reminderPlan.title, asset.id, matchedActionItem]
@@ -451,7 +451,7 @@ ${text}
 `;
 
   const context = isAdmin
-    ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] } }
+    ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] }, grades: { line: 'Grade tracker: unavailable for admin mode.', conceptLine: 'Wrong-answer patterns: unavailable for admin mode.' }, schedule: { line: 'Schedule: unavailable for admin mode.', todayLine: 'Today\'s classes: unavailable for admin mode.', detailLine: 'Relevant class detail: unavailable for admin mode.', context: null, referencedEntry: null } }
     : await buildStudyContext(req.user!.id, { query: `${title}\n\n${text.slice(0, 600)}` });
   const usageReservation = isAdmin
     ? { eventId: null as string | null }

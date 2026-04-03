@@ -2,6 +2,9 @@ import './globals.css';
 import AppChrome from './components/app-chrome';
 import { ThemeProvider } from './components/theme-provider';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 export const metadata = {
     title: 'StudyClaw',
     description:

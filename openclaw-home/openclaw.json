@@ -562,6 +562,9 @@
   },
   "plugins": {
     "entries": {
+      "openlibrary-student-tools": {
+        "enabled": true
+      },
       "telegram": {
         "enabled": true
       }

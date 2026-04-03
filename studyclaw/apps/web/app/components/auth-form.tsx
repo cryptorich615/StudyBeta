@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ArrowRight, CheckCircle2, LockKeyhole, Mail } from 'lucide-react';
 import { Button } from './ui/button';
-import { apiFetch, resolveApiUrl } from '../../lib/api';
+import { apiFetch, getApiErrorMessage, readApiPayload, resolveApiUrl } from '../../lib/api';
 import { isOnboardingComplete, readStoredSession, writeStoredSession, type StoredSession } from '../../lib/session';
 
 type Mode = 'login' | 'signup';
@@ -57,11 +57,16 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
   );
 
   const handleGoogleLogin = () => {
-    window.location.assign(resolveApiUrl('/api/auth/google'));
+    const url = new URL(resolveApiUrl('/api/auth/google'));
+    url.searchParams.set('frontendOrigin', window.location.origin);
+    window.location.assign(url.toString());
   };
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isSubmitting) {
+      return;
+    }
     setIsSubmitting(true);
     setShakeError(false);
     setStatus(mode === 'signup' ? 'Creating your account...' : 'Signing you in...');
@@ -72,15 +77,20 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
         method: 'POST',
         body: JSON.stringify({ email, password }),
       });
-
-      const data = (await response.json()) as StoredSession & {
+      const data = (await readApiPayload(response)) as StoredSession & {
         message?: string;
         existingUser?: boolean;
         onboardingComplete?: boolean;
       };
 
       if (!response.ok) {
-        throw new Error(data?.message ?? (mode === 'signup' ? 'Unable to create account' : 'Unable to log in'));
+        throw new Error(
+          getApiErrorMessage(data, mode === 'signup' ? 'Unable to create account' : 'Unable to log in')
+        );
+      }
+
+      if (!data?.accessToken || !data?.user?.id) {
+        throw new Error('Authentication succeeded but no session was returned. Please try again.');
       }
 
       writeStoredSession(data);
@@ -98,7 +108,8 @@ export default function AuthForm({ initialMode = 'signup' }: AuthFormProps) {
           : 'Signed in. Opening your workspace...'
       );
 
-      router.push(nextPath);
+      router.replace(nextPath);
+      router.refresh();
     } catch (error: any) {
       setStatus(error.message ?? (mode === 'signup' ? 'Signup failed' : 'Sign in failed'));
       setShakeError(true);

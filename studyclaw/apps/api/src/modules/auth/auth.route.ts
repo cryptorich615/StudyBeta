@@ -9,6 +9,64 @@ import { logAdminAuditEvent } from '../../lib/admin-ops';
 
 export const authRouter = Router();
 
+function sanitizeFrontendOrigin(value: string | undefined | null) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function resolveFrontendOrigin(req: Parameters<typeof authRouter.get>[1] extends never ? never : any) {
+  const queryOrigin = sanitizeFrontendOrigin(
+    typeof req.query?.frontendOrigin === 'string' ? req.query.frontendOrigin : undefined
+  );
+  if (queryOrigin) {
+    return queryOrigin;
+  }
+
+  const originHeader = sanitizeFrontendOrigin(req.get?.('origin'));
+  if (originHeader) {
+    return originHeader;
+  }
+
+  const referer = req.get?.('referer');
+  if (referer) {
+    const refererOrigin = sanitizeFrontendOrigin(referer);
+    if (refererOrigin) {
+      return refererOrigin;
+    }
+  }
+
+  const forwardedProto = req.get?.('x-forwarded-proto');
+  const forwardedHost = req.get?.('x-forwarded-host');
+  if (forwardedProto && forwardedHost) {
+    const forwardedOrigin = sanitizeFrontendOrigin(`${forwardedProto}://${forwardedHost}`);
+    if (forwardedOrigin) {
+      return forwardedOrigin;
+    }
+  }
+
+  const host = req.get?.('host');
+  if (host) {
+    const inferredOrigin = sanitizeFrontendOrigin(`${req.protocol}://${host}`);
+    if (inferredOrigin) {
+      return inferredOrigin;
+    }
+  }
+
+  return sanitizeFrontendOrigin(process.env.CLIENT_URL || process.env.FRONTEND_URL) || 'http://localhost:3000';
+}
+
 function resolveOnboardingComplete(user: { role?: string | null }, onboardingComplete?: boolean | null) {
   if (user.role === 'admin') {
     return true;
@@ -46,7 +104,10 @@ authRouter.get('/me', requireAuth, async (req: AuthedRequest, res) => {
 });
 
 authRouter.get('/google', (req, res) => {
-  const url = buildGoogleAuthUrl({ purpose: 'signin' });
+  const url = buildGoogleAuthUrl({
+    purpose: 'signin',
+    frontendOrigin: resolveFrontendOrigin(req),
+  });
   console.log('Initiating Google OAuth redirect to:', url);
   res.redirect(url);
 });
@@ -62,7 +123,9 @@ authRouter.get('/google/callback', async (req, res) => {
     const state = decodeGoogleAuthState(typeof req.query.state === 'string' ? req.query.state : undefined);
     const { tokens, userInfo } = await exchangeGoogleCode(code as string);
     const { email, name, sub: googleId } = userInfo;
-    const frontendUrl = process.env.CLIENT_URL || process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = sanitizeFrontendOrigin(state?.frontendOrigin)
+      || sanitizeFrontendOrigin(process.env.CLIENT_URL || process.env.FRONTEND_URL)
+      || 'http://localhost:3000';
 
     if (state?.purpose === 'connect') {
       if (!state.userId) {
@@ -176,8 +239,7 @@ authRouter.get('/google/callback', async (req, res) => {
     };
 
     const encodedSession = Buffer.from(JSON.stringify(session), 'utf8').toString('base64url');
-    const targetPath = onboardingComplete ? '/dashboard' : '/onboarding';
-    res.redirect(`${frontendUrl}${targetPath}?payload=${encodeURIComponent(encodedSession)}`);
+    res.redirect(`${frontendUrl}/auth/callback?payload=${encodeURIComponent(encodedSession)}`);
   } catch (error) {
     console.error('Google Auth Error:', error);
     res.status(500).send('Authentication failed');
