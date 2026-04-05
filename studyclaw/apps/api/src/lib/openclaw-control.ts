@@ -99,6 +99,61 @@ type CronListResponse = {
   jobs?: CronJobRecord[];
 };
 
+const SKILL_PRESENTATION_MAP: Record<string, { label: string; description?: string }> = {
+  'study-library': {
+    label: 'Student library',
+    description: 'Book discovery, textbook lookup, and reading-oriented research using Open Library first.',
+  },
+  'grade-tracker': {
+    label: 'Grade tracker',
+    description: 'Estimated grades, target-score math, and wrong-answer review grounded in saved class data.',
+  },
+  'class-scheduler': {
+    label: 'Class scheduler',
+    description: 'Current class, next class, room, teacher, and schedule-aware tutoring context.',
+  },
+  'study-habits': {
+    label: 'Study habits',
+    description: 'Routine, focus, and consistency coaching tied to the student’s real workload.',
+  },
+  'study-buddy-ai': {
+    label: 'Study buddy AI',
+    description: 'General-purpose study companion behavior that turns conversation into useful actions.',
+  },
+  'study-tutor': {
+    label: 'Study tutor',
+    description: 'Step-by-step explanations, examples, misconceptions, and guided practice.',
+  },
+  'course-study': {
+    label: 'Course study',
+    description: 'Course-specific study planning using grades, assignments, schedule, and weak-topic context.',
+  },
+  'study-buddy': {
+    label: 'Study buddy',
+    description: 'Short, practical accountability support to keep students moving through work.',
+  },
+  'study-revision-planner': {
+    label: 'Revision planner',
+    description: 'Exam and revision plans built from real deadlines, weak topics, and available time.',
+  },
+  'learn-cog': {
+    label: 'Learn cog',
+    description: 'Multi-angle teaching with analogies, examples, and layered explanations.',
+  },
+  exam: {
+    label: 'Exam prep',
+    description: 'Exam-focused prioritization, last-minute review plans, and risk-aware prep advice.',
+  },
+  'learning-optimizer': {
+    label: 'Learning optimizer',
+    description: 'Uses saved student data to improve study order, time use, and review strategy.',
+  },
+  'google-workspace': {
+    label: 'Google workspace',
+    description: 'Uses StudyClaw’s connected Google account for calendar, Drive, Docs, Sheets, and Slides context.',
+  },
+};
+
 function stripAnsi(value: string) {
   return value.replace(
     // eslint-disable-next-line no-control-regex
@@ -323,7 +378,14 @@ function parseSkillRows(output: string) {
   const items = mergedRows.map((item) => ({
     ...item,
     name: item.name.replace(/^[^\w]+/, '').trim(),
-  }));
+  })).map((item) => {
+    const presentation = SKILL_PRESENTATION_MAP[item.name];
+    return {
+      ...item,
+      displayName: presentation?.label ?? item.name,
+      description: presentation?.description ?? item.description,
+    };
+  });
 
   return {
     readyCount: skillCountMatch ? Number(skillCountMatch[1]) : items.filter((item) => item.status === 'ready').length,

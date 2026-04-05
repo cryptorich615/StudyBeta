@@ -37,6 +37,7 @@ const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH ?? '/home/ubuntu/.
 const execFileAsync = promisify(execFile);
 const REQUIRED_DEFAULT_MODEL_KEYS = [
   'openrouter/auto',
+  'minimax/MiniMax-M2.7',
   'openrouter/free',
   'ollama/lfm2.5-thinking:latest',
 ] as const;
@@ -204,6 +205,7 @@ export async function loadOpenClawModels(): Promise<OpenClawModelOption[]> {
   );
   const preferredKeys = getPreferredModelKeys(config);
   const { stdout } = await execFileAsync('openclaw', ['models', 'list', '--all', '--json'], {
+    timeout: 12_000,
     maxBuffer: 16 * 1024 * 1024,
   });
   const payload = JSON.parse(extractJsonPayload(stdout)) as {

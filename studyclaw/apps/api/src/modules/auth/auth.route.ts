@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { hashPassword, issueAccessToken, requireAuth, type AuthedRequest, verifyPassword } from '../../lib/auth';
 import { db } from '../../lib/db';
 import { ensureAdminAgent } from '../../lib/user-agent';
-import { buildGoogleAuthUrl, decodeGoogleAuthState, exchangeGoogleCode, saveUserGoogleTokens, syncGoogleSkillForUser } from '../../lib/google-service';
+import { buildGoogleAuthUrl, decodeGoogleAuthState, exchangeGoogleCode, getGoogleScopesForPurpose, saveUserGoogleTokens, syncGoogleSkillForUser } from '../../lib/google-service';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
 import { getUserUsageSnapshot } from '../../lib/managed-usage';
 import { logAdminAuditEvent } from '../../lib/admin-ops';
@@ -83,6 +83,28 @@ function sanitizeFrontendPath(value: string | undefined, fallbackPath: string) {
   return value;
 }
 
+async function ensureStudentProfileRecord(userId: string) {
+  await db.query(
+    `insert into student_profiles (user_id)
+     values ($1)
+     on conflict (user_id) do nothing`,
+    [userId]
+  );
+}
+
+async function getUsageSnapshotOrNull(userId: string, context: string) {
+  try {
+    return await getUserUsageSnapshot(userId);
+  } catch (error) {
+    console.warn('[auth] usage snapshot lookup failed', {
+      context,
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
 authRouter.get('/me', requireAuth, async (req: AuthedRequest, res) => {
   await ensurePlatformSchema();
   const [userResult, usageProfileResult, studentProfileResult] = await Promise.all([
@@ -126,15 +148,32 @@ authRouter.get('/google/callback', async (req, res) => {
     const frontendUrl = sanitizeFrontendOrigin(state?.frontendOrigin)
       || sanitizeFrontendOrigin(process.env.CLIENT_URL || process.env.FRONTEND_URL)
       || 'http://localhost:3000';
+    console.info('[auth] google signin callback received', {
+      email,
+      frontendUrl,
+      hasName: !!name,
+      hasAccessToken: !!tokens.access_token,
+    });
 
     if (state?.purpose === 'connect') {
+      console.info('[google] oauth callback for calendar connect', {
+        userId: state.userId ?? null,
+        hasAccessToken: !!tokens.access_token,
+        hasRefreshToken: !!tokens.refresh_token,
+        scopeCount: String(tokens.scope ?? '').split(/\s+/).filter(Boolean).length,
+      });
+
       if (!state.userId) {
         return res.status(400).send('Missing user context');
       }
 
-      if (!tokens.access_token || !tokens.expiry_date) {
+      if (!tokens.access_token) {
         return res.status(500).send('Google connection did not return access tokens');
       }
+
+      const expiresAt = tokens.expiry_date
+        ? new Date(tokens.expiry_date)
+        : new Date(Date.now() + 55 * 60 * 1000);
 
       await saveUserGoogleTokens({
         userId: state.userId,
@@ -142,9 +181,15 @@ authRouter.get('/google/callback', async (req, res) => {
         googleEmail: email,
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token ?? null,
-        scope: tokens.scope ?? '',
+        scope: tokens.scope ?? getGoogleScopesForPurpose('connect').join(' '),
         tokenType: tokens.token_type ?? 'Bearer',
-        expiresAt: new Date(tokens.expiry_date),
+        expiresAt,
+      });
+      console.info('[google] oauth tokens persisted', {
+        userId: state.userId,
+        googleEmail: email,
+        hasRefreshToken: !!tokens.refresh_token,
+        expiresAt: expiresAt.toISOString(),
       });
       await syncGoogleSkillForUser(state.userId).catch(() => undefined);
 
@@ -189,6 +234,10 @@ authRouter.get('/google/callback', async (req, res) => {
       user.role = isAdmin ? 'admin' : user.role ?? 'student';
     }
 
+    if (user.role !== 'admin') {
+      await ensureStudentProfileRecord(user.id);
+    }
+
     if (isAdmin) {
       const adminAgent = await ensureAdminAgent({ ownerUserId: user.id, email: user.email });
       await db.query(
@@ -219,7 +268,7 @@ authRouter.get('/google/callback', async (req, res) => {
 
     const accessToken = issueAccessToken(user);
     const onboardingComplete = resolveOnboardingComplete(user, user.onboarding_complete);
-    const usageProfile = await getUserUsageSnapshot(user.id);
+    const usageProfile = await getUsageSnapshotOrNull(user.id, 'google_callback');
     if (user.role === 'admin') {
       await logAdminAuditEvent({
         actorUserId: user.id,

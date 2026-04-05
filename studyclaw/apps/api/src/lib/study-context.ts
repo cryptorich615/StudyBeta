@@ -2,6 +2,7 @@ import { db } from './db';
 import { buildStudentContext, renderStudentMemoryContext } from './student-memory';
 import { buildGradeTrackerContext } from './grade-tracker';
 import { buildScheduleContext } from './class-scheduler';
+import { getGoogleIntegration, listRecentDriveFiles } from './google-service';
 
 type AgentProfile = {
   openclaw_agent_id: string;
@@ -20,7 +21,10 @@ export async function loadAgentProfile(userId: string): Promise<AgentProfile | n
 }
 
 export async function buildStudyContext(userId: string, options?: { query?: string | null }) {
-  const [studentContext, gradeContext, scheduleContext] = await Promise.all([
+  const shouldLoadGoogleWorkspace =
+    typeof options?.query === 'string' && /\b(google|drive|docs?|sheets?|slides?)\b/i.test(options.query);
+
+  const [studentContext, gradeContext, scheduleContext, googleWorkspace] = await Promise.all([
     buildStudentContext(userId, options),
     buildGradeTrackerContext(userId, options?.query).catch(() => ({
       line: 'Grade tracker: none recorded yet.',
@@ -33,12 +37,19 @@ export async function buildStudyContext(userId: string, options?: { query?: stri
       context: null,
       referencedEntry: null,
     })),
+    shouldLoadGoogleWorkspace
+      ? Promise.all([
+          getGoogleIntegration(userId).catch(() => null),
+          listRecentDriveFiles(userId, 5).catch(() => []),
+        ]).then(([status, files]) => ({ status, files }))
+      : Promise.resolve({ status: null, files: [] as Array<{ name?: string | null; mimeType?: string | null; modifiedTime?: string | null }> }),
   ]);
 
   return {
     ...studentContext,
     grades: gradeContext,
     schedule: scheduleContext,
+    googleWorkspace,
   };
 }
 
@@ -86,6 +97,23 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
   const scheduleLine = context.schedule?.line ?? 'Schedule: none recorded yet.';
   const scheduleTodayLine = context.schedule?.todayLine ?? 'Today\'s classes: none scheduled.';
   const scheduleDetailLine = context.schedule?.detailLine ?? 'Relevant class detail: none matched yet.';
+  const googleWorkspaceLine = context.googleWorkspace?.status
+    ? context.googleWorkspace.status.connected
+      ? `Google workspace: connected for ${context.googleWorkspace.status.googleEmail ?? 'this account'}${
+          context.googleWorkspace.status.canUseWorkspaceSkill
+            ? ` (Calendar${context.googleWorkspace.status.canReadDrive ? ', Drive' : ''}${context.googleWorkspace.status.canUseDocs ? ', Docs' : ''}${context.googleWorkspace.status.canUseSheets ? ', Sheets' : ''}${context.googleWorkspace.status.canUseSlides ? ', Slides' : ''})`
+            : ''
+        }`
+      : context.googleWorkspace.status.needsReconnect
+        ? 'Google workspace: reconnect required before StudyClaw can use Calendar, Drive, Docs, Sheets, or Slides.'
+        : 'Google workspace: not connected.'
+    : 'Google workspace: not requested in this chat context.';
+  const googleWorkspaceFilesLine =
+    context.googleWorkspace?.files?.length
+      ? `Recent Google files: ${context.googleWorkspace.files
+          .map((file) => `${file.name ?? 'Untitled'} (${file.mimeType ?? 'unknown type'}${file.modifiedTime ? `, ${file.modifiedTime}` : ''})`)
+          .join(' | ')}`
+      : 'Recent Google files: none loaded.';
 
   return [
     systemPrompt.trim(),
@@ -103,6 +131,8 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
     scheduleLine,
     scheduleTodayLine,
     scheduleDetailLine,
+    googleWorkspaceLine,
+    googleWorkspaceFilesLine,
     '',
     'Behavior rules:',
     `- Your configured assistant name is ${personaName}.`,
@@ -111,9 +141,16 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
     '- Base your response on the student context when it is relevant.',
     '- If app data is missing, say so plainly instead of pretending the data exists.',
     '- If the student asks for Google Calendar scheduling or live calendar data and Google is not connected, tell them to connect Google Calendar from the Calendar page before promising calendar actions.',
+    '- Do not ask the student to run or authenticate a separate Google CLI tool. Use StudyClaw’s connected Google integration instead.',
+    '- If the student asks for Google Drive, Docs, Sheets, or Slides help and the Google workspace connection is missing or incomplete, tell them to reconnect Google from the Calendar page so StudyClaw can request the needed workspace permissions.',
     '- Prefer concrete, prioritized study actions over generic encouragement.',
     '- When the student asks for current facts, source verification, live web research, or screenshots of what you found, use the browser capability instead of relying only on memory.',
     '- When the student asks for textbooks, books by subject, editions, reading lists, book-based research, or an easier alternative to a dense book, use the Open Library tools first before broader web research.',
+    '- When the student asks about procrastination, focus, study consistency, or building better routines, use the study-habits and learning-optimizer guidance to propose realistic changes tied to their real schedule.',
+    '- When the student asks for step-by-step teaching, multiple explanations, analogies, or worked examples, use the study-tutor and learn-cog guidance so the explanation adapts instead of repeating itself.',
+    '- When the student asks how to study for a specific class, use the course-study guidance with their grades, assignments, schedule, wrong-answer patterns, and saved materials.',
+    '- When the student asks for revision plans, cram plans, or exam preparation, use the study-revision-planner and exam guidance with their real dates, weak areas, and available time.',
+    '- When the student wants a general study partner or check-in, use the study-buddy guidance to move the conversation toward a concrete next action inside StudyClaw.',
     '- When the student asks about class grades, estimated averages, weighted categories, finals, or target scores, use the stored grade tracker data and say clearly when a result is only an estimate.',
     '- When the student asks about missed questions or what they keep getting wrong, use the stored wrong-answer review patterns and explain the misconception in a supportive way.',
     '- When the student asks about what class they have now, next, later today, by period, by time, by teacher, by room, or by notes, use the saved schedule context if it exists.',

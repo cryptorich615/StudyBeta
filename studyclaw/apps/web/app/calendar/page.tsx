@@ -16,9 +16,45 @@ type CalendarEvent = {
 };
 
 type ConnectionStatus = 'not_connected' | 'connecting' | 'connected' | 'reconnect_required' | 'disconnected';
+type GoogleStatusPayload = {
+  status?: 'not_connected' | 'connected' | 'reconnect_required';
+  connected?: boolean;
+  needsReconnect?: boolean;
+  googleEmail?: string | null;
+  account?: string | null;
+  hasAccessToken?: boolean;
+  hasRefreshToken?: boolean;
+  lastSyncAt?: string | null;
+  error?: string | null;
+};
+
+function dedupeEvents(events: CalendarEvent[]) {
+  const seen = new Set<string>();
+  return events.filter((event) => {
+    const key = `${event.id}|${event.startsAt ?? ''}|${event.endsAt ?? ''}|${event.title}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function isAllDayEvent(dateTime: string | null) {
+  return !!dateTime && /^\d{4}-\d{2}-\d{2}$/.test(dateTime);
+}
 
 function formatEventDateTime(dateTime: string | null) {
   if (!dateTime) return 'All day';
+  if (isAllDayEvent(dateTime)) {
+    const [year, month, day] = dateTime.split('-').map(Number);
+    const date = new Date(year, month - 1, day);
+    return date.toLocaleDateString([], {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+    });
+  }
   const date = new Date(dateTime);
   return date.toLocaleString([], {
     weekday: 'short',
@@ -31,6 +67,7 @@ function formatEventDateTime(dateTime: string | null) {
 
 function formatEventTime(dateTime: string | null) {
   if (!dateTime) return '';
+  if (isAllDayEvent(dateTime)) return 'All day';
   const date = new Date(dateTime);
   return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
@@ -54,6 +91,7 @@ function CalendarPageContent() {
   const [error, setError] = useState('');
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('not_connected');
   const [googleEmail, setGoogleEmail] = useState<string | null>(null);
+  const [googleMeta, setGoogleMeta] = useState<GoogleStatusPayload | null>(null);
   const [showSuccess, setShowSuccess] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const searchParams = useSearchParams();
@@ -69,7 +107,6 @@ function CalendarPageContent() {
 
     if (searchParams.get('connected') === 'true' || searchParams.get('google') === 'connected') {
       setShowSuccess(true);
-      setConnectionStatus('connected');
       setTimeout(() => setShowSuccess(false), 5000);
     }
   }, [searchParams]);
@@ -81,16 +118,37 @@ function CalendarPageContent() {
     if (hasSession !== true) return;
     try {
       const res = await apiFetch('/api/google');
-      const data = await res.json();
+      const data = (await res.json()) as GoogleStatusPayload;
+      if (!res.ok) {
+        throw new Error(typeof data?.error === 'string' ? data.error : 'Failed to load Google status');
+      }
+
+      setGoogleMeta(data);
       setGoogleEmail(data.googleEmail ?? data.account ?? null);
       setConnectionStatus(
-        data.status === 'connected' || data.status === 'reconnect_required'
-          ? data.status
-          : 'not_connected'
+        data.connected
+          ? 'connected'
+          : data.status === 'reconnect_required' || data.needsReconnect
+            ? 'reconnect_required'
+            : 'not_connected'
       );
-    } catch {
+
+      if (!data.connected && (searchParams.get('connected') === 'true' || searchParams.get('google') === 'connected')) {
+        setError(
+          data.error === 'missing_calendar_scope'
+            ? 'Google sign-in finished, but Calendar permission was not granted. Reconnect Google Calendar and allow calendar access.'
+            : 'Google returned to StudyClaw, but Calendar is not fully connected yet. Try reconnecting once.'
+        );
+      } else if (data.connected) {
+        setError('');
+      }
+    } catch (statusError) {
+      setGoogleMeta(null);
       setGoogleEmail(null);
       setConnectionStatus('not_connected');
+      setError(
+        statusError instanceof Error ? statusError.message : 'Failed to check Google Calendar connection'
+      );
     }
   }
 
@@ -104,14 +162,29 @@ function CalendarPageContent() {
         const data = await res.json();
         if (res.status === 400 && (data.error === 'not_connected' || data.error === 'reconnect_required' || data.connected === false)) {
           setConnectionStatus(data.status === 'reconnect_required' ? 'reconnect_required' : 'not_connected');
+          setGoogleMeta((current) => ({
+            ...(current ?? {}),
+            status: data.status,
+            connected: false,
+            needsReconnect: data.status === 'reconnect_required',
+            error: typeof data.error === 'string' ? data.error : null,
+          }));
+          setError(typeof data.message === 'string' ? data.message : '');
           setLoading(false);
           return;
         }
         throw new Error(data.message || 'Failed to fetch');
       }
       const data = await res.json();
-      setEvents(Array.isArray(data) ? data : []);
+      setEvents(Array.isArray(data) ? dedupeEvents(data) : []);
       setConnectionStatus('connected');
+      setGoogleMeta((current) => ({
+        ...(current ?? {}),
+        status: 'connected',
+        connected: true,
+        lastSyncAt: new Date().toISOString(),
+        error: null,
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load events');
     } finally {
@@ -294,6 +367,16 @@ function CalendarPageContent() {
                 <p className="muted-copy" style={{ margin: '8px 0 0' }}>
                   Allow AI scheduling. Sync study sessions and deadlines.
                 </p>
+                {googleMeta?.error ? (
+                  <p className="muted-copy" style={{ margin: '8px 0 0', color: 'var(--danger)' }}>
+                    Connection detail: {googleMeta.error}
+                  </p>
+                ) : null}
+                {googleMeta?.lastSyncAt ? (
+                  <p className="muted-copy" style={{ margin: '8px 0 0' }}>
+                    Last checked: {new Date(googleMeta.lastSyncAt).toLocaleString()}
+                  </p>
+                ) : null}
               </div>
             </div>
 

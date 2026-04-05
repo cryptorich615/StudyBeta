@@ -103,7 +103,13 @@ function getProviderDefaults(
   const baseUrl =
     serviceBaseUrl?.trim() ||
     configuredProvider?.baseUrl ||
-    (providerId === 'ollama' ? 'http://127.0.0.1:11434' : providerId === 'openrouter' ? 'https://openrouter.ai/api/v1' : '');
+    (providerId === 'ollama'
+      ? 'http://127.0.0.1:11434'
+      : providerId === 'openrouter'
+        ? 'https://openrouter.ai/api/v1'
+        : providerId === 'google'
+          ? 'https://generativelanguage.googleapis.com/v1beta/openai/'
+          : '');
   const apiType =
     configuredProvider?.api ||
     (providerId === 'ollama'

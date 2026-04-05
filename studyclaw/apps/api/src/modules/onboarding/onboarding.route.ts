@@ -14,7 +14,7 @@ import {
 } from '../../lib/user-agent';
 import { getGoogleConnectionStatus } from '../../lib/google-service';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
-import { syncUserModelRuntimeConfig } from '../../lib/model-settings';
+import { saveUserModelSetting, syncUserModelRuntimeConfig } from '../../lib/model-settings';
 import {
   assignTestingTier,
   attachByokUsage,
@@ -29,6 +29,13 @@ const LOCAL_PROVIDER_PLACEHOLDER_KEYS: Record<string, string> = {
   ollama: 'local-ollama-no-key-required',
 };
 const DEFAULT_ONBOARDING_MODELS = [
+  {
+    key: 'google/gemini-3.1-pro-preview',
+    name: 'Gemini 3.1 Pro Preview',
+    provider: 'google',
+    oauthAvailable: false,
+    available: true,
+  },
   {
     key: 'openrouter/auto',
     name: 'OpenRouter Auto',
@@ -75,12 +82,44 @@ const DEFAULT_ONBOARDING_MODELS = [
 
 type AgentType = 'custom' | 'quick_start_1' | 'quick_start_2';
 
+const ADVANCED_PROVIDER_BASE_URLS: Record<string, string> = {
+  google: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+  gemini: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+  openrouter: 'https://openrouter.ai/api/v1',
+  minimax: 'https://api.minimax.io/anthropic',
+  ollama: 'http://127.0.0.1:11434',
+  openai: 'https://api.openai.com/v1',
+  'openai-codex': 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com/v1',
+  groq: 'https://api.groq.com/openai/v1',
+  mistral: 'https://api.mistral.ai/v1',
+  xai: 'https://api.x.ai/v1',
+};
+
 function normalizeAgentType(value: string | null | undefined): AgentType {
   if (value === 'quick_start_1' || value === 'quick_start_2' || value === 'custom') {
     return value;
   }
 
   return 'quick_start_2';
+}
+
+function normalizeProviderId(value: string | null | undefined) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function buildAdvancedModelKey(providerName: string, modelName: string) {
+  const providerId = normalizeProviderId(providerName);
+  const trimmedModelName = modelName.trim();
+  if (!providerId || !trimmedModelName) {
+    return '';
+  }
+
+  return `${providerId}/${trimmedModelName}`;
 }
 
 function mergeOnboardingModels(models: Awaited<ReturnType<typeof loadOpenClawModels>>) {
@@ -119,11 +158,12 @@ async function loadOnboardingModelsFast() {
 
 function sortTestingPreferredModels<T extends { key: string; provider?: string; isFree?: boolean; name?: string }>(models: T[]) {
   const priority = new Map<string, number>([
-    ['minimax/MiniMax-M2.7', 0],
-    ['minimax/MiniMax-M2.5', 1],
-    ['openrouter/auto', 2],
+    ['google/gemini-3.1-pro-preview', 0],
+    ['openrouter/auto', 1],
+    ['minimax/MiniMax-M2.7', 2],
     ['openrouter/free', 3],
-    ['ollama/lfm2.5-thinking:latest', 4],
+    ['minimax/MiniMax-M2.5', 4],
+    ['ollama/lfm2.5-thinking:latest', 5],
   ]);
 
   return [...models].sort((left, right) => {
@@ -245,7 +285,7 @@ const LOCKED_PERSONALITIES: Record<string, {
 onboardingRouter.get('/options', requireAuth, async (_req, res) => {
   await ensurePlatformSchema();
   const models = await loadOnboardingModelsFast();
-  const FREE_MODEL_KEYS = new Set(['ollama/lfm2.5-thinking:latest', 'openrouter/auto', 'openrouter/free']);
+  const FREE_MODEL_KEYS = new Set(['google/gemini-3.1-pro-preview', 'ollama/lfm2.5-thinking:latest', 'openrouter/auto', 'openrouter/free']);
   const taggedModels = (models as any[]).map((m: any) => ({
     ...m,
     isFree: FREE_MODEL_KEYS.has(m.key),
@@ -263,7 +303,6 @@ onboardingRouter.get('/options', requireAuth, async (_req, res) => {
 
 onboardingRouter.get('/status', requireAuth, async (req: AuthedRequest, res) => {
   await ensurePlatformSchema();
-  await ensurePersonalAgent({ userId: req.user!.id, email: req.user!.email ?? `${req.user!.id}@local.invalid` });
   const [profileResult, agentResult, credentialResult, studentAgentResult, googleStatus, usageProfile] = await Promise.all([
     db.query(`select * from student_profiles where user_id = $1`, [req.user!.id]),
     db.query(`select * from agent_profiles where user_id = $1`, [req.user!.id]),
@@ -322,19 +361,22 @@ onboardingRouter.post('/model-config', requireAuth, async (req: AuthedRequest, r
   try {
     await ensurePlatformSchema();
 
-    const { modelKey, apiKey, agentPreset, usageMode } = req.body as {
+    const { modelKey, apiKey, agentPreset, usageMode, customProviderName, customModelName, customServiceBaseUrl } = req.body as {
       modelKey?: string;
       apiKey?: string;
       agentPreset?: AgentType;
       usageMode?: 'managed' | 'byok';
+      customProviderName?: string;
+      customModelName?: string;
+      customServiceBaseUrl?: string;
     };
-    if (!modelKey) {
-      return res.status(400).json({ error: 'bad_request', message: 'modelKey is required' });
-    }
+    const usingAdvancedProvider =
+      !!String(customProviderName ?? '').trim() ||
+      !!String(customModelName ?? '').trim() ||
+      !!String(customServiceBaseUrl ?? '').trim();
 
-    const model = resolveModelSelection(modelKey, await loadOpenClawModels());
-    if (!model) {
-      return res.status(400).json({ error: 'bad_request', message: 'Unsupported model selection' });
+    if (!modelKey && !usingAdvancedProvider) {
+      return res.status(400).json({ error: 'bad_request', message: 'modelKey is required' });
     }
 
     if (agentPreset && agentPreset !== 'quick_start_1' && agentPreset !== 'quick_start_2') {
@@ -342,6 +384,70 @@ onboardingRouter.post('/model-config', requireAuth, async (req: AuthedRequest, r
     }
 
     const normalizedAgentPreset = normalizeAgentType(agentPreset);
+
+    if (usingAdvancedProvider) {
+      const providerName = String(customProviderName ?? '').trim();
+      const providerId = normalizeProviderId(providerName);
+      const advancedModelName = String(customModelName ?? '').trim();
+      const serviceBaseUrl =
+        String(customServiceBaseUrl ?? '').trim() ||
+        ADVANCED_PROVIDER_BASE_URLS[providerId] ||
+        '';
+
+      if (!providerName || !advancedModelName) {
+        return res.status(400).json({
+          error: 'bad_request',
+          message: 'customProviderName and customModelName are required for advanced onboarding setup',
+        });
+      }
+
+      if (!serviceBaseUrl) {
+        return res.status(400).json({
+          error: 'bad_request',
+          message: 'This advanced provider is not supported in onboarding yet',
+        });
+      }
+
+      const effectiveModelKey = buildAdvancedModelKey(providerName, advancedModelName);
+      if (!effectiveModelKey) {
+        return res.status(400).json({
+          error: 'bad_request',
+          message: 'Failed to build the advanced model selection',
+        });
+      }
+
+      await saveUserModelSetting({
+        userId: req.user!.id,
+        email: req.user!.email ?? `${req.user!.id}@local.invalid`,
+        providerName,
+        serviceBaseUrl,
+        apiKey: apiKey?.trim(),
+        modelName: advancedModelName,
+        activate: true,
+      });
+
+      const agent = await ensureAgentProfile(req.user!.id, effectiveModelKey, normalizedAgentPreset);
+      await syncUserWorkspaceIdentity({
+        userId: req.user!.id,
+        email: req.user!.email ?? `${req.user!.id}@local.invalid`,
+        personaName: agent.persona_name,
+        tone: agent.tone,
+      });
+      await db.query(`update student_profiles set onboarding_complete = true where user_id = $1`, [req.user!.id]);
+      const refreshedUsageProfile = await getUserUsageSnapshot(req.user!.id);
+
+      return res.json({
+        ok: true,
+        oauthAvailable: false,
+        agentId: agent.openclaw_agent_id,
+        usageProfile: refreshedUsageProfile,
+      });
+    }
+
+    const model = resolveModelSelection(modelKey!, await loadOnboardingModelsFast());
+    if (!model) {
+      return res.status(400).json({ error: 'bad_request', message: 'Unsupported model selection' });
+    }
 
     await ensurePersonalAgent({
       userId: req.user!.id,

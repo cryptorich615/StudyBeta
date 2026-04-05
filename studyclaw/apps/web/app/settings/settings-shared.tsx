@@ -6,6 +6,12 @@ import { ChevronLeft, ChevronRight, Bell, Bot, BrainCircuit, ChartColumn, Clock3
 import StatusBanner from '../components/status-banner';
 import { apiFetch, beginGoogleConnect } from '../../lib/api';
 import { readStoredSession } from '../../lib/session';
+import {
+  findPreset,
+  GOOGLE_AI_STUDIO_URL,
+  isGoogleAiStudioApiKey,
+  PROVIDER_PRESETS,
+} from '../../lib/model-setup';
 
 export type ChannelItem = {
   id: string;
@@ -49,7 +55,7 @@ export type SettingsSnapshot = {
   skills: {
     readyCount: number;
     totalCount: number;
-    items: Array<{ status: string; name: string; description: string; source: string; enabled: boolean }>;
+    items: Array<{ status: string; name: string; displayName?: string; description: string; source: string; enabled: boolean }>;
   };
   logs: {
     source: string;
@@ -115,6 +121,15 @@ type UsageAccessProfile = {
     finalizedAt: string | null;
     metadata: Record<string, unknown>;
   }>;
+};
+
+type GoogleIntegrationSummary = {
+  status?: 'not_connected' | 'connected' | 'reconnect_required';
+  connected?: boolean;
+  needsReconnect?: boolean;
+  googleEmail?: string | null;
+  account?: string | null;
+  error?: string | null;
 };
 
 type ManagedUsageAccountSummary = {
@@ -517,6 +532,10 @@ export function ModelSettingsDetail() {
   const [modelName, setModelName] = useState('');
   const [maxContextWindow, setMaxContextWindow] = useState('');
   const [maxOutputTokens, setMaxOutputTokens] = useState('');
+  const [selectedPresetKey, setSelectedPresetKey] = useState('');
+  const [pasteStatus, setPasteStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [pasteMessage, setPasteMessage] = useState('');
+  const [isPasteLoading, setIsPasteLoading] = useState(false);
 
   useEffect(() => {
     void loadModelSettings();
@@ -534,6 +553,15 @@ export function ModelSettingsDetail() {
     setModelName(config.modelName);
     setMaxContextWindow(config.maxContextWindow ? String(config.maxContextWindow) : '');
     setMaxOutputTokens(config.maxOutputTokens ? String(config.maxOutputTokens) : '');
+    const matchedPreset = PROVIDER_PRESETS.find(
+      (preset) =>
+        preset.providerName.toLowerCase() === config.providerName.toLowerCase() &&
+        preset.modelName === config.modelName &&
+        preset.serviceBaseUrl === config.serviceBaseUrl
+    );
+    setSelectedPresetKey(matchedPreset?.key ?? '');
+    setPasteStatus('idle');
+    setPasteMessage('');
   }
 
   function seedNewModelForm(source?: SavedModelConfig | null) {
@@ -544,6 +572,71 @@ export function ModelSettingsDetail() {
     setModelName('');
     setMaxContextWindow(source?.maxContextWindow ? String(source.maxContextWindow) : '');
     setMaxOutputTokens(source?.maxOutputTokens ? String(source.maxOutputTokens) : '');
+    setSelectedPresetKey('');
+    setPasteStatus('idle');
+    setPasteMessage('');
+  }
+
+  function applyProviderPreset(presetKey: string) {
+    setSelectedPresetKey(presetKey);
+    const preset = findPreset(presetKey);
+    if (!preset) {
+      return;
+    }
+
+    setSelectedConfigId('');
+    setProviderName(preset.providerName);
+    setServiceBaseUrl(preset.serviceBaseUrl);
+    setModelName(preset.modelName);
+    setMaxContextWindow('');
+    setMaxOutputTokens('');
+    setModelStatus(`${preset.label} preset loaded.`);
+    setPasteStatus('idle');
+    setPasteMessage('');
+  }
+
+  function handleOpenGoogleAiStudio() {
+    applyProviderPreset('google-gemini');
+    window.open(GOOGLE_AI_STUDIO_URL, '_blank', 'noopener,noreferrer');
+  }
+
+  async function handlePasteApiKey() {
+    if (typeof navigator === 'undefined' || !navigator.clipboard?.readText) {
+      setPasteStatus('error');
+      setPasteMessage('Clipboard paste is not available in this browser.');
+      return;
+    }
+
+    setIsPasteLoading(true);
+    setPasteStatus('idle');
+    setPasteMessage('');
+    setModelStatus('');
+
+    try {
+      const clipboardText = (await navigator.clipboard.readText()).trim();
+      if (!clipboardText) {
+        setPasteStatus('error');
+        setPasteMessage('Clipboard is empty.');
+        return;
+      }
+
+      setApiKey(clipboardText);
+
+      if (isGoogleAiStudioApiKey(clipboardText)) {
+        applyProviderPreset('google-gemini');
+        setApiKey(clipboardText);
+        setPasteMessage('Pasted! Google Gemini preset was selected automatically.');
+      } else {
+        setPasteMessage('Pasted! Keep the current preset or choose a different one below.');
+      }
+
+      setPasteStatus('success');
+    } catch {
+      setPasteStatus('error');
+      setPasteMessage('Clipboard read failed. Paste the key manually if needed.');
+    } finally {
+      setIsPasteLoading(false);
+    }
   }
 
   async function loadModelSettings(nextSelectedId?: string) {
@@ -753,8 +846,74 @@ export function ModelSettingsDetail() {
       </div>
 
       <section className="secondary-card">
+        <p className="eyebrow">Quick setup</p>
+        <div className="provider-setup-card">
+          <div className="provider-setup-card__header">
+            <div className="provider-setup-card__icon" aria-hidden="true">🔑</div>
+            <div>
+              <strong>Open Google AI Studio</strong>
+              <p className="muted-copy" style={{ marginTop: 8 }}>
+                If you skipped this during onboarding, generate a Gemini key in AI Studio and bring it back here.
+              </p>
+            </div>
+          </div>
+
+          <div className="provider-setup-card__actions">
+            <button type="button" className="provider-setup-card__primary" onClick={handleOpenGoogleAiStudio}>
+              Open Google AI Studio
+            </button>
+            <button
+              type="button"
+              className="provider-setup-card__secondary"
+              onClick={() => void handlePasteApiKey()}
+              disabled={isPasteLoading}
+            >
+              {isPasteLoading ? 'Reading clipboard...' : pasteStatus === 'success' ? '✓ Pasted!' : '📋 Paste'}
+            </button>
+          </div>
+
+          <ol className="provider-setup-card__steps">
+            <li>Click <strong>Open Google AI Studio</strong>.</li>
+            <li>Open or sign into AI Studio in the new tab.</li>
+            <li>Create an API key and copy it.</li>
+            <li>Return here and click <strong>📋 Paste</strong>.</li>
+          </ol>
+
+          <div className="provider-setup-card__footer">
+            <p>AIza... keys auto-select the Google Gemini preset and fill the API key field.</p>
+            <p>For OpenRouter or any other provider, use the preset dropdown below or keep your current saved model.</p>
+          </div>
+        </div>
+      </section>
+
+      <section className="secondary-card">
         <p className="eyebrow">Provider and model form</p>
         <div className="form-grid">
+          <div className="form-field">
+            <label htmlFor="provider-preset">Quick provider preset</label>
+            <select
+              id="provider-preset"
+              value={selectedPresetKey}
+              onChange={(event) => {
+                const nextPreset = event.target.value;
+                if (!nextPreset) {
+                  setSelectedPresetKey('');
+                  return;
+                }
+                applyProviderPreset(nextPreset);
+              }}
+            >
+              <option value="">Choose a preset</option>
+              {PROVIDER_PRESETS.map((preset) => (
+                <option key={preset.key} value={preset.key}>
+                  {preset.label}
+                </option>
+              ))}
+            </select>
+            <p className="form-help">
+              Pick a preset for Google Gemini, OpenRouter, MiniMax, or Ollama. You can still edit every field below.
+            </p>
+          </div>
           <div className="form-field">
             <label htmlFor="provider-name">Provider name</label>
             <input
@@ -775,13 +934,32 @@ export function ModelSettingsDetail() {
           </div>
           <div className="form-field">
             <label htmlFor="api-key">API Key</label>
-            <input
-              id="api-key"
-              type="password"
-              value={apiKey}
-              onChange={(event) => setApiKey(event.target.value)}
-              placeholder="Leave blank to keep a stored key for this provider"
-            />
+            <div className="api-key-input-wrap">
+              <input
+                id="api-key"
+                type="password"
+                value={apiKey}
+                onChange={(event) => {
+                  setApiKey(event.target.value);
+                  setPasteStatus('idle');
+                  setPasteMessage('');
+                }}
+                placeholder={
+                  providerName.trim().toLowerCase() === 'google'
+                    ? 'AIza...'
+                    : 'Leave blank to keep a stored key for this provider'
+                }
+              />
+              <button
+                type="button"
+                className="api-key-clipboard-button"
+                onClick={() => void handlePasteApiKey()}
+                disabled={isPasteLoading}
+              >
+                {isPasteLoading ? '...' : pasteStatus === 'success' ? '✓ Pasted!' : '📋 Paste'}
+              </button>
+            </div>
+            {pasteMessage ? <p className={`form-status${pasteStatus === 'error' ? ' is-error' : ''}`}>{pasteMessage}</p> : null}
           </div>
           <div className="form-field">
             <label htmlFor="model-name">Model name</label>
@@ -859,6 +1037,7 @@ export function ModelSettingsDetail() {
 export function NotificationSettingsDetail() {
   const { snapshot, status } = useSettingsSnapshot();
   const [connectStatus, setConnectStatus] = useState('');
+  const [googleStatus, setGoogleStatus] = useState<GoogleIntegrationSummary | null>(null);
   const [telegramStatus, setTelegramStatus] = useState('');
   const [telegramCode, setTelegramCode] = useState('');
   const [telegramLoading, setTelegramLoading] = useState(true);
@@ -867,7 +1046,21 @@ export function NotificationSettingsDetail() {
 
   useEffect(() => {
     void loadTelegramSettings();
+    void loadGoogleStatus();
   }, []);
+
+  async function loadGoogleStatus() {
+    const response = await apiFetch('/api/google');
+    const data = (await response.json().catch(() => ({}))) as GoogleIntegrationSummary;
+
+    if (!response.ok) {
+      setGoogleStatus(null);
+      setConnectStatus(data.error || 'Failed to load Google connection status');
+      return;
+    }
+
+    setGoogleStatus(data);
+  }
 
   async function loadTelegramSettings() {
     setTelegramLoading(true);
@@ -941,10 +1134,31 @@ export function NotificationSettingsDetail() {
         <p className="muted-copy" style={{ marginTop: 10 }}>
           Use onboarding to update your base model access, and connect Google services if you want reminders and schedule-aware workflows.
         </p>
+        <div className="settings-stack compact" style={{ marginTop: 14 }}>
+          <div className="settings-row">
+            <span className="muted-copy">Google Calendar / Drive</span>
+            <strong>
+              {googleStatus?.connected
+                ? googleStatus.googleEmail || googleStatus.account || 'Connected'
+                : googleStatus?.status === 'reconnect_required'
+                  ? 'Reconnect needed'
+                  : 'Not connected'}
+            </strong>
+          </div>
+          {googleStatus?.error ? (
+            <p className="muted-copy" style={{ marginTop: 8 }}>
+              Connection detail: {googleStatus.error}
+            </p>
+          ) : null}
+        </div>
         <div className="actions" style={{ marginTop: 14 }}>
           <a href="/onboarding" className="ghost-button">Change model or API key</a>
           <button type="button" className="ghost-button" onClick={() => void handleGoogleConnect()}>
-            Connect Google Calendar/Drive
+            {googleStatus?.connected
+              ? 'Reconnect Google Calendar/Drive'
+              : googleStatus?.status === 'reconnect_required'
+                ? 'Reconnect Google Calendar/Drive'
+                : 'Connect Google Calendar/Drive'}
           </button>
         </div>
       </section>
@@ -1518,6 +1732,72 @@ export function AgentSettingsDetail() {
   const { snapshot, status, setSnapshot, setStatus } = useSettingsSnapshot();
   const [skillQuery, setSkillQuery] = useState('');
   const [updatingSkill, setUpdatingSkill] = useState('');
+  const studySkillBundles: Array<{
+    name: string;
+    title: string;
+    summary: string;
+  }> = [
+    {
+      name: 'study-library',
+      title: 'Student library',
+      summary: 'Book discovery, textbook lookup, and reading-oriented research using Open Library first.',
+    },
+    {
+      name: 'grade-tracker',
+      title: 'Grade tracker',
+      summary: 'Estimated grades, target-score math, and wrong-answer review grounded in saved class data.',
+    },
+    {
+      name: 'class-scheduler',
+      title: 'Class scheduler',
+      summary: 'Current class, next class, room, teacher, and schedule-aware tutoring context.',
+    },
+    {
+      name: 'study-habits',
+      title: 'Study habits',
+      summary: 'Routine, focus, and consistency coaching tied to the student’s real workload and calendar.',
+    },
+    {
+      name: 'study-buddy-ai',
+      title: 'Study buddy AI',
+      summary: 'General-purpose study companion behavior that turns conversation into useful study actions.',
+    },
+    {
+      name: 'study-tutor',
+      title: 'Study tutor',
+      summary: 'Step-by-step explanations, examples, misconceptions, and guided practice.',
+    },
+    {
+      name: 'course-study',
+      title: 'Course study',
+      summary: 'Course-specific study planning using grades, assignments, schedule, and weak-topic context.',
+    },
+    {
+      name: 'study-buddy',
+      title: 'Study buddy',
+      summary: 'Short, practical accountability support to keep students moving through work.',
+    },
+    {
+      name: 'study-revision-planner',
+      title: 'Revision planner',
+      summary: 'Exam and revision plans built from real deadlines, weak topics, and available time.',
+    },
+    {
+      name: 'learn-cog',
+      title: 'Learn cog',
+      summary: 'Multi-angle teaching with analogies, examples, and layered explanations.',
+    },
+    {
+      name: 'exam',
+      title: 'Exam prep',
+      summary: 'Exam-focused prioritization, last-minute review plans, and risk-aware prep advice.',
+    },
+    {
+      name: 'learning-optimizer',
+      title: 'Learning optimizer',
+      summary: 'Uses saved student data to improve study order, time use, and review strategy.',
+    },
+  ];
 
   async function toggleSkill(skillName: string, enabled: boolean) {
     setUpdatingSkill(skillName);
@@ -1603,13 +1883,35 @@ export function AgentSettingsDetail() {
       </div>
 
       <section className="secondary-card">
+        <p className="eyebrow">StudyClaw skill bundles</p>
+        <div className="settings-stack" style={{ marginTop: 14 }}>
+          {studySkillBundles.map((bundle) => {
+            const matchingSkill = snapshot?.skills.items.find((skill) => skill.name === bundle.name);
+            return (
+              <div className="settings-row" key={bundle.name}>
+                <div>
+                  <strong>{bundle.title}</strong>
+                  <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                    {bundle.summary}
+                  </p>
+                </div>
+                <span className={`settings-badge ${matchingSkill?.enabled ? 'is-live' : ''}`}>
+                  {matchingSkill?.enabled ? 'Inherited' : 'Disabled'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="secondary-card">
         <p className="eyebrow">Skills</p>
         <div className="settings-stack" style={{ marginTop: 14 }}>
           {filteredSkills.length ? (
             filteredSkills.map((skill) => (
               <div className="settings-row" key={skill.name}>
                 <div>
-                  <strong>{skill.name}</strong>
+                  <strong>{skill.displayName || skill.name}</strong>
                   <p className="muted-copy" style={{ margin: '4px 0 0' }}>
                     {skill.description}
                     {' · '}

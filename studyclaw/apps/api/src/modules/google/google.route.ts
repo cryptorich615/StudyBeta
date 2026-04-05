@@ -5,6 +5,7 @@ import {
   createCalendarEvent,
   disconnectGoogleIntegration,
   getGoogleConnectionStatus,
+  getGoogleWorkspacePreview,
   listUpcomingCalendarEvents,
   listRecentDriveFiles,
   syncGoogleSkillForUser,
@@ -79,6 +80,10 @@ googleRouter.get('/connect', async (req: AuthedRequest, res) => {
     returnTo,
     frontendOrigin: resolveFrontendOrigin(req),
   });
+  console.info('[google] starting oauth connect redirect', {
+    userId: req.user!.id,
+    returnTo,
+  });
 
   res.redirect(url);
 });
@@ -91,6 +96,10 @@ googleRouter.get('/connect-url', async (req: AuthedRequest, res) => {
     returnTo,
     frontendOrigin: resolveFrontendOrigin(req),
   });
+  console.info('[google] issued oauth connect url', {
+    userId: req.user!.id,
+    returnTo,
+  });
 
   res.json({ url });
 });
@@ -99,6 +108,18 @@ googleRouter.get('/connect-url', async (req: AuthedRequest, res) => {
 googleRouter.get('/', async (req: AuthedRequest, res) => {
   try {
     const status = await getGoogleConnectionStatus(req.user!.id);
+    console.info('[google] status requested', {
+      userId: req.user!.id,
+      status: status.status,
+      canReadCalendar: status.canReadCalendar,
+      canWriteCalendar: status.canWriteCalendar,
+      canReadDrive: status.canReadDrive,
+      canUseDocs: status.canUseDocs,
+      canUseSheets: status.canUseSheets,
+      canUseSlides: status.canUseSlides,
+      hasRefreshToken: status.hasRefreshToken,
+      error: status.error,
+    });
     res.json({
       status: status.status,
       connected: status.connected,
@@ -106,12 +127,26 @@ googleRouter.get('/', async (req: AuthedRequest, res) => {
       account: status.googleEmail,
       googleEmail: status.googleEmail,
       scopes: status.scopes,
+      grantedScopes: status.grantedScopes,
       canReadCalendar: status.canReadCalendar,
       canWriteCalendar: status.canWriteCalendar,
       canReadDrive: status.canReadDrive,
+      canUseDocs: status.canUseDocs,
+      canUseSheets: status.canUseSheets,
+      canUseSlides: status.canUseSlides,
+      canUseWorkspaceSkill: status.canUseWorkspaceSkill,
+      hasAccessToken: status.hasAccessToken,
+      hasRefreshToken: status.hasRefreshToken,
       expiresAt: status.expiresAt,
+      lastSyncAt: status.lastSyncAt,
+      calendarsFound: null,
+      error: status.error,
     });
   } catch (error) {
+    console.error('[google] status request failed', {
+      userId: req.user!.id,
+      message: error instanceof Error ? error.message : 'Unknown error',
+    });
     res.status(500).json({ error: 'server_error', message: 'Failed to check Google connection' });
   }
 });
@@ -137,6 +172,11 @@ googleRouter.get('/calendar', async (req: AuthedRequest, res) => {
   try {
     const status = await getGoogleConnectionStatus(req.user!.id);
     if (!status.connected) {
+      console.warn('[google] calendar fetch blocked by connection state', {
+        userId: req.user!.id,
+        status: status.status,
+        error: status.error,
+      });
       return res.status(400).json({
         connected: false,
         status: status.status,
@@ -148,10 +188,22 @@ googleRouter.get('/calendar', async (req: AuthedRequest, res) => {
     }
     
     const days = Math.min(Math.max(parseInt(req.query.days as string) || 7, 1), 90);
-    const events = await listUpcomingCalendarEvents(req.user!.id, days * 10); // rough max per day
+    console.info('[google] fetching calendar events', {
+      userId: req.user!.id,
+      days,
+    });
+    const events = await listUpcomingCalendarEvents(req.user!.id, days * 10, { windowDays: days }); // rough max per day
+    console.info('[google] calendar events fetched', {
+      userId: req.user!.id,
+      count: events.length,
+    });
     res.json(events);
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Failed to fetch calendar events';
+    console.error('[google] calendar fetch failed', {
+      userId: req.user!.id,
+      message: msg,
+    });
     if (msg.includes('not connected') || msg.includes('401') || msg.includes('403')) {
       return res.status(400).json({ connected: false, error: msg });
     }
@@ -263,10 +315,29 @@ googleRouter.get('/drive', async (req: AuthedRequest, res) => {
     }
     
     const max = Math.min(Math.max(parseInt(req.query.max as string) || 5, 1), 100);
-    const files = await listRecentDriveFiles(req.user!.id, max);
+    const kind =
+      req.query.kind === 'docs' || req.query.kind === 'sheets' || req.query.kind === 'slides'
+        ? req.query.kind
+        : 'all';
+    const files = await listRecentDriveFiles(req.user!.id, max, kind);
     res.json(files);
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Failed to fetch Drive files';
+    res.status(500).json({ error: 'fetch_error', message: msg });
+  }
+});
+
+googleRouter.get('/drive/:fileId/reader', async (req: AuthedRequest, res) => {
+  try {
+    const status = await getGoogleConnectionStatus(req.user!.id);
+    if (!status.connected) {
+      return res.status(400).json({ error: 'not_connected', message: 'Google account not connected' });
+    }
+
+    const preview = await getGoogleWorkspacePreview(req.user!.id, String(req.params.fileId));
+    res.json(preview);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Failed to load Google file preview';
     res.status(500).json({ error: 'fetch_error', message: msg });
   }
 });

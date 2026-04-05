@@ -4,6 +4,7 @@ type ChatEntry = {
   id: string;
   role: 'assistant' | 'user' | string;
   content: string;
+  createdAt?: string;
   metadata?: {
     capabilityBadges?: Array<{
       key: string;
@@ -50,6 +51,30 @@ const assistantActions = [
   'Explain this at a beginner level.',
 ];
 
+function formatChatTimestamp(value?: string) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return new Intl.DateTimeFormat('en-US', {
+    month: '2-digit',
+    day: '2-digit',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  })
+    .format(parsed)
+    .replace(' AM', ' am')
+    .replace(' PM', ' pm');
+}
+
 export default function MessageBubble({
   entry,
   agentName,
@@ -83,11 +108,13 @@ export default function MessageBubble({
   const currentResearchAction = activeResearchActionKey?.startsWith(`${entry.id}:`)
     ? activeResearchActionKey.split(':')[1]
     : null;
+  const timestampLabel = formatChatTimestamp(entry.createdAt);
 
   return (
     <article className={isAssistant ? 'study-chat-bubble is-assistant' : 'study-chat-bubble is-user'}>
       <div className="study-chat-bubble__meta">
         <span>{isAssistant ? agentName : 'You'}</span>
+        {timestampLabel ? <time className="study-chat-bubble__timestamp" dateTime={entry.createdAt}>{timestampLabel}</time> : null}
       </div>
       <div className="study-chat-bubble__content">{entry.content}</div>
       {isAssistant && researchResult ? (

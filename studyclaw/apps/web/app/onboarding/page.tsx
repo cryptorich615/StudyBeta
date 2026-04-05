@@ -4,6 +4,14 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { apiFetch } from '../../lib/api';
 import { isOnboardingComplete, readStoredSession, writeStoredSession } from '../../lib/session';
 import { consumePayloadFromUrl } from '../../lib/consumePayload';
+import {
+  findGoogleGeminiModelKey,
+  GOOGLE_AI_STUDIO_URL,
+  GOOGLE_GEMINI_MODEL_KEY,
+  ONBOARDING_PROVIDER_CARDS,
+  PROVIDER_PRESETS,
+  isGoogleAiStudioApiKey,
+} from '../../lib/model-setup';
 
 const ONBOARDING_DRAFT_KEY = 'studyclaw-onboarding-draft';
 
@@ -34,11 +42,18 @@ const AGENTS = [
 
 const TEST_TIERS = [
   { key: 'tier_1', label: 'Tier 1', credits: 1000, detail: '1000 starting credits' },
-  { key: 'tier_2', label: 'Tier 2', credits: 2000, detail: '2000 starting credits' },
-  { key: 'tier_3', label: 'Tier 3', credits: 3000, detail: '3000 starting credits' },
+  { key: 'tier_2', label: 'Tier 2', credits: 3000, detail: '3000 starting credits' },
+  { key: 'tier_3', label: 'Tier 3', credits: 5000, detail: '5000 starting credits' },
 ] as const;
 
 const DEFAULT_MODELS = [
+  {
+    key: GOOGLE_GEMINI_MODEL_KEY,
+    name: 'Gemini 3.1 Pro Preview',
+    provider: 'google',
+    oauthAvailable: false,
+    isFree: true,
+  },
   {
     key: 'openrouter/auto',
     name: 'OpenRouter Auto',
@@ -83,6 +98,26 @@ const DEFAULT_MODELS = [
   },
 ] as const;
 
+const ONBOARDING_STEPS = [
+  { step: 1, label: 'Tier' },
+  { step: 2, label: 'Companion' },
+  { step: 3, label: 'Model' },
+] as const;
+
+const CUSTOM_PROVIDER_BASE_URLS: Record<string, string> = {
+  google: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+  gemini: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+  openrouter: 'https://openrouter.ai/api/v1',
+  minimax: 'https://api.minimax.io/anthropic',
+  ollama: 'http://127.0.0.1:11434',
+  openai: 'https://api.openai.com/v1',
+  'openai-codex': 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com/v1',
+  groq: 'https://api.groq.com/openai/v1',
+  mistral: 'https://api.mistral.ai/v1',
+  xai: 'https://api.x.ai/v1',
+};
+
 type OnboardingModelOption = {
   key: string;
   name: string;
@@ -93,11 +128,12 @@ type OnboardingModelOption = {
 
 function mergeModelOptions(models: OnboardingModelOption[]) {
   const priority = new Map<string, number>([
-    ['minimax/MiniMax-M2.7', 0],
-    ['minimax/MiniMax-M2.5', 1],
-    ['openrouter/auto', 2],
+    [GOOGLE_GEMINI_MODEL_KEY, 0],
+    ['openrouter/auto', 1],
+    ['minimax/MiniMax-M2.7', 2],
     ['openrouter/free', 3],
-    ['ollama/lfm2.5-thinking:latest', 4],
+    ['minimax/MiniMax-M2.5', 4],
+    ['ollama/lfm2.5-thinking:latest', 5],
   ]);
 
   return Array.from(
@@ -172,9 +208,47 @@ function clearOnboardingDraft() {
   window.localStorage.removeItem(ONBOARDING_DRAFT_KEY);
 }
 
+function normalizeProviderId(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function resolveCustomServiceBaseUrl(providerName: string) {
+  return CUSTOM_PROVIDER_BASE_URLS[normalizeProviderId(providerName)] ?? '';
+}
+
+function buildCustomModelKey(providerName: string, modelName: string) {
+  const providerId = normalizeProviderId(providerName);
+  const trimmedModel = modelName.trim();
+  if (!providerId || !trimmedModel) {
+    return '';
+  }
+
+  return `${providerId}/${trimmedModel}`;
+}
+
+function OnboardingProgressDots({ step }: { step: 1 | 2 | 3 }) {
+  return (
+    <div className="onboarding-progress" aria-label="Onboarding progress">
+      {ONBOARDING_STEPS.map((item) => (
+        <span
+          key={item.step}
+          className={`onboarding-progress__dot${item.step === step ? ' is-active' : item.step < step ? ' is-complete' : ''}`}
+          aria-current={item.step === step ? 'step' : undefined}
+          title={item.label}
+        />
+      ))}
+    </div>
+  );
+}
+
+function providerLabel(providerId: string) {
+  const normalized = providerId.trim().toLowerCase();
+  return ONBOARDING_PROVIDER_CARDS.find((card) => card.providerName.toLowerCase() === normalized)?.label ?? providerId;
+}
+
 function OnboardingPageContent() {
   const router = useRouter();
-  const [step, setStep] = useState<1 | 2>(1);
+  const [step, setStep] = useState<1 | 2 | 3>(1);
   const [selectedAgent, setSelectedAgent] = useState<string>('');
   const [models, setModels] = useState<OnboardingModelOption[]>(() => mergeModelOptions([...DEFAULT_MODELS]));
   const [modelKey, setModelKey] = useState('openrouter/auto');
@@ -185,6 +259,14 @@ function OnboardingPageContent() {
   const [miniMaxAccessMode, setMiniMaxAccessMode] = useState<'managed' | 'byok'>('managed');
   const [selectedTier, setSelectedTier] = useState<'tier_1' | 'tier_2' | 'tier_3' | null>(null);
   const [tierStatus, setTierStatus] = useState('');
+  const [googleStatus, setGoogleStatus] = useState<{ connected: boolean; googleEmail?: string | null } | null>(null);
+  const [pasteStatus, setPasteStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [pasteMessage, setPasteMessage] = useState('');
+  const [isPasteLoading, setIsPasteLoading] = useState(false);
+  const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
+  const [customProviderName, setCustomProviderName] = useState('');
+  const [customModelName, setCustomModelName] = useState('');
+  const [customApiKey, setCustomApiKey] = useState('');
   const searchParams = useSearchParams();
 
   useEffect(() => {
@@ -213,6 +295,7 @@ function OnboardingPageContent() {
 
         setModels(nextModels);
         setExistingCredential(statusData?.credentials ?? null);
+        setGoogleStatus(statusData?.google ?? null);
         setSelectedAgent(
           draft?.selectedAgent && isValidPreset(draft.selectedAgent)
             ? draft.selectedAgent
@@ -247,6 +330,7 @@ function OnboardingPageContent() {
       .catch(() => {
         setModels(mergeModelOptions([...DEFAULT_MODELS]));
         setModelKey((current) => current || 'openrouter/auto');
+        setGoogleStatus(null);
       });
   }, [router, searchParams]);
 
@@ -291,26 +375,114 @@ function OnboardingPageContent() {
     }
   };
 
-  const handleNext = () => {
-    if (!selectedTier) { setError('Choose a temporary testing tier before continuing.'); return; }
-    if (!selectedAgent) { setError('Please choose your study companion to continue.'); return; }
+  const handlePresetPrefill = (presetKey: string) => {
+    const preset = PROVIDER_PRESETS.find((item) => item.key === presetKey);
+    if (!preset) {
+      return;
+    }
+
+    setIsAdvancedOpen(true);
+    setCustomProviderName(preset.providerName);
+    setCustomModelName(preset.modelName);
+    if (preset.onboardingModelKey) {
+      setModelKey(preset.onboardingModelKey);
+    }
+    setError('');
+  };
+
+  const handleProviderSelect = (providerKey: string) => {
+    const providerCard = ONBOARDING_PROVIDER_CARDS.find((card) => card.key === providerKey);
+    if (!providerCard) {
+      return;
+    }
+
+    setModelKey(providerCard.onboardingModelKey);
+    if (providerCard.key === 'minimax') {
+      setMiniMaxAccessMode('managed');
+    }
+    setError('');
+    setPasteStatus('idle');
+    setPasteMessage('');
+  };
+
+  const handleApiKeyChange = (value: string) => {
+    setApiKey(value);
+    setError('');
+    setPasteStatus('idle');
+    setPasteMessage('');
+
+    if (isGoogleAiStudioApiKey(value)) {
+      setModelKey(findGoogleGeminiModelKey(models));
+      setPasteStatus('success');
+      setPasteMessage('Key detected automatically. StudyClaw switched your selection to Gemini.');
+    }
+  };
+
+  const handleContinueFromTier = () => {
+    if (!selectedTier) {
+      setError('Choose a temporary testing tier before continuing.');
+      return;
+    }
+    setError('');
     setStep(2);
   };
 
+  const handleContinueFromCompanion = () => {
+    if (!selectedAgent) {
+      setError('Please choose your study companion to continue.');
+      return;
+    }
+    setError('');
+    setStep(3);
+  };
+
   const handleSubmit = async () => {
-    if (!modelKey) { setError('Please select a model provider.'); return; }
-    if (requiresApiKey && !apiKey.trim()) { setError('API key is required to activate your agent.'); return; }
+    const usingAdvancedSetup = !!customProviderName.trim() || !!customModelName.trim() || !!customApiKey.trim();
+    const customServiceBaseUrl = resolveCustomServiceBaseUrl(customProviderName);
+    const customModelKey = buildCustomModelKey(customProviderName, customModelName);
+
+    if (usingAdvancedSetup && (!customProviderName.trim() || !customModelName.trim() || !customApiKey.trim())) {
+      setError('Complete all advanced provider fields or leave them blank to use the standard setup.');
+      return;
+    }
+    if (usingAdvancedSetup && !customServiceBaseUrl) {
+      setError('This provider is not supported in onboarding yet. Finish onboarding with a standard model, then add a fully custom endpoint in Model Settings.');
+      return;
+    }
+    if (!usingAdvancedSetup && !modelKey) { setError('Please select a model provider.'); return; }
+    if (!usingAdvancedSetup && requiresApiKey && !apiKey.trim()) { setError('API key is required to activate your agent.'); return; }
     const effectiveAgentPreset = isValidPreset(selectedAgent) ? selectedAgent : 'quick_start_2';
     setIsSubmitting(true);
     setError('');
     try {
+      if (usingAdvancedSetup) {
+        const configResponse = await apiFetch('/api/openclaw/model-settings', {
+          method: 'POST',
+          body: JSON.stringify({
+            providerName: customProviderName.trim(),
+            serviceBaseUrl: customServiceBaseUrl,
+            modelName: customModelName.trim(),
+            apiKey: customApiKey.trim(),
+            activate: true,
+          }),
+        });
+        const configData = await configResponse.json().catch(() => null);
+        if (!configResponse.ok) {
+          setError(configData?.message ?? 'Failed to save your advanced model setup.');
+          return;
+        }
+      }
+
       const res = await apiFetch('/api/onboarding/model-config', {
         method: 'POST',
         body: JSON.stringify({
-          modelKey,
-          apiKey: apiKey.trim(),
+          modelKey: usingAdvancedSetup ? customModelKey : modelKey,
+          apiKey: usingAdvancedSetup ? customApiKey.trim() : apiKey.trim(),
           agentPreset: effectiveAgentPreset,
           usageMode: isManagedConfiguredMiniMax ? miniMaxAccessMode : undefined,
+          customProviderName: usingAdvancedSetup ? customProviderName.trim() : undefined,
+          customModelName: usingAdvancedSetup ? customModelName.trim() : undefined,
+          customServiceBaseUrl: usingAdvancedSetup ? customServiceBaseUrl : undefined,
         }),
       });
       let data: any = null;
@@ -355,6 +527,30 @@ function OnboardingPageContent() {
     selectedModel?.provider !== 'ollama' &&
     !(isManagedConfiguredMiniMax && miniMaxAccessMode === 'managed') &&
     !hasSavedCredential;
+  const usingAdvancedSetup = !!customProviderName.trim() || !!customModelName.trim() || !!customApiKey.trim();
+  const selectedProviderId = selectedModel?.provider ?? '';
+  const selectedProviderCard =
+    ONBOARDING_PROVIDER_CARDS.find((card) => card.onboardingModelKey === modelKey) ??
+    ONBOARDING_PROVIDER_CARDS.find((card) => card.providerName.toLowerCase() === selectedProviderId.toLowerCase()) ??
+    null;
+  const guidedProviderCards = ONBOARDING_PROVIDER_CARDS.filter((card) =>
+    models.some((model) => model.key === card.onboardingModelKey || model.provider === card.providerName.toLowerCase())
+  );
+  const modelFallbackCopy =
+    'If your first choice is unavailable, StudyClaw keeps OpenRouter available and uses MiniMax M2.7 as the next backup path.';
+
+  const headerTitle =
+    step === 1
+      ? 'Pick the testing tier for this StudyClaw workspace.'
+      : step === 2
+        ? 'Choose the companion who will teach and coach you.'
+        : 'Connect the model setup that will power your agent.';
+  const headerDescription =
+    step === 1
+      ? 'Start by saving the testing tier that seeds live credits and governs the managed experience during setup.'
+      : step === 2
+        ? 'Your companion controls StudyClaw’s tone, pacing, and teaching style everywhere else in the app.'
+        : 'Pick a provider, paste a key if you need one, and StudyClaw will handle the rest.';
 
   const handleOpenRouterConnect = () => {
     const openRouterModel =
@@ -377,17 +573,59 @@ function OnboardingPageContent() {
     window.open('https://platform.minimaxi.com/user-center/basic-information/interface-key', '_blank', 'noopener,noreferrer');
   };
 
+  const handleOpenGoogleAiStudio = () => {
+    setModelKey(findGoogleGeminiModelKey(models));
+    setError('');
+    setPasteStatus('idle');
+    setPasteMessage('');
+    window.open(GOOGLE_AI_STUDIO_URL, '_blank', 'noopener,noreferrer');
+  };
+
+  const handlePasteApiKey = async () => {
+    if (typeof navigator === 'undefined' || !navigator.clipboard?.readText) {
+      setPasteStatus('error');
+      setPasteMessage('Clipboard paste is not available in this browser.');
+      return;
+    }
+
+    setIsPasteLoading(true);
+    setPasteStatus('idle');
+    setPasteMessage('');
+    setError('');
+
+    try {
+      const clipboardText = (await navigator.clipboard.readText()).trim();
+      if (!clipboardText) {
+        setPasteStatus('error');
+        setPasteMessage('Clipboard is empty.');
+        return;
+      }
+
+      setApiKey(clipboardText);
+
+      if (isGoogleAiStudioApiKey(clipboardText)) {
+        setModelKey(findGoogleGeminiModelKey(models));
+        setPasteMessage('Pasted! StudyClaw selected Gemini automatically.');
+      } else {
+        setPasteMessage('Pasted! Keep the current provider or change it below if needed.');
+      }
+
+      setPasteStatus('success');
+    } catch {
+      setPasteStatus('error');
+      setPasteMessage('Clipboard read failed. Paste the key manually if needed.');
+    } finally {
+      setIsPasteLoading(false);
+    }
+  };
+
   return (
     <section className="onboarding-shell">
       <header className="onboarding-header">
         <div>
           <p className="onboarding-header__eyebrow">StudyClaw onboarding</p>
-          <h1 className="onboarding-header__title">
-            {step === 1 ? 'Choose your study companion and testing tier.' : 'Connect the model setup that will power your agent.'}
-          </h1>
-          <p className="onboarding-header__description">
-            This setup flow creates your StudyClaw workspace, ties in your model access, and gets your account ready for real study sessions.
-          </p>
+          <h1 className="onboarding-header__title">{headerTitle}</h1>
+          <p className="onboarding-header__description">{headerDescription}</p>
         </div>
         <div className="onboarding-header__brand">
           <strong>🦀 StudyClaw</strong>
@@ -397,26 +635,6 @@ function OnboardingPageContent() {
 
       <section className="onboarding-layout">
         <aside className="onboarding-sidebar">
-          <div className="onboarding-progress-card">
-            <p className="eyebrow">Progress</p>
-            <div className="onboarding-progress-steps">
-              <div className={`onboarding-progress-step ${step >= 1 ? 'is-active' : ''}`}>
-                <span>1</span>
-                <div>
-                  <strong>Tier + companion</strong>
-                  <p>Pick a testing tier and the study style you want.</p>
-                </div>
-              </div>
-              <div className={`onboarding-progress-step ${step >= 2 ? 'is-active' : ''}`}>
-                <span>2</span>
-                <div>
-                  <strong>Model connection</strong>
-                  <p>Choose how StudyClaw should power your agent.</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
           <div className="onboarding-summary-card">
             <p className="eyebrow">Current setup</p>
             <div className="onboarding-summary-row">
@@ -429,14 +647,14 @@ function OnboardingPageContent() {
             </div>
             <div className="onboarding-summary-row">
               <span>Model</span>
-              <strong>{selectedModel?.name ?? 'Choose at step 2'}</strong>
+              <strong>{usingAdvancedSetup ? customModelName || 'Custom setup' : selectedModel?.name ?? 'Choose at step 3'}</strong>
             </div>
           </div>
 
           <div className="onboarding-helper-card">
             <p className="eyebrow">What this affects</p>
             <p className="muted-copy">
-              Your companion shapes tone and teaching style. Your model setup controls how StudyClaw actually runs chat, coaching, reminders, and study tools.
+              Tier affects live managed credits, your companion shapes tone and teaching style, and your model setup controls how StudyClaw actually runs chat, coaching, reminders, and study tools.
             </p>
           </div>
         </aside>
@@ -447,7 +665,8 @@ function OnboardingPageContent() {
               <div className="onboarding-panel__head">
                 <div>
                   <p className="eyebrow">Step 1</p>
-                  <h2 className="section-title">Choose your testing tier and companion</h2>
+                  <h2 className="section-title">Choose your testing tier</h2>
+                  <p className="onboarding-step-copy">This still saves a real tier to the backend immediately, just like the current onboarding flow.</p>
                 </div>
               </div>
 
@@ -474,15 +693,37 @@ function OnboardingPageContent() {
                 </p>
               </section>
 
-              <section className="onboarding-agent-section">
-                <div className="onboarding-section-copy">
-                  <strong>Pick your study companion</strong>
-                  <p>This becomes the default teaching personality tied to your account.</p>
+              {error ? <p className="onboarding-error">{error}</p> : null}
+
+              <div className="onboarding-footer">
+                <OnboardingProgressDots step={step} />
+                <div className="onboarding-actions">
+                  <button
+                    onClick={handleContinueFromTier}
+                    disabled={!selectedTier}
+                    className="onboarding-primary-action"
+                  >
+                    Continue to companion
+                  </button>
                 </div>
-                <div className="onboarding-agent-grid">
+              </div>
+            </div>
+          ) : step === 2 ? (
+            <div className="onboarding-panel">
+              <div className="onboarding-panel__head">
+                <div>
+                  <p className="eyebrow">Step 2</p>
+                  <h2 className="section-title">Choose your companion</h2>
+                  <p className="onboarding-step-copy">This still sets the default StudyClaw personality tied to your account. Only Dixie and Willow are live today.</p>
+                </div>
+              </div>
+
+              <section className="onboarding-agent-section">
+                <div className="onboarding-agent-grid onboarding-agent-grid--triple">
                   {AGENTS.map((agent) => (
                     <button
                       key={agent.key}
+                      type="button"
                       onClick={() => handleAgentSelect(agent.key)}
                       className={`onboarding-agent-card${selectedAgent === agent.key ? ' is-active' : ''}`}
                     >
@@ -499,83 +740,280 @@ function OnboardingPageContent() {
                       </ul>
                     </button>
                   ))}
+
+                  <button
+                    type="button"
+                    disabled
+                    aria-disabled="true"
+                    className="onboarding-agent-card is-disabled"
+                  >
+                    <span className="onboarding-agent-card__coming-soon">Coming Soon</span>
+                    <div className="onboarding-agent-card__badge-row">
+                      <span className="onboarding-agent-card__emoji">✨</span>
+                      <span className="onboarding-agent-card__tag">Build your own</span>
+                    </div>
+                    <strong>Custom</strong>
+                    <p>Bring your own companion profile and teaching style once custom companions are ready.</p>
+                    <ul>
+                      <li>Personalized tone</li>
+                      <li>Custom reminders</li>
+                      <li>Private teaching style</li>
+                      <li>Workspace-level presets</li>
+                    </ul>
+                  </button>
                 </div>
               </section>
 
               {error ? <p className="onboarding-error">{error}</p> : null}
 
-              <div className="onboarding-actions">
-                <button
-                  onClick={handleNext}
-                  disabled={!selectedAgent || !selectedTier}
-                >
-                  {selectedAgent ? `Continue with ${AGENTS.find((agent) => agent.key === selectedAgent)?.name}` : 'Continue to provider setup'}
-                </button>
+              <div className="onboarding-footer">
+                <OnboardingProgressDots step={step} />
+                <div className="onboarding-actions onboarding-actions--split">
+                  <button type="button" className="onboarding-secondary-action" onClick={() => setStep(1)}>
+                    Back
+                  </button>
+                  <button
+                    onClick={handleContinueFromCompanion}
+                    disabled={!selectedAgent}
+                    className="onboarding-primary-action"
+                  >
+                    {selectedAgent ? `Continue with ${AGENTS.find((agent) => agent.key === selectedAgent)?.name}` : 'Continue to model setup'}
+                  </button>
+                </div>
               </div>
             </div>
           ) : (
             <div className="onboarding-panel">
               <div className="onboarding-panel__head">
                 <div>
-                  <p className="eyebrow">Step 2</p>
+                  <p className="eyebrow">Step 3</p>
                   <h2 className="section-title">Connect your model setup</h2>
+                  <p className="onboarding-step-copy">Keep the fast Google and OpenRouter setup paths, or expand the advanced block if you want to bring a supported provider manually.</p>
                 </div>
-                <button type="button" className="ghost-button" onClick={() => setStep(1)}>
+                <button type="button" className="ghost-button" onClick={() => setStep(2)}>
                   Change companion
                 </button>
               </div>
 
               <section className="onboarding-selection-card">
-                <p className="eyebrow">Chosen companion</p>
-                <div className="onboarding-selection-card__row">
-                  <span className="onboarding-selection-card__emoji">{AGENTS.find((agent) => agent.key === selectedAgent)?.emoji}</span>
-                  <div>
-                    <strong>{AGENTS.find((agent) => agent.key === selectedAgent)?.name}</strong>
-                    <p className="muted-copy" style={{ margin: '4px 0 0' }}>
-                      {AGENTS.find((agent) => agent.key === selectedAgent)?.tagline}
-                    </p>
+                <p className="eyebrow">Chosen setup</p>
+                <div className="onboarding-selection-grid">
+                  <div className="onboarding-selection-card__row">
+                    <span className="onboarding-selection-card__emoji">{AGENTS.find((agent) => agent.key === selectedAgent)?.emoji}</span>
+                    <div>
+                      <strong>{AGENTS.find((agent) => agent.key === selectedAgent)?.name}</strong>
+                      <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                        {AGENTS.find((agent) => agent.key === selectedAgent)?.tagline}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="onboarding-selection-chip">
+                    <span>Tier</span>
+                    <strong>{selectedTier ? TEST_TIERS.find((tier) => tier.key === selectedTier)?.label : 'Not selected'}</strong>
                   </div>
                 </div>
               </section>
 
               <section className="onboarding-provider-card">
-                <p className="eyebrow">Recommended setup</p>
-                <strong>Connect OpenRouter for the fastest start</strong>
-                <p className="muted-copy" style={{ marginTop: 10 }}>
-                  StudyClaw needs a provider connection so your agent can chat, coach, generate study tools, and save your chosen model.
-                  Google sign-in only unlocks your account. Calendar and Drive can be connected later in settings.
-                </p>
-                <button type="button" className="ghost-button" onClick={handleOpenRouterConnect}>
-                  Connect OpenRouter
-                </button>
+                <p className="eyebrow">Choose your provider</p>
+                <div className="onboarding-provider-grid">
+                  {guidedProviderCards.map((card) => {
+                    const isSelected = selectedProviderCard?.key === card.key;
+                    const accentClass = `is-${card.accent}`;
+                    const actionHandler =
+                      card.key === 'google-gemini'
+                        ? handleOpenGoogleAiStudio
+                        : card.key === 'openrouter-auto'
+                          ? handleOpenRouterConnect
+                          : card.key === 'minimax'
+                            ? handleMiniMaxConnect
+                            : () => handleProviderSelect(card.key);
+
+                    return (
+                      <div
+                        key={card.key}
+                        className={`onboarding-provider-option ${accentClass}${isSelected ? ' is-active' : ''}`}
+                      >
+                        <div className="onboarding-provider-option__header">
+                          <div>
+                            <strong>{card.label}</strong>
+                            <span>{card.description}</span>
+                          </div>
+                          <span className="onboarding-provider-option__check" aria-hidden="true">
+                            {isSelected ? '✓' : ''}
+                          </span>
+                        </div>
+
+                        <div className="onboarding-provider-option__actions">
+                          <button
+                            type="button"
+                            className="onboarding-provider-option__choose"
+                            onClick={() => handleProviderSelect(card.key)}
+                          >
+                            {isSelected ? 'Selected' : 'Choose'}
+                          </button>
+                          {card.primaryActionLabel ? (
+                            <button
+                              type="button"
+                              className="onboarding-provider-option__link"
+                              onClick={actionHandler}
+                            >
+                              {card.primaryActionLabel}
+                            </button>
+                          ) : null}
+                          <span className="onboarding-provider-option__pill">
+                            {card.requiresApiKey ? 'API key' : 'No API key'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="provider-setup-card">
+                  <div className="provider-setup-card__header">
+                    <div className="provider-setup-card__icon" aria-hidden="true">
+                      {selectedProviderCard?.key === 'google-gemini' ? '🔑' : selectedProviderCard?.key === 'openrouter-auto' ? '🧭' : selectedProviderCard?.key === 'minimax' ? '⚙️' : '🖥️'}
+                    </div>
+                    <div>
+                      <strong>{selectedProviderCard?.label ?? providerLabel(selectedProviderId || 'provider')}</strong>
+                      <p className="muted-copy" style={{ marginTop: 8 }}>
+                        {selectedProviderCard?.key === 'google-gemini'
+                          ? 'Open AI Studio, paste your key below, and StudyClaw will wire Gemini in automatically.'
+                          : selectedProviderCard?.key === 'openrouter-auto'
+                            ? 'Use your OpenRouter key if you want one provider entry point that can route between multiple models.'
+                            : selectedProviderCard?.key === 'minimax'
+                              ? 'Choose MiniMax if you want your own MiniMax key or want to switch into StudyClaw-managed MiniMax credits.'
+                              : 'Pick your preferred model below. StudyClaw will tell you if this setup needs an API key.'}
+                      </p>
+                      {selectedProviderCard?.key === 'google-gemini' && googleStatus?.connected ? (
+                        <p className="provider-setup-card__account">
+                          Google is already connected{googleStatus.googleEmail ? ` as ${googleStatus.googleEmail}` : ''}.
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="provider-setup-card__actions">
+                    {selectedProviderCard?.primaryActionLabel ? (
+                      <button
+                        type="button"
+                        className="provider-setup-card__primary"
+                        onClick={
+                          selectedProviderCard.key === 'google-gemini'
+                            ? handleOpenGoogleAiStudio
+                            : selectedProviderCard.key === 'openrouter-auto'
+                              ? handleOpenRouterConnect
+                              : selectedProviderCard.key === 'minimax'
+                                ? handleMiniMaxConnect
+                                : () => handleProviderSelect(selectedProviderCard.key)
+                        }
+                      >
+                        {selectedProviderCard.primaryActionLabel}
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="provider-setup-card__secondary"
+                      onClick={() => void handlePasteApiKey()}
+                      disabled={isPasteLoading}
+                    >
+                      {isPasteLoading ? 'Reading clipboard...' : pasteStatus === 'success' ? '✓ Pasted!' : 'Paste from clipboard'}
+                    </button>
+                  </div>
+
+                  <div className="provider-setup-card__input">
+                    <label htmlFor="onboarding-api-key-guided">
+                      {selectedProviderCard?.key === 'google-gemini'
+                        ? 'Paste your Google API key'
+                        : selectedProviderCard?.key === 'openrouter-auto'
+                          ? 'Paste your OpenRouter API key'
+                          : selectedProviderCard?.key === 'minimax'
+                            ? 'Paste your MiniMax API key'
+                            : 'Paste your provider API key'}
+                    </label>
+                    <div className="api-key-input-wrap">
+                      <input
+                        id="onboarding-api-key-guided"
+                        type="password"
+                        value={apiKey}
+                        onChange={(event) => handleApiKeyChange(event.target.value)}
+                        placeholder={
+                          selectedProviderCard?.key === 'google-gemini'
+                            ? 'Paste the Google AI Studio key here'
+                            : selectedProviderCard?.key === 'openrouter-auto'
+                              ? 'Paste your OpenRouter key here'
+                              : selectedProviderCard?.key === 'minimax'
+                                ? 'Paste your MiniMax key here'
+                                : 'Paste your API key here'
+                        }
+                        disabled={!requiresApiKey}
+                      />
+                      {requiresApiKey ? (
+                        <button
+                          type="button"
+                          className="api-key-clipboard-button"
+                          onClick={() => void handlePasteApiKey()}
+                          disabled={isPasteLoading}
+                        >
+                          {isPasteLoading ? '...' : pasteStatus === 'success' ? '✓ Pasted!' : '📋 Paste'}
+                        </button>
+                      ) : null}
+                    </div>
+                    {pasteMessage ? <p className={`form-status${pasteStatus === 'error' ? ' is-error' : ''}`}>{pasteMessage}</p> : null}
+                    <p className="onboarding-status-copy">
+                      {selectedProviderCard?.key === 'google-gemini'
+                        ? 'Keys are detected automatically and switch the model dropdown to Gemini. Prefer another provider? Use the choices below or start with OpenRouter instead.'
+                        : isManagedConfiguredMiniMax && miniMaxAccessMode === 'managed'
+                          ? 'StudyClaw-managed MiniMax does not require a MiniMax key here.'
+                          : hasSavedCredential
+                            ? 'You already have a saved key for this provider, so you do not need to enter it again.'
+                            : requiresApiKey
+                              ? 'Your key is encrypted and only used to power your own StudyClaw agent.'
+                              : 'This option is ready to use without an API key.'}
+                    </p>
+                  </div>
+                </div>
               </section>
 
-              <div className="onboarding-divider">
-                <div />
-                <p>Or bring your own model setup</p>
-                <div />
-              </div>
+              <section className="onboarding-model-panel">
+                <div className="onboarding-model-panel__head">
+                  <div>
+                    <p className="eyebrow">Review model choice</p>
+                    <strong>Confirm the exact model StudyClaw will use</strong>
+                    <p className="muted-copy" style={{ marginTop: 8 }}>
+                      You can keep the suggested option or switch to another available model without changing the rest of your onboarding setup.
+                    </p>
+                  </div>
+                  <div className="onboarding-model-panel__fallback">
+                    <span>Routing backup</span>
+                    <strong>OpenRouter → MiniMax M2.7</strong>
+                  </div>
+                </div>
 
-              <div className="form-field">
-                <label htmlFor="onboarding-model-key">AI Provider &amp; Model</label>
-                <select
-                  id="onboarding-model-key"
-                  value={modelKey}
-                  onChange={(event) => {
-                    const nextModelKey = event.target.value;
-                    setModelKey(nextModelKey);
-                    if (nextModelKey.startsWith('minimax/')) {
-                      setMiniMaxAccessMode('managed');
-                    }
-                  }}
-                >
-                  {models.map((model) => (
-                    <option key={model.key} value={model.key}>
-                      {model.name} ({model.provider})
-                    </option>
-                  ))}
-                </select>
-              </div>
+                <div className="form-field">
+                  <label htmlFor="onboarding-model-key">Provider &amp; model</label>
+                  <select
+                    id="onboarding-model-key"
+                    value={modelKey}
+                    onChange={(event) => {
+                      const nextModelKey = event.target.value;
+                      setModelKey(nextModelKey);
+                      if (nextModelKey.startsWith('minimax/')) {
+                        setMiniMaxAccessMode('managed');
+                      }
+                    }}
+                  >
+                    {models.map((model) => (
+                      <option key={model.key} value={model.key}>
+                        {model.name} ({model.provider})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <p className="onboarding-status-copy">{modelFallbackCopy}</p>
+              </section>
 
               {isManagedConfiguredMiniMax ? (
                 <section className="onboarding-access-mode-card">
@@ -604,60 +1042,106 @@ function OnboardingPageContent() {
                 </section>
               ) : null}
 
-              <div className="form-field">
-                <label htmlFor="onboarding-api-key">
-                  API Key {requiresApiKey ? <span className="onboarding-required">*</span> : <span className="muted-copy">(already saved or not needed)</span>}
-                </label>
-                {selectedModel?.provider === 'minimax' && miniMaxAccessMode === 'byok' ? (
-                  <button
-                    type="button"
-                    onClick={handleMiniMaxConnect}
-                    className="ghost-button onboarding-inline-action"
-                  >
-                    Get MiniMax API Key
-                  </button>
+              <section className="onboarding-advanced-card">
+                <button
+                  type="button"
+                  className={`onboarding-advanced-card__toggle${isAdvancedOpen ? ' is-open' : ''}`}
+                  onClick={() => setIsAdvancedOpen((current) => !current)}
+                  aria-expanded={isAdvancedOpen}
+                >
+                  <span>
+                    <strong>Optional advanced provider setup</strong>
+                    <span>Use this only if you want to define the provider and model manually.</span>
+                  </span>
+                  <span className="onboarding-advanced-card__chevron" aria-hidden="true">
+                    {isAdvancedOpen ? '−' : '+'}
+                  </span>
+                </button>
+
+                {isAdvancedOpen ? (
+                  <div className="onboarding-advanced-card__body">
+                    <div className="onboarding-advanced-pills">
+                      {PROVIDER_PRESETS.filter((preset) => preset.key !== 'ollama').map((preset) => (
+                        <button
+                          key={preset.key}
+                          type="button"
+                          className="onboarding-advanced-pill"
+                          onClick={() => handlePresetPrefill(preset.key)}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="onboarding-advanced-grid">
+                      <div className="form-field">
+                        <label htmlFor="custom-provider-name">Provider name</label>
+                        <input
+                          id="custom-provider-name"
+                          value={customProviderName}
+                          onChange={(event) => {
+                            setCustomProviderName(event.target.value);
+                            setError('');
+                          }}
+                          placeholder="Google, OpenRouter, OpenAI, Anthropic..."
+                        />
+                      </div>
+
+                      <div className="form-field">
+                        <label htmlFor="custom-model-name">Model name</label>
+                        <input
+                          id="custom-model-name"
+                          value={customModelName}
+                          onChange={(event) => {
+                            setCustomModelName(event.target.value);
+                            setError('');
+                          }}
+                          placeholder="gemini-3.1-pro-preview, auto, gpt-4.1..."
+                        />
+                      </div>
+                    </div>
+
+                    <div className="form-field">
+                      <label htmlFor="custom-api-key">API key</label>
+                      <input
+                        id="custom-api-key"
+                        type="password"
+                        value={customApiKey}
+                        onChange={(event) => {
+                          setCustomApiKey(event.target.value);
+                          setError('');
+                        }}
+                        placeholder="Paste the API key for this provider"
+                      />
+                    </div>
+
+                    <p className="onboarding-status-copy">
+                      {customProviderName.trim()
+                        ? resolveCustomServiceBaseUrl(customProviderName)
+                          ? `StudyClaw will map ${customProviderName.trim()} to its standard endpoint during onboarding.`
+                          : 'Unsupported onboarding provider. Finish with a built-in option, then add a fully custom endpoint later in Model Settings.'
+                        : 'Leave this collapsed if you want the standard Google, OpenRouter, MiniMax, or Ollama flow.'}
+                    </p>
+                  </div>
                 ) : null}
-                <input
-                  id="onboarding-api-key"
-                  type="password"
-                  value={apiKey}
-                  onChange={(event) => {
-                    setApiKey(event.target.value);
-                    setError('');
-                  }}
-                  placeholder={
-                    selectedModel?.provider === 'ollama'
-                      ? 'No API key needed for local Ollama'
-                      : isManagedConfiguredMiniMax && miniMaxAccessMode === 'managed'
-                        ? 'StudyClaw-managed MiniMax does not require a MiniMax key here'
-                      : selectedModel?.provider === 'openrouter'
-                        ? 'sk-or-v1-...'
-                        : selectedModel?.provider === 'minimax'
-                          ? 'Enter your MiniMax API key'
-                        : 'Enter your API key'
-                  }
-                  disabled={!requiresApiKey}
-                />
-                <p className="onboarding-status-copy">
-                  {isManagedConfiguredMiniMax && miniMaxAccessMode === 'managed'
-                    ? 'StudyClaw will attach this account to a private internal usage identity and keep the real MiniMax API key on the server.'
-                    : hasSavedCredential
-                      ? 'You already have a saved key for this provider, so you do not need to enter it again.'
-                      : requiresApiKey
-                        ? 'Your key is encrypted and used only to power your own agent.'
-                        : 'This model runs through your local Ollama setup, so no API key is required.'}
-                </p>
-              </div>
+              </section>
 
               {error ? <p className="onboarding-error">{error}</p> : null}
 
-              <div className="onboarding-actions">
-                <button
-                  onClick={handleSubmit}
-                  disabled={isSubmitting || (requiresApiKey && !apiKey.trim()) || !modelKey}
-                >
-                  {isSubmitting ? 'Activating your agent...' : 'Launch StudyClaw'}
-                </button>
+              <div className="onboarding-footer">
+                <OnboardingProgressDots step={step} />
+                <div className="onboarding-actions onboarding-actions--split">
+                  <button type="button" className="onboarding-secondary-action" onClick={() => setStep(2)}>
+                    Back
+                  </button>
+                  <button
+                    onClick={handleSubmit}
+                    disabled={isSubmitting || (!usingAdvancedSetup && requiresApiKey && !apiKey.trim()) || (!usingAdvancedSetup && !modelKey)}
+                    className="onboarding-primary-action"
+                  >
+                    {isSubmitting ? 'Activating your agent...' : 'Launch StudyClaw'}
+                  </button>
+                </div>
               </div>
             </div>
           )}

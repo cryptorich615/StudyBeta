@@ -43,7 +43,7 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
   const shouldLockToOnboarding = sessionResolved && !!session && !onboardingComplete;
   const shouldBlockPrivateRoute = sessionResolved && !session && !isPublicRoute && !isOnboardingRoute;
   const shouldHoldRender =
-    !sessionResolved ||
+    (!sessionResolved && !isPublicRoute && !isAuthRoute) ||
     shouldBlockPrivateRoute ||
     (shouldLockToOnboarding && !isOnboardingRoute);
   const showDashboardLayoutControls = mounted && !!session && onboardingComplete && !isAdminRoute && isDashboardRoute;

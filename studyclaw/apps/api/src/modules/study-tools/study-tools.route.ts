@@ -32,6 +32,7 @@ import {
     buildFallbackFlashcards,
     buildFallbackQuiz,
 } from '../../lib/study-generation-fallback';
+import { openLibrarySearchBooks } from '../../lib/openlibrary';
 
 export const studyToolsRouter = Router();
 studyToolsRouter.use(requireAuth);
@@ -40,6 +41,43 @@ const openclaw = new OpenClawClient();
 const MIN_FLASHCARDS = 4;
 const MIN_QUIZ_QUESTIONS = 3;
 const GENERATION_RETRY_LIMIT = 2;
+
+studyToolsRouter.get('/books/search', async (req: AuthedRequest, res) => {
+    const q = String(req.query.q ?? '').trim();
+    const title = String(req.query.title ?? '').trim();
+    const author = String(req.query.author ?? '').trim();
+    const subject = String(req.query.subject ?? '').trim();
+    const isbn = String(req.query.isbn ?? '').trim();
+    const limit = Math.min(Math.max(Number(req.query.limit ?? 8) || 8, 1), 20);
+
+    if (!q && !title && !author && !subject && !isbn) {
+        return res.status(400).json({
+            error: 'Provide a search query, title, author, subject, or ISBN.',
+        });
+    }
+
+    try {
+        const result = await openLibrarySearchBooks({
+            q: q || null,
+            title: title || null,
+            author: author || null,
+            subject: subject || null,
+            isbn: isbn || null,
+            limit,
+        });
+
+        return res.json(result);
+    } catch (error) {
+        console.error('[study-tools] book search failed', {
+            userId: req.user?.id ?? null,
+            message: error instanceof Error ? error.message : 'Unknown Open Library error',
+        });
+
+        return res.status(502).json({
+            error: error instanceof Error ? error.message : 'Book search failed',
+        });
+    }
+});
 
 async function getStudentAgentRecord(userId: string) {
     const result = await db.query(`select id, name from agents where user_id = $1`, [userId]);

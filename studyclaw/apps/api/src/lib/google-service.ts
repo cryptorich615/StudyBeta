@@ -18,11 +18,17 @@ const GOOGLE_CONNECT_SCOPES = [
   'https://www.googleapis.com/auth/calendar.readonly',
   'https://www.googleapis.com/auth/calendar.events',
   'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/documents',
+  'https://www.googleapis.com/auth/spreadsheets.readonly',
+  'https://www.googleapis.com/auth/presentations.readonly',
 ];
 
 const CALENDAR_READ_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
 const CALENDAR_WRITE_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 const DRIVE_READ_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+const DOCS_SCOPE = 'https://www.googleapis.com/auth/documents';
+const SHEETS_READ_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
+const SLIDES_READ_SCOPE = 'https://www.googleapis.com/auth/presentations.readonly';
 const TOKEN_REFRESH_BUFFER_MS = 60_000;
 
 type GoogleAuthState = {
@@ -41,6 +47,7 @@ type StoredGoogleToken = {
   scope: string;
   token_type: string;
   expires_at: string;
+  updated_at?: string | null;
 };
 
 export type GoogleIntegrationState = 'not_connected' | 'connected' | 'reconnect_required';
@@ -51,10 +58,40 @@ export type GoogleIntegrationStatus = {
   needsReconnect: boolean;
   googleEmail: string | null;
   scopes: string[];
+  grantedScopes: string[];
   expiresAt: string | null;
   canReadCalendar: boolean;
   canWriteCalendar: boolean;
   canReadDrive: boolean;
+  canUseDocs: boolean;
+  canUseSheets: boolean;
+  canUseSlides: boolean;
+  canUseWorkspaceSkill: boolean;
+  hasAccessToken: boolean;
+  hasRefreshToken: boolean;
+  lastSyncAt: string | null;
+  error: string | null;
+};
+
+export type GoogleCalendarEvent = {
+  id: string;
+  title: string;
+  startsAt: string | null;
+  endsAt: string | null;
+  htmlLink: string | null;
+};
+
+export type GoogleWorkspacePreview = {
+  id: string;
+  title: string;
+  mimeType: string;
+  modifiedTime: string | null;
+  webViewLink: string | null;
+  supported: boolean;
+  supportMessage: string;
+  format: 'text' | 'html' | 'unknown';
+  content: string;
+  summary: string | null;
 };
 
 function getGoogleClient() {
@@ -131,11 +168,18 @@ function buildIntegrationStatus(input: {
   googleEmail?: string | null;
   scopes?: string[];
   expiresAt?: string | null;
+  hasAccessToken?: boolean;
+  hasRefreshToken?: boolean;
+  lastSyncAt?: string | null;
+  error?: string | null;
 }) {
   const scopes = input.scopes ?? [];
   const canReadCalendar = hasScope(scopes, CALENDAR_READ_SCOPE) || hasScope(scopes, CALENDAR_WRITE_SCOPE);
   const canWriteCalendar = hasScope(scopes, CALENDAR_WRITE_SCOPE);
   const canReadDrive = hasScope(scopes, DRIVE_READ_SCOPE);
+  const canUseDocs = hasScope(scopes, DOCS_SCOPE);
+  const canUseSheets = hasScope(scopes, SHEETS_READ_SCOPE);
+  const canUseSlides = hasScope(scopes, SLIDES_READ_SCOPE);
 
   return {
     status: input.status,
@@ -143,11 +187,106 @@ function buildIntegrationStatus(input: {
     needsReconnect: input.status === 'reconnect_required',
     googleEmail: input.googleEmail ?? null,
     scopes,
+    grantedScopes: scopes,
     expiresAt: input.expiresAt ?? null,
     canReadCalendar,
     canWriteCalendar,
     canReadDrive,
+    canUseDocs,
+    canUseSheets,
+    canUseSlides,
+    canUseWorkspaceSkill: canReadCalendar || canReadDrive || canUseDocs || canUseSheets || canUseSlides,
+    hasAccessToken: input.hasAccessToken ?? false,
+    hasRefreshToken: input.hasRefreshToken ?? false,
+    lastSyncAt: input.lastSyncAt ?? null,
+    error: input.error ?? null,
   } satisfies GoogleIntegrationStatus;
+}
+
+export function dedupeCalendarEvents(events: GoogleCalendarEvent[]) {
+  const seen = new Set<string>();
+  const deduped: GoogleCalendarEvent[] = [];
+
+  for (const event of events) {
+    const key = [
+      event.id || 'unknown',
+      event.startsAt || 'no-start',
+      event.endsAt || 'no-end',
+      event.title || 'untitled',
+    ].join('|');
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(event);
+  }
+
+  return deduped.sort((left, right) => {
+    const leftTime = left.startsAt ? new Date(left.startsAt).getTime() : Number.MAX_SAFE_INTEGER;
+    const rightTime = right.startsAt ? new Date(right.startsAt).getTime() : Number.MAX_SAFE_INTEGER;
+    return leftTime - rightTime;
+  });
+}
+
+export function buildCalendarWindow(windowDays = 30, now = new Date()) {
+  const safeWindowDays = Math.min(Math.max(Number(windowDays) || 30, 1), 365);
+  const timeMin = new Date(now);
+  const timeMax = new Date(now.getTime() + safeWindowDays * 24 * 60 * 60 * 1000);
+
+  return {
+    timeMin: timeMin.toISOString(),
+    timeMax: timeMax.toISOString(),
+  };
+}
+
+export function getGoogleScopesForPurpose(purpose: GoogleAuthPurpose) {
+  return purpose === 'connect' ? GOOGLE_CONNECT_SCOPES : GOOGLE_SIGNIN_SCOPES;
+}
+
+export function deriveGoogleIntegrationStatus(input: {
+  googleEmail?: string | null;
+  scopes?: string[];
+  expiresAt?: string | null;
+  hasStoredToken?: boolean;
+  hasAccessToken?: boolean;
+  hasRefreshToken?: boolean;
+  lastSyncAt?: string | null;
+  refreshSucceeded?: boolean;
+}) {
+  if (!input.hasStoredToken) {
+    return buildIntegrationStatus({ status: 'not_connected' });
+  }
+
+  const scopes = input.scopes ?? [];
+  const expiresAt = input.expiresAt ?? null;
+  const hasAccessToken = input.hasAccessToken ?? false;
+  const hasRefreshToken = input.hasRefreshToken ?? false;
+  const canReadCalendar = hasScope(scopes, CALENDAR_READ_SCOPE) || hasScope(scopes, CALENDAR_WRITE_SCOPE);
+  const isExpired = tokenIsExpired(expiresAt, 0);
+
+  let error: string | null = null;
+  if (!hasAccessToken) {
+    error = 'missing_access_token';
+  } else if (!canReadCalendar) {
+    error = 'missing_calendar_scope';
+  } else if (isExpired && !hasRefreshToken) {
+    error = 'missing_refresh_token';
+  } else if (isExpired && input.refreshSucceeded === false) {
+    error = 'token_refresh_failed';
+  }
+
+  return buildIntegrationStatus({
+    status: error ? 'reconnect_required' : 'connected',
+    googleEmail: input.googleEmail,
+    scopes,
+    expiresAt,
+    hasAccessToken,
+    hasRefreshToken,
+    lastSyncAt: input.lastSyncAt,
+    error,
+  });
 }
 
 async function googleApiFetch<T>(userId: string, url: string, init?: RequestInit) {
@@ -172,12 +311,33 @@ async function googleApiFetch<T>(userId: string, url: string, init?: RequestInit
   return (await response.json()) as T;
 }
 
+async function googleApiFetchText(userId: string, url: string, init?: RequestInit) {
+  const accessToken = await getAccessToken(userId);
+  if (!accessToken) {
+    throw new Error('Google Drive and Calendar are not connected for this user.');
+  }
+
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      ...(init?.headers ?? {}),
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google API request failed with ${response.status}: ${await response.text()}`);
+  }
+
+  return response.text();
+}
+
 export function buildGoogleAuthUrl(input: GoogleAuthState) {
   return getGoogleClient().generateAuthUrl({
     access_type: 'offline',
     include_granted_scopes: true,
     prompt: 'consent select_account',
-    scope: input.purpose === 'connect' ? GOOGLE_CONNECT_SCOPES : GOOGLE_SIGNIN_SCOPES,
+    scope: getGoogleScopesForPurpose(input.purpose),
     state: encodeState(input),
   });
 }
@@ -262,6 +422,11 @@ export async function refreshGoogleTokenIfNeeded(userId: string) {
   });
 
   try {
+    console.info('[google] refreshing token', {
+      userId,
+      hasRefreshToken: true,
+      expiresAt: stored.expires_at,
+    });
     await client.refreshAccessToken();
     const { access_token, refresh_token, expiry_date, token_type, scope } = client.credentials;
     if (!access_token) {
@@ -311,25 +476,29 @@ export async function getGoogleIntegration(userId: string): Promise<GoogleIntegr
   const refreshed = await refreshGoogleTokenIfNeeded(userId);
   const scopes = refreshed?.scopes ?? parseStoredScopes(stored.scope);
   const expiresAt = refreshed?.expiresAt ?? stored.expires_at;
-  const hasCalendarAccess = hasScope(scopes, CALENDAR_READ_SCOPE) || hasScope(scopes, CALENDAR_WRITE_SCOPE);
-  const hasSchedulingAccess = hasScope(scopes, CALENDAR_WRITE_SCOPE);
-  const isExpired = tokenIsExpired(expiresAt, 0);
+  const status = deriveGoogleIntegrationStatus({
+    googleEmail: stored.google_email,
+    hasStoredToken: true,
+    hasAccessToken: !!decryptToken(stored.access_token) || !!refreshed?.accessToken,
+    hasRefreshToken: !!decryptToken(stored.refresh_token),
+    scopes,
+    expiresAt,
+    lastSyncAt: stored.updated_at ?? null,
+    refreshSucceeded: refreshed ? true : tokenIsExpired(expiresAt, 0) ? false : undefined,
+  });
 
-  if (!hasCalendarAccess || !hasSchedulingAccess || !refreshed && isExpired) {
-    return buildIntegrationStatus({
-      status: 'reconnect_required',
-      googleEmail: stored.google_email,
-      scopes,
-      expiresAt,
+  if (status.status !== 'connected') {
+    console.warn('[google] integration requires reconnect', {
+      userId,
+      error: status.error,
+      canReadCalendar: status.canReadCalendar,
+      canWriteCalendar: status.canWriteCalendar,
+      hasRefreshToken: status.hasRefreshToken,
+      expiresAt: status.expiresAt,
     });
   }
 
-  return buildIntegrationStatus({
-    status: 'connected',
-    googleEmail: stored.google_email,
-    scopes,
-    expiresAt,
-  });
+  return status;
 }
 
 export async function getGoogleConnectionStatus(userId: string) {
@@ -362,13 +531,26 @@ export async function syncGoogleSkillForUser(userId: string) {
     await updateOpenClawSkillToggle({
       userId,
       skillName: 'gog',
-      enabled: status.connected,
+      enabled: false,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    if (!/Personal agent .* not found/i.test(message) && !/Unknown skill:\s*gog/i.test(message)) {
+      throw error;
+    }
+  }
+
+  try {
+    await updateOpenClawSkillToggle({
+      userId,
+      skillName: 'google-workspace',
+      enabled: true,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? '');
     if (
       /Personal agent .* not found/i.test(message) ||
-      /Unknown skill:\s*gog/i.test(message)
+      /Unknown skill:\s*google-workspace/i.test(message)
     ) {
       return status;
     }
@@ -379,8 +561,12 @@ export async function syncGoogleSkillForUser(userId: string) {
   return status;
 }
 
-export async function listUpcomingCalendarEvents(userId: string, maxResults = 5) {
-  const now = encodeURIComponent(new Date().toISOString());
+export async function listUpcomingCalendarEvents(
+  userId: string,
+  maxResults = 5,
+  options?: { windowDays?: number }
+) {
+  const { timeMin, timeMax } = buildCalendarWindow(options?.windowDays ?? 30);
   const payload = await googleApiFetch<{
     items?: Array<{
       id: string;
@@ -391,16 +577,16 @@ export async function listUpcomingCalendarEvents(userId: string, maxResults = 5)
     }>;
   }>(
     userId,
-    `https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&timeMin=${now}&maxResults=${maxResults}`
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&maxResults=${maxResults}`
   );
 
-  return (payload.items ?? []).map((item) => ({
+  return dedupeCalendarEvents((payload.items ?? []).map((item) => ({
     id: item.id,
     title: item.summary ?? 'Untitled event',
     startsAt: item.start?.dateTime ?? item.start?.date ?? null,
     endsAt: item.end?.dateTime ?? item.end?.date ?? null,
     htmlLink: item.htmlLink ?? null,
-  }));
+  })));
 }
 
 export async function getUpcomingCalendarItemsForStudent(userId: string, options?: {
@@ -431,15 +617,179 @@ export async function getUpcomingCalendarItemsForStudent(userId: string, options
   }
 }
 
-export async function listRecentDriveFiles(userId: string, pageSize = 5) {
+export async function listRecentDriveFiles(
+  userId: string,
+  pageSize = 5,
+  kind: 'all' | 'docs' | 'sheets' | 'slides' = 'all'
+) {
+  const query =
+    kind === 'docs'
+      ? "mimeType='application/vnd.google-apps.document'"
+      : kind === 'sheets'
+        ? "mimeType='application/vnd.google-apps.spreadsheet'"
+        : kind === 'slides'
+          ? "mimeType='application/vnd.google-apps.presentation'"
+          : '';
   const payload = await googleApiFetch<{
     files?: Array<{ id: string; name: string; mimeType?: string; modifiedTime?: string; webViewLink?: string }>;
   }>(
     userId,
-    `https://www.googleapis.com/drive/v3/files?pageSize=${pageSize}&orderBy=modifiedTime desc&fields=files(id,name,mimeType,modifiedTime,webViewLink)`
+    `https://www.googleapis.com/drive/v3/files?pageSize=${pageSize}&orderBy=modifiedTime desc&fields=files(id,name,mimeType,modifiedTime,webViewLink)${
+      query ? `&q=${encodeURIComponent(query)}` : ''
+    }`
   );
 
   return payload.files ?? [];
+}
+
+function summarizeGoogleWorkspaceContent(content: string) {
+  const normalized = content.replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized.slice(0, 280);
+}
+
+export async function getGoogleWorkspacePreview(userId: string, fileId: string): Promise<GoogleWorkspacePreview> {
+  const file = await googleApiFetch<{
+    id: string;
+    name: string;
+    mimeType: string;
+    modifiedTime?: string;
+    webViewLink?: string;
+  }>(
+    userId,
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,modifiedTime,webViewLink`
+  );
+
+  if (file.mimeType === 'application/vnd.google-apps.document') {
+    const content = await googleApiFetchText(
+      userId,
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/export?mimeType=${encodeURIComponent('text/plain')}`
+    );
+
+    return {
+      id: file.id,
+      title: file.name,
+      mimeType: file.mimeType,
+      modifiedTime: file.modifiedTime ?? null,
+      webViewLink: file.webViewLink ?? null,
+      supported: true,
+      supportMessage: 'Ready to read',
+      format: 'text',
+      content,
+      summary: summarizeGoogleWorkspaceContent(content),
+    };
+  }
+
+  if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
+    const spreadsheet = await googleApiFetch<{
+      sheets?: Array<{ properties?: { title?: string } }>;
+    }>(
+      userId,
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(fileId)}?fields=sheets.properties.title`
+    );
+
+    const firstSheetTitle = spreadsheet.sheets?.[0]?.properties?.title;
+    if (!firstSheetTitle) {
+      return {
+        id: file.id,
+        title: file.name,
+        mimeType: file.mimeType,
+        modifiedTime: file.modifiedTime ?? null,
+        webViewLink: file.webViewLink ?? null,
+        supported: false,
+        supportMessage: 'This spreadsheet does not have a readable preview yet.',
+        format: 'unknown',
+        content: '',
+        summary: null,
+      };
+    }
+
+    const values = await googleApiFetch<{
+      values?: string[][];
+    }>(
+      userId,
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(fileId)}/values/${encodeURIComponent(`${firstSheetTitle}!A1:Z200`)}`
+    );
+
+    const rows = (values.values ?? []).map((row) => row.join(' | ')).join('\n');
+    const content = [`Sheet: ${firstSheetTitle}`, rows].filter(Boolean).join('\n\n');
+
+    return {
+      id: file.id,
+      title: file.name,
+      mimeType: file.mimeType,
+      modifiedTime: file.modifiedTime ?? null,
+      webViewLink: file.webViewLink ?? null,
+      supported: true,
+      supportMessage: 'Ready to read',
+      format: 'text',
+      content,
+      summary: summarizeGoogleWorkspaceContent(content),
+    };
+  }
+
+  if (file.mimeType === 'application/vnd.google-apps.presentation') {
+    const presentation = await googleApiFetch<{
+      slides?: Array<{
+        objectId?: string;
+        pageElements?: Array<{
+          shape?: {
+            text?: {
+              textElements?: Array<{
+                textRun?: {
+                  content?: string;
+                };
+              }>;
+            };
+          };
+        }>;
+      }>;
+    }>(
+      userId,
+      `https://slides.googleapis.com/v1/presentations/${encodeURIComponent(fileId)}`
+    );
+
+    const slidesText = (presentation.slides ?? [])
+      .map((slide, index) => {
+        const parts = (slide.pageElements ?? [])
+          .flatMap((element) => element.shape?.text?.textElements ?? [])
+          .map((item) => item.textRun?.content ?? '')
+          .join('')
+          .replace(/\s+/g, ' ')
+          .trim();
+        return `Slide ${index + 1}\n${parts || 'No extracted text'}`;
+      })
+      .join('\n\n');
+
+    return {
+      id: file.id,
+      title: file.name,
+      mimeType: file.mimeType,
+      modifiedTime: file.modifiedTime ?? null,
+      webViewLink: file.webViewLink ?? null,
+      supported: true,
+      supportMessage: 'Ready to read',
+      format: 'text',
+      content: slidesText,
+      summary: summarizeGoogleWorkspaceContent(slidesText),
+    };
+  }
+
+  return {
+    id: file.id,
+    title: file.name,
+    mimeType: file.mimeType,
+    modifiedTime: file.modifiedTime ?? null,
+    webViewLink: file.webViewLink ?? null,
+    supported: false,
+    supportMessage: 'This Google file type is not previewable in the reader yet.',
+    format: 'unknown',
+    content: '',
+    summary: null,
+  };
 }
 
 export async function createGoogleDoc(userId: string, title: string, bodyText: string) {

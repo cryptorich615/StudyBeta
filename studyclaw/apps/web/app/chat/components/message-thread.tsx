@@ -6,6 +6,7 @@ type ChatEntry = {
   id: string;
   role: 'assistant' | 'user' | string;
   content: string;
+  createdAt?: string;
   metadata?: {
     capabilityBadges?: Array<{
       key: string;

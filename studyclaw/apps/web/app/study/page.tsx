@@ -6,6 +6,7 @@ import { useSearchParams } from 'next/navigation';
 import { apiFetch, getApiErrorMessage, readApiPayload } from '../../lib/api';
 import { readStoredSession } from '../../lib/session';
 import StatusBanner from '../components/status-banner';
+import DocumentReaderWorkspace from '../components/document-reader-workspace';
 
 type Flashcard = {
   id?: string;
@@ -41,6 +42,38 @@ type LibraryData = {
   quizzes: Quiz[];
 };
 
+type GoogleWorkspaceStatus = {
+  connected?: boolean;
+  needsReconnect?: boolean;
+  googleEmail?: string | null;
+  canReadDrive?: boolean;
+  canUseDocs?: boolean;
+  canUseSheets?: boolean;
+  canUseSlides?: boolean;
+  error?: string | null;
+};
+
+type GoogleDriveFile = {
+  id: string;
+  name: string;
+  mimeType?: string;
+  modifiedTime?: string;
+  webViewLink?: string;
+};
+
+function formatWorkspaceDate(value?: string) {
+  if (!value) {
+    return 'Updated recently';
+  }
+
+  return new Date(value).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
 export default function StudyPage() {
   const searchParams = useSearchParams();
   const [title, setTitle] = useState('Biology Notes');
@@ -59,6 +92,20 @@ export default function StudyPage() {
   const [hasSession, setHasSession] = useState(false);
   const [highlightedSetId, setHighlightedSetId] = useState<string | null>(null);
   const [highlightedQuizId, setHighlightedQuizId] = useState<string | null>(null);
+  const [googleStatus, setGoogleStatus] = useState<GoogleWorkspaceStatus | null>(null);
+  const [googleFiles, setGoogleFiles] = useState<{
+    all: GoogleDriveFile[];
+    docs: GoogleDriveFile[];
+    sheets: GoogleDriveFile[];
+    slides: GoogleDriveFile[];
+  }>({
+    all: [],
+    docs: [],
+    sheets: [],
+    slides: [],
+  });
+  const [googleWorkspaceLoading, setGoogleWorkspaceLoading] = useState(false);
+  const [googleWorkspaceError, setGoogleWorkspaceError] = useState('');
 
   useEffect(() => {
     setHasSession(!!readStoredSession()?.user?.id);
@@ -67,6 +114,7 @@ export default function StudyPage() {
   useEffect(() => {
     if (!hasSession) return;
     void loadLibrary();
+    void loadGoogleWorkspace();
   }, [hasSession]);
 
   useEffect(() => {
@@ -123,6 +171,61 @@ export default function StudyPage() {
     }
 
     setLibrary(data);
+  }
+
+  async function loadGoogleWorkspace() {
+    setGoogleWorkspaceLoading(true);
+    setGoogleWorkspaceError('');
+
+    try {
+      const statusResponse = await apiFetch('/api/google');
+      const statusPayload = await readApiPayload(statusResponse);
+
+      if (!statusResponse.ok) {
+        throw new Error(getApiErrorMessage(statusPayload, 'Failed to load Google workspace'));
+      }
+
+      setGoogleStatus(statusPayload as GoogleWorkspaceStatus);
+
+      if (!(statusPayload?.connected && statusPayload?.canReadDrive)) {
+        setGoogleFiles({ all: [], docs: [], sheets: [], slides: [] });
+        return;
+      }
+
+      const [allResponse, docsResponse, sheetsResponse, slidesResponse] = await Promise.all([
+        apiFetch('/api/google/drive?kind=all&pageSize=4'),
+        apiFetch('/api/google/drive?kind=docs&pageSize=3'),
+        apiFetch('/api/google/drive?kind=sheets&pageSize=3'),
+        apiFetch('/api/google/drive?kind=slides&pageSize=3'),
+      ]);
+
+      const [allPayload, docsPayload, sheetsPayload, slidesPayload] = await Promise.all([
+        readApiPayload(allResponse),
+        readApiPayload(docsResponse),
+        readApiPayload(sheetsResponse),
+        readApiPayload(slidesResponse),
+      ]);
+
+      if (!allResponse.ok || !docsResponse.ok || !sheetsResponse.ok || !slidesResponse.ok) {
+        throw new Error(
+          getApiErrorMessage(
+            allPayload?.message ? allPayload : docsPayload?.message ? docsPayload : sheetsPayload?.message ? sheetsPayload : slidesPayload,
+            'Failed to load recent Google files'
+          )
+        );
+      }
+
+      setGoogleFiles({
+        all: Array.isArray(allPayload) ? allPayload as GoogleDriveFile[] : [],
+        docs: Array.isArray(docsPayload) ? docsPayload as GoogleDriveFile[] : [],
+        sheets: Array.isArray(sheetsPayload) ? sheetsPayload as GoogleDriveFile[] : [],
+        slides: Array.isArray(slidesPayload) ? slidesPayload as GoogleDriveFile[] : [],
+      });
+    } catch (error: any) {
+      setGoogleWorkspaceError(error.message || 'Failed to load Google workspace');
+    } finally {
+      setGoogleWorkspaceLoading(false);
+    }
   }
 
   async function generateFlashcards() {
@@ -319,6 +422,40 @@ export default function StudyPage() {
           <StatusBanner tone={highlightedSetId || highlightedQuizId ? 'success' : 'warning'}>{status}</StatusBanner>
         ) : null}
 
+        {hasSession ? (
+          <section className="study-library-reader-section">
+            <div className="study-library-section__head">
+              <div>
+                <p className="eyebrow">Workspace reader</p>
+                <h2 className="section-title">Browse uploaded documents and saved books while you study.</h2>
+              </div>
+              <Link href="/reader" className="ghost-button">Open full reader</Link>
+            </div>
+
+            <DocumentReaderWorkspace
+              initialAssetId={searchParams.get('doc')}
+              onUseForFlashcards={({ title: nextTitle, text }) => {
+                setTitle(nextTitle);
+                setNotes(text);
+                setLibraryType('flashcards');
+                setStatus('Loaded this document into the flashcard generator.');
+                window.requestAnimationFrame(() => {
+                  document.getElementById('study-title')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                });
+              }}
+              onUseForQuiz={({ title: nextTitle, text }) => {
+                setTitle(`${nextTitle} Quiz`);
+                setNotes(text);
+                setLibraryType('quizzes');
+                setStatus('Loaded this document into the quiz generator.');
+                window.requestAnimationFrame(() => {
+                  document.getElementById('study-title')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                });
+              }}
+            />
+          </section>
+        ) : null}
+
         <section className="study-library-workspace">
           <section className="study-generator-panel">
             <div className="study-library-panel-head">
@@ -436,6 +573,104 @@ export default function StudyPage() {
                   </div>
                 ) : null}
               </div>
+            </section>
+
+            <section className="study-library-overview study-library-google">
+              <div className="study-library-panel-head">
+                <div>
+                  <p className="eyebrow">Google workspace</p>
+                  <h3 style={{ margin: 0 }}>Docs, Sheets, Slides, and Drive</h3>
+                </div>
+                <button type="button" className="ghost-button" onClick={() => void loadGoogleWorkspace()}>
+                  Refresh
+                </button>
+              </div>
+
+              <p className="muted-copy study-library-google__copy">
+                Keep your Google study files close to the rest of your library so you can jump between docs, uploads, and AI tools without leaving StudyClaw.
+              </p>
+
+              {googleWorkspaceError ? (
+                <StatusBanner tone="warning">{googleWorkspaceError}</StatusBanner>
+              ) : null}
+
+              {!googleStatus?.connected ? (
+                <div className="study-library-empty">
+                  <strong>Connect Google to open your workspace files here.</strong>
+                  <p>
+                    Once connected, recent Docs, Sheets, Slides, and Drive files will appear here for quick access while you study.
+                  </p>
+                  <Link href="/calendar" className="primary-link-button">Connect Google Calendar</Link>
+                </div>
+              ) : !googleStatus.canReadDrive ? (
+                <div className="study-library-empty">
+                  <strong>Reconnect Google to finish workspace access.</strong>
+                  <p>
+                    Your account is connected, but Drive access still needs to be granted before StudyClaw can show your Google files.
+                  </p>
+                  <Link href="/calendar" className="primary-link-button">Reconnect Google</Link>
+                </div>
+              ) : googleWorkspaceLoading ? (
+                <div className="study-library-empty">
+                  <strong>Loading your Google workspace</strong>
+                  <p>Pulling in your latest files now.</p>
+                </div>
+              ) : (
+                <div className="study-library-google__body">
+                  <div className="study-library-stat-grid">
+                    <div className="study-library-stat-card">
+                      <strong>{googleFiles.all.length}</strong>
+                      <span>recent Drive files</span>
+                    </div>
+                    <div className="study-library-stat-card">
+                      <strong>{[googleStatus.canUseDocs, googleStatus.canUseSheets, googleStatus.canUseSlides].filter(Boolean).length}</strong>
+                      <span>workspace tools ready</span>
+                    </div>
+                  </div>
+
+                  <div className="study-library-google__groups">
+                    {[
+                      { label: 'Recent files', files: googleFiles.all },
+                      { label: 'Docs', files: googleFiles.docs },
+                      { label: 'Sheets', files: googleFiles.sheets },
+                      { label: 'Slides', files: googleFiles.slides },
+                    ].map((group) => (
+                      <section key={group.label} className="study-library-google__group">
+                        <div className="study-library-section__head">
+                          <div>
+                            <p className="eyebrow">{group.label}</p>
+                            <h4 className="study-library-google__group-title">{group.files.length} available</h4>
+                          </div>
+                        </div>
+                        {group.files.length ? (
+                          <div className="stack-list">
+                            {group.files.map((file) => (
+                              <article key={`${group.label}-${file.id}`} className="stack-item">
+                                <div>
+                                  <strong>{file.name}</strong>
+                                  <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                                    {file.mimeType ?? 'Google file'} · {formatWorkspaceDate(file.modifiedTime)}
+                                  </p>
+                                </div>
+                                {file.webViewLink ? (
+                                  <a href={file.webViewLink} target="_blank" rel="noreferrer" className="ghost-button">
+                                    Open
+                                  </a>
+                                ) : null}
+                              </article>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="study-library-empty study-library-google__empty">
+                            <strong>No {group.label.toLowerCase()} yet</strong>
+                            <p>As you use Google Workspace, your recent files will appear here.</p>
+                          </div>
+                        )}
+                      </section>
+                    ))}
+                  </div>
+                </div>
+              )}
             </section>
 
             <section className="study-library-helper-row">

@@ -13,8 +13,8 @@ export const STUDYCLAW_TIER_LIMITS = {
 
 export const STUDYCLAW_TIER_STARTING_CREDITS = {
   tier_1: 1000,
-  tier_2: 2000,
-  tier_3: 3000,
+  tier_2: 3000,
+  tier_3: 5000,
 } as const;
 
 export type StudyClawUsageTier = keyof typeof STUDYCLAW_TIER_LIMITS;

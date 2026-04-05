@@ -10,7 +10,13 @@ import {
   loadAgentProfile,
 } from '../../lib/study-context';
 import { buildBootstrapExtractionPrompt } from '../../lib/bootstrap';
-import { syncGoogleSkillForUser, upsertCalendarEventForReminder } from '../../lib/google-service';
+import {
+  createGoogleDoc,
+  getGoogleIntegration,
+  listRecentDriveFiles,
+  syncGoogleSkillForUser,
+  upsertCalendarEventForReminder,
+} from '../../lib/google-service';
 import { syncUserWorkspaceProfile } from '../../lib/user-agent';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
 import { syncUserModelRuntimeConfig } from '../../lib/model-settings';
@@ -99,6 +105,10 @@ type FallbackLibraryResult = {
   books: NormalizedBook[];
 };
 
+type GoogleWorkspaceIntent =
+  | { action: 'list_files'; kind: 'all' | 'docs' | 'sheets' | 'slides'; limit: number }
+  | { action: 'create_doc'; title: string; bodyText: string };
+
 const TIMEZONE_ABBREVIATION_TO_OFFSET_MINUTES: Record<string, number> = {
   UTC: 0,
   EST: -5 * 60,
@@ -126,6 +136,23 @@ const ADMIN_CHAT_PROFILE = {
   teaching_style: 'operational',
   reminder_style: 'n/a',
 } as const;
+
+async function runChatPostReplyTasks(
+  tasks: Array<() => Promise<unknown>>,
+  context: { userId: string; threadId: string }
+) {
+  for (const task of tasks) {
+    try {
+      await task();
+    } catch (error) {
+      console.error('[chat] post-reply task failed', {
+        userId: context.userId,
+        threadId: context.threadId,
+        message: error instanceof Error ? error.message : 'Unknown post-reply error',
+      });
+    }
+  }
+}
 
 function parseJsonBlock(value: string) {
   const cleaned = value
@@ -719,7 +746,7 @@ function looksLikeReminderStatusQuestion(message: string) {
 
 function normalizeChatFailureMessage(messageText: string) {
   const normalized = messageText.trim();
-  if (/OpenClaw error 500:/i.test(normalized) || /internal error/i.test(normalized)) {
+  if (/OpenClaw error 500:/i.test(normalized) || /internal error/i.test(normalized) || /internal server error/i.test(normalized)) {
     return 'StudyClaw could not get a response from OpenClaw just now. Please try again.';
   }
 
@@ -728,6 +755,72 @@ function normalizeChatFailureMessage(messageText: string) {
   }
 
   return normalized || 'StudyClaw could not send this chat message right now.';
+}
+
+function parseGoogleWorkspaceIntent(message: string): GoogleWorkspaceIntent | null {
+  const normalized = message.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const createDocMatch = normalized.match(
+    /\b(?:create|make|start)\s+(?:a\s+)?google doc(?:ument)?(?:\s+(?:called|named|titled)\s+["“]?([^"”]+)["”]?)?(?:\s+(?:about|with|for)\s+([\s\S]+))?/i
+  );
+  if (createDocMatch) {
+    const title = createDocMatch[1]?.trim() || 'StudyClaw Notes';
+    const bodyText = createDocMatch[2]?.trim() || '';
+    return {
+      action: 'create_doc',
+      title,
+      bodyText,
+    };
+  }
+
+  if (!/\b(google|drive|docs?|sheets?|slides?)\b/i.test(normalized)) {
+    return null;
+  }
+
+  if (!/\b(show|list|find|open|recent|latest|my files|my file|drive files|google drive)\b/i.test(normalized)) {
+    return null;
+  }
+
+  const kind = /\bslides?\b/i.test(normalized)
+    ? 'slides'
+    : /\bsheets?\b/i.test(normalized)
+      ? 'sheets'
+      : /\bdocs?\b/i.test(normalized)
+        ? 'docs'
+        : 'all';
+
+  return {
+    action: 'list_files',
+    kind,
+    limit: 5,
+  };
+}
+
+function formatGoogleWorkspaceListLabel(kind: 'all' | 'docs' | 'sheets' | 'slides') {
+  if (kind === 'docs') return 'Google Docs';
+  if (kind === 'sheets') return 'Google Sheets';
+  if (kind === 'slides') return 'Google Slides';
+  return 'Google Drive files';
+}
+
+function isRetryableChatFailure(messageText: string) {
+  const normalized = messageText.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    normalized.includes('internal error') ||
+    normalized.includes('internal server error') ||
+    normalized.includes('timed out') ||
+    normalized.includes('gateway is draining') ||
+    normalized.includes('temporarily unavailable') ||
+    normalized.includes('openclaw error 500') ||
+    normalized.includes('openclaw could not get a response')
+  );
 }
 
 function looksLikeReminderIntent(message: string) {
@@ -1631,7 +1724,7 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
 
   try {
     const context = isAdmin
-      ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] }, grades: { line: 'Grade tracker: unavailable for admin mode.', conceptLine: 'Wrong-answer patterns: unavailable for admin mode.' }, schedule: { line: 'Schedule: unavailable for admin mode.', todayLine: 'Today\'s classes: unavailable for admin mode.', detailLine: 'Relevant class detail: unavailable for admin mode.', context: null, referencedEntry: null } }
+      ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] }, grades: { line: 'Grade tracker: unavailable for admin mode.', conceptLine: 'Wrong-answer patterns: unavailable for admin mode.' }, schedule: { line: 'Schedule: unavailable for admin mode.', todayLine: 'Today\'s classes: unavailable for admin mode.', detailLine: 'Relevant class detail: unavailable for admin mode.', context: null, referencedEntry: null }, googleWorkspace: { status: null, files: [] } }
       : await buildStudyContext(req.user!.id, { query: effectiveMessage });
     const reminderStatusReply = trimmedMessage
       ? await tryHandleReminderStatusQuestion({
@@ -1904,6 +1997,169 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
       });
     }
 
+    const googleWorkspaceIntent = trimmedMessage ? parseGoogleWorkspaceIntent(trimmedMessage) : null;
+    if (googleWorkspaceIntent) {
+      const googleStatus = await getGoogleIntegration(req.user!.id).catch(() => null);
+
+      if (!googleStatus || !googleStatus.connected || !googleStatus.hasAccessToken) {
+        const assistantText = normalizeAssistantIdentity(
+          'Google is not connected yet. Open the Calendar page and connect Google there first so I can use your calendar and workspace files inside StudyClaw.',
+          agent.persona_name
+        );
+
+        await db.query(
+          `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+          [
+            activeThreadId,
+            assistantText,
+            JSON.stringify({
+              googleWorkspace: true,
+              capabilityBadges: buildAssistantCapabilityBadges({}),
+            }),
+          ]
+        );
+        await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+        return res.json({
+          threadId: activeThreadId,
+          openclawSessionId,
+          assistantMessage: assistantText,
+        });
+      }
+
+      if (googleWorkspaceIntent.action === 'create_doc') {
+        if (!googleStatus.canUseDocs) {
+          const assistantText = normalizeAssistantIdentity(
+            'Google Docs access is not granted yet. Reconnect Google from the Calendar page so StudyClaw can request Docs permission, then try again.',
+            agent.persona_name
+          );
+
+          await db.query(
+            `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+            [
+              activeThreadId,
+              assistantText,
+              JSON.stringify({
+                googleWorkspace: true,
+                requiresReconnect: true,
+                capabilityBadges: buildAssistantCapabilityBadges({}),
+              }),
+            ]
+          );
+          await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+          return res.json({
+            threadId: activeThreadId,
+            openclawSessionId,
+            assistantMessage: assistantText,
+          });
+        }
+
+        const doc = await createGoogleDoc(req.user!.id, googleWorkspaceIntent.title, googleWorkspaceIntent.bodyText).catch((error) => {
+          throw new Error(error instanceof Error ? error.message : 'Failed to create Google Doc');
+        });
+
+        const assistantText = normalizeAssistantIdentity(
+          `I created a Google Doc called "${doc.title}". You can open it here: https://docs.google.com/document/d/${doc.documentId}/edit`,
+          agent.persona_name
+        );
+
+        await db.query(
+          `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+          [
+            activeThreadId,
+            assistantText,
+            JSON.stringify({
+              googleWorkspace: true,
+              createdDocId: doc.documentId,
+              capabilityBadges: buildAssistantCapabilityBadges({}),
+            }),
+          ]
+        );
+        await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+        return res.json({
+          threadId: activeThreadId,
+          openclawSessionId,
+          assistantMessage: assistantText,
+          artifacts: [
+            {
+              type: 'google_doc',
+              id: doc.documentId,
+              title: doc.title,
+              url: `https://docs.google.com/document/d/${doc.documentId}/edit`,
+            },
+          ],
+        });
+      }
+
+      if (!googleStatus.canReadDrive) {
+        const assistantText = normalizeAssistantIdentity(
+          'Google Drive access is not granted yet. Reconnect Google from the Calendar page so StudyClaw can request Drive permission, then I can list your files here.',
+          agent.persona_name
+        );
+
+        await db.query(
+          `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+          [
+            activeThreadId,
+            assistantText,
+            JSON.stringify({
+              googleWorkspace: true,
+              requiresReconnect: true,
+              capabilityBadges: buildAssistantCapabilityBadges({}),
+            }),
+          ]
+        );
+        await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+        return res.json({
+          threadId: activeThreadId,
+          openclawSessionId,
+          assistantMessage: assistantText,
+        });
+      }
+
+      const files = await listRecentDriveFiles(req.user!.id, googleWorkspaceIntent.limit, googleWorkspaceIntent.kind);
+      const listLabel = formatGoogleWorkspaceListLabel(googleWorkspaceIntent.kind);
+      const assistantText = normalizeAssistantIdentity(
+        files.length
+          ? `Here are your recent ${listLabel.toLowerCase()}:\n\n${files
+              .map((file, index) => `${index + 1}. ${file.name || 'Untitled'}${file.webViewLink ? ` — ${file.webViewLink}` : ''}`)
+              .join('\n')}`
+          : `I checked your ${listLabel.toLowerCase()}, but there were no recent matching files yet.`,
+        agent.persona_name
+      );
+
+      await db.query(
+        `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+        [
+          activeThreadId,
+          assistantText,
+          JSON.stringify({
+            googleWorkspace: true,
+            fileKind: googleWorkspaceIntent.kind,
+            resultCount: files.length,
+            capabilityBadges: buildAssistantCapabilityBadges({}),
+          }),
+        ]
+      );
+      await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+      return res.json({
+        threadId: activeThreadId,
+        openclawSessionId,
+        assistantMessage: assistantText,
+        artifacts: files.map((file) => ({
+          type: 'google_file',
+          id: file.id,
+          title: file.name,
+          mimeType: file.mimeType ?? null,
+          url: file.webViewLink ?? null,
+        })),
+      });
+    }
+
     const reminderIntent = trimmedMessage
       ? await (async () => {
           await ensureManagedUsageReservation('chat-reminder-intent', {
@@ -2146,7 +2402,7 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
       [activeThreadId, assistantText, JSON.stringify(assistantMetadata)]
     );
     const assistantMessageResult = await db.query(
-      `select id, role, content, metadata_json
+      `select id, role, content, metadata_json, created_at
        from chat_messages
        where thread_id = $1
        order by created_at desc
@@ -2157,61 +2413,88 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
       activeThreadId,
       reply.sessionId,
     ]);
-    if (studentAgent) {
-      await db.query(
-        `insert into agent_actions (agent_id, action_type, summary, payload)
-         values ($1, $2, $3, $4)`,
-        [
-          studentAgent.id,
-          'chat_reply',
-          `Replied in chat thread ${activeThreadId}.`,
-          JSON.stringify({
-            threadId: activeThreadId,
-            openclawSessionId: reply.sessionId,
-          }),
-        ]
-      );
-    }
-    await recordStudyEvent({
-      userId: req.user!.id,
-      eventKey: `chat:${activeThreadId}:${assistantMessageResult.rows[0]?.id ?? reply.sessionId}`,
-      eventType: isResearchRequest ? 'research_chat_reply' : 'chat_reply',
-      sourceType: 'chat_thread',
-      sourceId: activeThreadId,
-      payload: {
-        studyMode: studyMode ?? 'general',
-        usedResearch: isResearchRequest,
-        attachmentCount: normalizedAttachments.length,
-      },
-    });
     const weakAreaSummary = trimmedMessage ? inferWeakAreaSummary(trimmedMessage) : null;
-    if (weakAreaSummary) {
-      await writeMemorySummary({
-        userId: req.user!.id,
-        summaryType: 'weak_area',
-        summary: weakAreaSummary,
-        summaryKey: `weak-area:${req.user!.id}:${weakAreaSummary.toLowerCase()}`,
-        importance: 5,
-      });
-    }
     const preferenceSummary = trimmedMessage ? inferPreferenceSummary(trimmedMessage) : null;
-    if (preferenceSummary) {
-      await writeMemorySummary({
-        userId: req.user!.id,
-        summaryType: 'learning_preference',
-        summary: preferenceSummary,
-        summaryKey: `preference:${req.user!.id}:${preferenceSummary.toLowerCase()}`,
-        importance: 5,
-      });
-    }
+    void runChatPostReplyTasks(
+      [
+        async () => {
+          if (!studentAgent) {
+            return;
+          }
 
-    if (!isAdmin && !context.profile?.onboarding_complete) {
-      await syncBootstrapProfile(req.user!.id, activeThreadId!, agent.model_key);
-    }
-    await completeManagedUsage(true, {
-      outcome: 'chat_reply',
-      openclawSessionId: reply.sessionId,
-    });
+          await db.query(
+            `insert into agent_actions (agent_id, action_type, summary, payload)
+             values ($1, $2, $3, $4)`,
+            [
+              studentAgent.id,
+              'chat_reply',
+              `Replied in chat thread ${activeThreadId}.`,
+              JSON.stringify({
+                threadId: activeThreadId,
+                openclawSessionId: reply.sessionId,
+              }),
+            ]
+          );
+        },
+        async () => {
+          await recordStudyEvent({
+            userId: req.user!.id,
+            eventKey: `chat:${activeThreadId}:${assistantMessageResult.rows[0]?.id ?? reply.sessionId}`,
+            eventType: isResearchRequest ? 'research_chat_reply' : 'chat_reply',
+            sourceType: 'chat_thread',
+            sourceId: activeThreadId,
+            payload: {
+              studyMode: studyMode ?? 'general',
+              usedResearch: isResearchRequest,
+              attachmentCount: normalizedAttachments.length,
+            },
+          });
+        },
+        async () => {
+          if (!weakAreaSummary) {
+            return;
+          }
+
+          await writeMemorySummary({
+            userId: req.user!.id,
+            summaryType: 'weak_area',
+            summary: weakAreaSummary,
+            summaryKey: `weak-area:${req.user!.id}:${weakAreaSummary.toLowerCase()}`,
+            importance: 5,
+          });
+        },
+        async () => {
+          if (!preferenceSummary) {
+            return;
+          }
+
+          await writeMemorySummary({
+            userId: req.user!.id,
+            summaryType: 'learning_preference',
+            summary: preferenceSummary,
+            summaryKey: `preference:${req.user!.id}:${preferenceSummary.toLowerCase()}`,
+            importance: 5,
+          });
+        },
+        async () => {
+          if (isAdmin || context.profile?.onboarding_complete) {
+            return;
+          }
+
+          await syncBootstrapProfile(req.user!.id, activeThreadId!, agent.model_key);
+        },
+        async () => {
+          await completeManagedUsage(true, {
+            outcome: 'chat_reply',
+            openclawSessionId: reply.sessionId,
+          });
+        },
+      ],
+      {
+        userId: req.user!.id,
+        threadId: activeThreadId!,
+      }
+    );
 
     return res.json({
       threadId: activeThreadId,
@@ -2253,6 +2536,14 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
         error: error.code,
         message: error.message,
         detail: error.detail,
+      });
+    }
+    if (activeThreadId && isRetryableChatFailure(messageText)) {
+      return res.status(202).json({
+        pending: true,
+        threadId: activeThreadId,
+        openclawSessionId,
+        message: 'Still working on that response. It should appear in the chat shortly.',
       });
     }
     if (isResearchRequest) {

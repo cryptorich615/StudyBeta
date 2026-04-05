@@ -26,6 +26,13 @@ import {
   upsertAssignmentFromReminder,
   writeMemorySummary,
 } from '../../lib/student-memory';
+import {
+  getDocumentBody,
+  inferReaderFormat,
+  isReaderSupported,
+  splitDocumentIntoPages,
+  summarizeReaderAvailability,
+} from '../../lib/reader-workspace';
 
 const openclaw = new OpenClawClient();
 const ADMIN_COACH_PROFILE = {
@@ -134,6 +141,42 @@ function parseJsonBlock(value: string) {
   }
 }
 
+function parseReaderNumber(value: unknown, fallback: number, { min, max }: { min: number; max: number }) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, numeric));
+}
+
+function parseReaderInteger(value: unknown, fallback: number | null, { min, max }: { min: number; max: number }) {
+  if (value === null || value === undefined || value === '') {
+    return fallback;
+  }
+
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, numeric));
+}
+
+function normalizeReaderStateInput(input: Record<string, unknown>) {
+  return {
+    progressPercent: parseReaderNumber(input.progressPercent, 0, { min: 0, max: 100 }),
+    lastPosition: String(input.lastPosition ?? '').trim() || null,
+    lastPage: parseReaderInteger(input.lastPage, null, { min: 1, max: 100_000 }),
+    viewMode: ['scroll', 'paged'].includes(String(input.viewMode ?? '').trim()) ? String(input.viewMode).trim() : 'scroll',
+    zoomLevel: parseReaderNumber(input.zoomLevel, 1, { min: 0.5, max: 3 }),
+    fontSize: parseReaderInteger(input.fontSize, 18, { min: 12, max: 32 }) ?? 18,
+    lineSpacing: parseReaderNumber(input.lineSpacing, 1.6, { min: 1, max: 2.4 }),
+    readingWidth: parseReaderInteger(input.readingWidth, 720, { min: 480, max: 1200 }) ?? 720,
+    theme: ['paper', 'dark', 'sage'].includes(String(input.theme ?? '').trim()) ? String(input.theme).trim() : 'paper',
+  };
+}
+
 export const coachRouter = Router();
 
 coachRouter.use(requireAuth);
@@ -183,17 +226,24 @@ coachRouter.get('/assets', async (req: AuthedRequest, res) => {
             sa.title,
             sa.original_text,
             sa.processed_text,
+            sa.file_url,
             sa.asset_type,
             sa.metadata_json,
             sa.created_at,
             sa.updated_at,
             sa.subject_id,
-            s.name as subject_name
+            s.name as subject_name,
+            rs.progress_percent,
+            rs.last_page,
+            rs.last_opened_at
      from study_assets sa
      left join subjects s on s.id = sa.subject_id
+     left join study_asset_reader_state rs
+       on rs.asset_id = sa.id
+      and rs.user_id = sa.user_id
      where sa.user_id = $1
        and sa.asset_type in ('typed_note', 'image_note', 'audio_note', 'uploaded_pdf')
-     order by coalesce(s.name, sa.metadata_json->>'sectionName', 'Unsorted') asc, sa.created_at desc`,
+     order by coalesce(rs.last_opened_at, sa.created_at) desc, coalesce(s.name, sa.metadata_json->>'sectionName', 'Unsorted') asc, sa.created_at desc`,
     [req.user!.id]
   );
 
@@ -203,14 +253,304 @@ coachRouter.get('/assets', async (req: AuthedRequest, res) => {
       title: row.title,
       originalText: row.original_text ?? '',
       processedText: row.processed_text ?? '',
+      fileUrl: row.file_url ?? null,
       assetType: row.asset_type,
       metadata: row.metadata_json ?? {},
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       subjectId: row.subject_id,
       sectionName: row.subject_name || row.metadata_json?.sectionName || 'Unsorted',
+      readingProgress: row.progress_percent !== null && row.progress_percent !== undefined ? Number(row.progress_percent) : 0,
+      lastOpenedAt: row.last_opened_at ?? null,
+      lastPage: row.last_page ?? null,
     }))
   );
+});
+
+coachRouter.get('/assets/:assetId/reader', async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+
+  const assetResult = await db.query(
+    `select sa.id,
+            sa.title,
+            sa.original_text,
+            sa.processed_text,
+            sa.file_url,
+            sa.asset_type,
+            sa.metadata_json,
+            sa.created_at,
+            sa.updated_at,
+            sa.subject_id,
+            s.name as subject_name,
+            rs.progress_percent,
+            rs.last_position,
+            rs.last_page,
+            rs.view_mode,
+            rs.zoom_level,
+            rs.font_size,
+            rs.line_spacing,
+            rs.reading_width,
+            rs.theme,
+            rs.last_opened_at
+     from study_assets sa
+     left join subjects s on s.id = sa.subject_id
+     left join study_asset_reader_state rs
+       on rs.asset_id = sa.id
+      and rs.user_id = sa.user_id
+     where sa.id = $1
+       and sa.user_id = $2
+     limit 1`,
+    [req.params.assetId, req.user!.id]
+  );
+
+  const asset = assetResult.rows[0] as
+    | {
+        id: string;
+        title: string;
+        original_text?: string | null;
+        processed_text?: string | null;
+        file_url?: string | null;
+        asset_type: string;
+        metadata_json?: Record<string, any> | null;
+        created_at: string;
+        updated_at: string;
+        subject_id?: string | null;
+        subject_name?: string | null;
+        progress_percent?: string | number | null;
+        last_position?: string | null;
+        last_page?: number | null;
+        view_mode?: string | null;
+        zoom_level?: string | number | null;
+        font_size?: number | null;
+        line_spacing?: string | number | null;
+        reading_width?: number | null;
+        theme?: string | null;
+        last_opened_at?: string | null;
+      }
+    | undefined;
+
+  if (!asset) {
+    return res.status(404).json({
+      error: 'not_found',
+      message: 'Document not found',
+    });
+  }
+
+  const body = getDocumentBody({
+    processedText: asset.processed_text,
+    originalText: asset.original_text,
+  });
+  const attachments = Array.isArray(asset.metadata_json?.attachments) ? asset.metadata_json?.attachments : [];
+  const format = inferReaderFormat({
+    assetType: asset.asset_type,
+    title: asset.title,
+    fileUrl: asset.file_url,
+    attachments,
+  });
+  const support = summarizeReaderAvailability({
+    format,
+    hasContent: !!body,
+    hasFileUrl: !!asset.file_url,
+  });
+  const annotationsResult = await db.query(
+    `select id, kind, label, snippet, note, location, page_number, created_at, updated_at
+     from study_asset_annotations
+     where user_id = $1
+       and asset_id = $2
+     order by created_at desc`,
+    [req.user!.id, asset.id]
+  );
+
+  res.json({
+    id: asset.id,
+    title: asset.title,
+    assetType: asset.asset_type,
+    fileUrl: asset.file_url ?? null,
+    subjectId: asset.subject_id ?? null,
+    sectionName: asset.subject_name || asset.metadata_json?.sectionName || 'Unsorted',
+    metadata: asset.metadata_json ?? {},
+    content: body,
+    format,
+    supported: support.supported && (isReaderSupported(format) || !!asset.file_url),
+    supportMessage: support.message,
+    summary: asset.metadata_json?.summary ?? null,
+    pageCount: splitDocumentIntoPages(body).length,
+    readerState: {
+      progressPercent: asset.progress_percent !== null && asset.progress_percent !== undefined ? Number(asset.progress_percent) : 0,
+      lastPosition: asset.last_position ?? null,
+      lastPage: asset.last_page ?? null,
+      viewMode: asset.view_mode ?? 'scroll',
+      zoomLevel: asset.zoom_level !== null && asset.zoom_level !== undefined ? Number(asset.zoom_level) : 1,
+      fontSize: asset.font_size ?? 18,
+      lineSpacing: asset.line_spacing !== null && asset.line_spacing !== undefined ? Number(asset.line_spacing) : 1.6,
+      readingWidth: asset.reading_width ?? 720,
+      theme: asset.theme ?? 'paper',
+      lastOpenedAt: asset.last_opened_at ?? null,
+    },
+    annotations: annotationsResult.rows.map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      label: row.label,
+      snippet: row.snippet,
+      note: row.note,
+      location: row.location,
+      pageNumber: row.page_number,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    })),
+  });
+});
+
+coachRouter.put('/assets/:assetId/reader/state', async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+
+  const assetExists = await db.query(
+    `select id
+     from study_assets
+     where id = $1
+       and user_id = $2
+     limit 1`,
+    [req.params.assetId, req.user!.id]
+  );
+
+  if (!assetExists.rows[0]) {
+    return res.status(404).json({
+      error: 'not_found',
+      message: 'Document not found',
+    });
+  }
+
+  const normalized = normalizeReaderStateInput(req.body ?? {});
+  const result = await db.query(
+    `insert into study_asset_reader_state (
+       user_id, asset_id, progress_percent, last_position, last_page, view_mode, zoom_level, font_size, line_spacing, reading_width, theme, last_opened_at
+     )
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+     on conflict (user_id, asset_id) do update set
+       progress_percent = excluded.progress_percent,
+       last_position = excluded.last_position,
+       last_page = excluded.last_page,
+       view_mode = excluded.view_mode,
+       zoom_level = excluded.zoom_level,
+       font_size = excluded.font_size,
+       line_spacing = excluded.line_spacing,
+       reading_width = excluded.reading_width,
+       theme = excluded.theme,
+       last_opened_at = now(),
+       updated_at = now()
+     returning progress_percent, last_position, last_page, view_mode, zoom_level, font_size, line_spacing, reading_width, theme, last_opened_at`,
+    [
+      req.user!.id,
+      req.params.assetId,
+      normalized.progressPercent,
+      normalized.lastPosition,
+      normalized.lastPage,
+      normalized.viewMode,
+      normalized.zoomLevel,
+      normalized.fontSize,
+      normalized.lineSpacing,
+      normalized.readingWidth,
+      normalized.theme,
+    ]
+  );
+
+  const row = result.rows[0];
+  res.json({
+    ok: true,
+    readerState: {
+      progressPercent: Number(row.progress_percent),
+      lastPosition: row.last_position,
+      lastPage: row.last_page,
+      viewMode: row.view_mode,
+      zoomLevel: Number(row.zoom_level),
+      fontSize: row.font_size,
+      lineSpacing: Number(row.line_spacing),
+      readingWidth: row.reading_width,
+      theme: row.theme,
+      lastOpenedAt: row.last_opened_at,
+    },
+  });
+});
+
+coachRouter.post('/assets/:assetId/reader/annotations', async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+
+  const assetExists = await db.query(
+    `select id
+     from study_assets
+     where id = $1
+       and user_id = $2
+     limit 1`,
+    [req.params.assetId, req.user!.id]
+  );
+
+  if (!assetExists.rows[0]) {
+    return res.status(404).json({
+      error: 'not_found',
+      message: 'Document not found',
+    });
+  }
+
+  const kind = ['bookmark', 'note', 'highlight'].includes(String(req.body?.kind ?? ''))
+    ? String(req.body.kind)
+    : null;
+  if (!kind) {
+    return res.status(400).json({
+      error: 'bad_request',
+      message: 'Annotation kind must be bookmark, note, or highlight.',
+    });
+  }
+
+  const result = await db.query(
+    `insert into study_asset_annotations (user_id, asset_id, kind, label, snippet, note, location, page_number)
+     values ($1, $2, $3, $4, $5, $6, $7, $8)
+     returning id, kind, label, snippet, note, location, page_number, created_at, updated_at`,
+    [
+      req.user!.id,
+      req.params.assetId,
+      kind,
+      String(req.body?.label ?? '').trim() || null,
+      String(req.body?.snippet ?? '').trim() || null,
+      String(req.body?.note ?? '').trim() || null,
+      String(req.body?.location ?? '').trim() || null,
+      parseReaderInteger(req.body?.pageNumber, null, { min: 1, max: 100_000 }),
+    ]
+  );
+
+  const row = result.rows[0];
+  res.status(201).json({
+    id: row.id,
+    kind: row.kind,
+    label: row.label,
+    snippet: row.snippet,
+    note: row.note,
+    location: row.location,
+    pageNumber: row.page_number,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+});
+
+coachRouter.delete('/assets/:assetId/reader/annotations/:annotationId', async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+
+  const deleted = await db.query(
+    `delete from study_asset_annotations
+     where id = $1
+       and asset_id = $2
+       and user_id = $3
+     returning id`,
+    [req.params.annotationId, req.params.assetId, req.user!.id]
+  );
+
+  if (!deleted.rows[0]) {
+    return res.status(404).json({
+      error: 'not_found',
+      message: 'Annotation not found',
+    });
+  }
+
+  res.json({ ok: true });
 });
 
 coachRouter.post('/assets/:assetId/action-items/reminder', async (req: AuthedRequest, res) => {
@@ -451,7 +791,7 @@ ${text}
 `;
 
   const context = isAdmin
-    ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] }, grades: { line: 'Grade tracker: unavailable for admin mode.', conceptLine: 'Wrong-answer patterns: unavailable for admin mode.' }, schedule: { line: 'Schedule: unavailable for admin mode.', todayLine: 'Today\'s classes: unavailable for admin mode.', detailLine: 'Relevant class detail: unavailable for admin mode.', context: null, referencedEntry: null } }
+    ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] }, grades: { line: 'Grade tracker: unavailable for admin mode.', conceptLine: 'Wrong-answer patterns: unavailable for admin mode.' }, schedule: { line: 'Schedule: unavailable for admin mode.', todayLine: 'Today\'s classes: unavailable for admin mode.', detailLine: 'Relevant class detail: unavailable for admin mode.', context: null, referencedEntry: null }, googleWorkspace: { status: null, files: [] } }
     : await buildStudyContext(req.user!.id, { query: `${title}\n\n${text.slice(0, 600)}` });
   const usageReservation = isAdmin
     ? { eventId: null as string | null }

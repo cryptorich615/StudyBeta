@@ -46,6 +46,7 @@ type ChatMessage = {
   id: string;
   role: 'assistant' | 'user' | string;
   content: string;
+  createdAt?: string;
   metadata?: {
     capabilityBadges?: Array<{
       key: string;
@@ -134,6 +135,30 @@ const starterPrompts = [
     prompt: 'Find the best textbook or book for this class topic:',
     mode: 'library' as StudyMode,
   },
+  {
+    label: 'Tutor me step by step',
+    description: 'Use the deeper tutoring workflow with examples and misconceptions.',
+    prompt: 'Tutor me step by step on this topic and explain it in more than one way:',
+    mode: 'general' as StudyMode,
+  },
+  {
+    label: 'Optimize my study habits',
+    description: 'Use my real schedule and workload to improve consistency.',
+    prompt: 'Help me improve my study habits using my real classes, workload, and weak areas:',
+    mode: 'general' as StudyMode,
+  },
+  {
+    label: 'Build a revision plan',
+    description: 'Create a focused revision schedule for an exam or weak topic set.',
+    prompt: 'Build me a revision plan for this exam, deadline, or weak-topic list:',
+    mode: 'plan' as StudyMode,
+  },
+  {
+    label: 'Study this course smarter',
+    description: 'Use my grades, schedule, and weak areas for one class.',
+    prompt: 'Help me study this specific course using my saved data and weak areas:',
+    mode: 'general' as StudyMode,
+  },
 ];
 
 const capabilityDefinitions = {
@@ -171,6 +196,27 @@ const capabilityDefinitions = {
     actionLabel: 'Find textbooks',
     modeTitle: 'Student library',
     modeSummary: 'Checks Open Library first for textbooks, subject books, editions, and cover-backed book details.',
+  },
+  tutor: {
+    label: 'Adaptive tutor',
+    summary: 'Explains concepts in multiple ways, gives examples, and works from your weak areas.',
+    actionLabel: 'Start tutoring',
+    modeTitle: 'Adaptive tutor',
+    modeSummary: 'Uses your notes and performance patterns to teach step by step instead of giving one-size-fits-all answers.',
+  },
+  revision: {
+    label: 'Exam and revision',
+    summary: 'Builds revision plans and exam prep from your real deadlines, weak topics, and available time.',
+    actionLabel: 'Plan revision',
+    modeTitle: 'Exam and revision',
+    modeSummary: 'Turns exams, weak areas, and deadlines into realistic review plans and short prep sprints.',
+  },
+  habits: {
+    label: 'Study habits',
+    summary: 'Optimizes routines, focus, and study consistency using your actual classes and workload.',
+    actionLabel: 'Improve habits',
+    modeTitle: 'Study habits',
+    modeSummary: 'Uses your saved workload and schedule to improve consistency instead of giving generic productivity tips.',
   },
 } as const;
 
@@ -211,6 +257,7 @@ const slashCommands = [
 
 const LAST_KNOWN_MODEL_KEY = 'studyclaw-last-model-key';
 const LAST_KNOWN_AGENT_NAME = 'studyclaw-last-agent-name';
+const CHAT_DRAFT_KEY = 'studyclaw-chat-draft';
 
 function createDocumentId(file: File) {
   return `${file.name}-${file.size}-${file.lastModified}`;
@@ -292,8 +339,32 @@ function normalizeChatMessage(message: any): ChatMessage {
     id: String(message?.id ?? `message-${Date.now()}`),
     role: String(message?.role ?? 'assistant'),
     content: String(message?.content ?? ''),
+    createdAt:
+      typeof message?.created_at === 'string' && message.created_at.trim()
+        ? message.created_at
+        : typeof message?.createdAt === 'string' && message.createdAt.trim()
+          ? message.createdAt
+          : undefined,
     metadata,
   };
+}
+
+function getChatFeedbackTone(message: string): 'neutral' | 'warning' {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) {
+    return 'neutral';
+  }
+
+  if (
+    normalized.includes('still working on that response') ||
+    normalized.includes('timed out waiting for openclaw') ||
+    normalized.includes('could not get a response from openclaw') ||
+    normalized.includes('internal server error')
+  ) {
+    return 'neutral';
+  }
+
+  return /failed|error|sign in|required|malformed|not available|not found/i.test(normalized) ? 'warning' : 'neutral';
 }
 
 function buildResearchActionText(entry: ChatMessage) {
@@ -374,6 +445,22 @@ export default function ChatPage() {
 
     if (lastAgentName) {
       setAgentName(lastAgentName);
+    }
+
+    const draft = window.localStorage.getItem(CHAT_DRAFT_KEY);
+    if (draft) {
+      try {
+        const parsed = JSON.parse(draft) as { message?: string; mode?: StudyMode };
+        if (parsed.message) {
+          setMessage(parsed.message);
+        }
+        if (parsed.mode && ['general', 'explain', 'quiz', 'plan', 'flashcards', 'research', 'library'].includes(parsed.mode)) {
+          setStudyMode(parsed.mode);
+        }
+      } catch {
+        // ignore malformed carry-over drafts
+      }
+      window.localStorage.removeItem(CHAT_DRAFT_KEY);
     }
   }, []);
 
@@ -508,6 +595,27 @@ export default function ChatPage() {
       setStudyMode('library');
       setMessage('Find the best textbook or book for this topic:');
       setFeedback('Book mode is ready. Ask for a textbook, edition comparison, or subject reading list.');
+      return;
+    }
+
+    if (capabilityKey === 'tutor') {
+      setStudyMode('general');
+      setMessage('Tutor me step by step on this and explain it in multiple ways:');
+      setFeedback('Tutor mode is ready. Ask for a concept, worked example, or misconception breakdown.');
+      return;
+    }
+
+    if (capabilityKey === 'revision') {
+      setStudyMode('plan');
+      setMessage('Build me a revision plan for this exam or weak-topic list:');
+      setFeedback('Revision planning is ready. Give StudyClaw an exam, deadline, or weak-topic list.');
+      return;
+    }
+
+    if (capabilityKey === 'habits') {
+      setStudyMode('general');
+      setMessage('Help me improve my study habits using my real schedule and workload:');
+      setFeedback('Habit optimization is ready. Ask about procrastination, focus, consistency, or burnout.');
     }
   }
 
@@ -663,6 +771,35 @@ export default function ChatPage() {
 
     setActiveThreadId(threadId);
     setMessages((data.messages ?? []).map(normalizeChatMessage));
+  }
+
+  async function waitForAssistantReply(threadId: string, baselineMessageCount: number) {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < 22_000) {
+      await new Promise((resolve) => setTimeout(resolve, 1_800));
+
+      const res = await apiFetch(`/api/chat/threads/${threadId}`);
+      const data = await readApiPayload(res);
+      if (!res.ok) {
+        continue;
+      }
+
+      const nextMessages = (data.messages ?? []).map(normalizeChatMessage);
+      const lastMessage = nextMessages.at(-1);
+      const hasFreshAssistantReply = nextMessages.length >= baselineMessageCount + 2 && lastMessage?.role === 'assistant';
+
+      if (!hasFreshAssistantReply) {
+        continue;
+      }
+
+      setActiveThreadId(threadId);
+      setMessages(nextMessages);
+      void loadThreads(threadId).catch(() => undefined);
+      return true;
+    }
+
+    return false;
   }
 
   async function saveResearchToNotes(messageId: string) {
@@ -934,6 +1071,14 @@ export default function ChatPage() {
       id: `temp-${Date.now()}`,
       role: 'user',
       content: [effectivePrompt, attachmentLabel].filter(Boolean).join('\n\n'),
+      createdAt: new Date().toISOString(),
+    };
+    const baselineMessageCount = messages.length;
+    const persistedUserMessage: ChatMessage = {
+      id: `local-user-${Date.now()}`,
+      role: 'user',
+      content: userMsg.content,
+      createdAt: userMsg.createdAt,
     };
 
     setMessages((prev) => [...prev, userMsg]);
@@ -961,6 +1106,27 @@ export default function ChatPage() {
         }),
       });
       const data = await readApiPayload(res);
+      if (res.status === 202 || data?.pending) {
+        setPendingDocuments([]);
+        const pendingThreadId = typeof data?.threadId === 'string' ? data.threadId : activeThreadId;
+        if (pendingThreadId) {
+          setActiveThreadId(pendingThreadId);
+        }
+        setMessages((prev) => [...prev.filter((m) => m.id !== userMsg.id), persistedUserMessage]);
+        setFeedback(
+          typeof data?.message === 'string' && data.message.trim()
+            ? data.message
+            : 'Still working on that response. It should appear in the chat shortly.'
+        );
+
+        if (pendingThreadId) {
+          const resolved = await waitForAssistantReply(pendingThreadId, baselineMessageCount);
+          if (resolved) {
+            setFeedback('');
+          }
+        }
+        return;
+      }
       if (!res.ok) {
         setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
         throw new Error(getApiErrorMessage(data, 'Failed to send message'));
@@ -980,14 +1146,11 @@ export default function ChatPage() {
                 id: `local-assistant-${Date.now() + 1}`,
                 role: 'assistant',
                 content: data.assistantMessage,
+                createdAt: new Date().toISOString(),
               };
         setMessages((prev) => [
           ...prev.filter((m) => m.id !== userMsg.id),
-          {
-            id: `local-user-${Date.now()}`,
-            role: 'user',
-            content: userMsg.content,
-          },
+          persistedUserMessage,
           normalizedAssistantEntry,
         ]);
       } else {
@@ -997,8 +1160,19 @@ export default function ChatPage() {
       void loadThreads(nextThreadId ?? undefined).catch(() => undefined);
     } catch (error: unknown) {
       const nextMessage = error instanceof Error ? error.message : 'Failed to send message';
-      setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
-      setFeedback(nextMessage);
+      const shouldWaitForReply =
+        activeThreadId && /internal error|internal server error|timed out|could not get a response/i.test(nextMessage);
+      if (shouldWaitForReply) {
+        setMessages((prev) => [...prev.filter((m) => m.id !== userMsg.id), persistedUserMessage]);
+        setFeedback('Still working on that response. It should appear in the chat shortly.');
+        const resolved = await waitForAssistantReply(activeThreadId, baselineMessageCount);
+        if (resolved) {
+          setFeedback('');
+        }
+      } else {
+        setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
+        setFeedback(nextMessage);
+      }
     } finally {
       setSending(false);
       setIsTyping(false);
@@ -1025,7 +1199,7 @@ export default function ChatPage() {
   return (
     <>
       {generationStatus ? <GenerationStatusCard status={generationStatus} /> : null}
-      {feedback ? <StatusBanner tone="warning">{feedback}</StatusBanner> : null}
+      {feedback ? <StatusBanner tone={getChatFeedbackTone(feedback)}>{feedback}</StatusBanner> : null}
 
       <ChatLayout
         sidebar={
@@ -1068,6 +1242,18 @@ export default function ChatPage() {
                 key: 'library',
                 ...capabilityDefinitions.library,
                 active: studyMode === 'library',
+              },
+              {
+                key: 'tutor',
+                ...capabilityDefinitions.tutor,
+              },
+              {
+                key: 'revision',
+                ...capabilityDefinitions.revision,
+              },
+              {
+                key: 'habits',
+                ...capabilityDefinitions.habits,
               },
               {
                 key: 'coach',

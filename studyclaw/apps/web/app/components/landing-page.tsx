@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Badge } from './ui/badge';
@@ -64,21 +64,13 @@ const highlights = [
 
 export default function LandingPage() {
   const router = useRouter();
-  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     const session = readStoredSession();
     if (session?.user?.id) {
       router.replace(isOnboardingComplete(session) ? '/dashboard' : '/onboarding');
-      return;
     }
-
-    setReady(true);
   }, [router]);
-
-  if (!ready) {
-    return null;
-  }
 
   return (
     <div className="relative mx-auto max-w-7xl">

@@ -22,7 +22,7 @@ export class OpenClawClient {
     private readonly baseUrl = process.env.OPENCLAW_BASE_URL ?? 'http://localhost:18789',
     private readonly token = process.env.OPENCLAW_GATEWAY_TOKEN ?? '',
     private readonly defaultModel = process.env.OPENCLAW_DEFAULT_MODEL ?? 'openrouter/auto',
-    private readonly timeoutMs = Number(process.env.OPENCLAW_TIMEOUT_MS ?? 180000)
+    private readonly timeoutMs = Number(process.env.OPENCLAW_TIMEOUT_MS ?? 300000)
   ) {}
 
   async sendMessage(input: OpenClawSendMessageInput): Promise<OpenClawSendMessageResult> {

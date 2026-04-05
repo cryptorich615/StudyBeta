@@ -69,6 +69,6 @@ test('rolling window treats events exactly on the boundary as active and protect
 
 test('testing tiers expose deterministic starting credit balances', () => {
   assert.equal(getTierStartingCredits('tier_1'), 1000);
-  assert.equal(getTierStartingCredits('tier_2'), 2000);
-  assert.equal(getTierStartingCredits('tier_3'), 3000);
+  assert.equal(getTierStartingCredits('tier_2'), 3000);
+  assert.equal(getTierStartingCredits('tier_3'), 5000);
 });

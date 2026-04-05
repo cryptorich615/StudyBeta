@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '../components/ui/button';
 import { apiFetch, readApiPayload, getApiErrorMessage } from '../../lib/api';
@@ -103,6 +104,42 @@ export default function BrowserPage() {
         <p>
           StudyClaw routes you to a secure remote session hosted on the AWS study server. All interaction happens on the server side, so nothing runs on your local device.
         </p>
+      </section>
+
+      <section className="browser-page__construction" aria-label="Under construction notice">
+        <div className="browser-page__construction-stripe" aria-hidden="true">
+          <span>Under construction</span>
+          <span>Under construction</span>
+          <span>Under construction</span>
+          <span>Under construction</span>
+        </div>
+        <div className="browser-page__construction-body">
+          <p className="eyebrow">In Progress</p>
+          <h2 className="section-title">Browser area under construction</h2>
+          <p className="muted-copy">
+            The Browser section is already usable, but this workspace is still being actively built out with more controls, study workflows, and safety features.
+          </p>
+        </div>
+      </section>
+
+      <section className="browser-page__library-card">
+        <div>
+          <p className="eyebrow">New section</p>
+          <h2 className="section-title">StudyClaw eReader</h2>
+          <p className="muted-copy">
+            Open the combined Library + eReader workspace to browse uploaded documents, resume saved books, and read inside StudyClaw without dropping back to raw file links.
+          </p>
+        </div>
+        <div className="browser-page__hero-buttons">
+          <Button asChild>
+            <Link href="/study">Open Library workspace</Link>
+          </Button>
+          <Button variant="secondary" asChild>
+            <Link href="/reader" target="_blank" rel="noreferrer">
+              Open full reader in a new tab
+            </Link>
+          </Button>
+        </div>
       </section>
 
       {error && (

@@ -1,7 +1,5 @@
-import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, copyFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { promisify } from 'node:util';
 import {
   buildCoreTraitsMarkdown,
   buildIdentityMarkdown,
@@ -9,8 +7,6 @@ import {
   mergeAgentConfig,
   resolveAgentPresetFromPersonaName,
 } from './agent-config';
-
-const execFileAsync = promisify(execFile);
 
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME ?? '/home/ubuntu/.openclaw';
 const STUDY_LIBRARY_SKILL_SOURCE =
@@ -22,6 +18,39 @@ const GRADE_TRACKER_SKILL_SOURCE =
 const CLASS_SCHEDULER_SKILL_SOURCE =
   process.env.STUDYCLAW_CLASS_SCHEDULER_SKILL_SOURCE ??
   '/home/ubuntu/StudyBeta/openclaw-home/skills/class-scheduler/SKILL.md';
+const STUDY_HABITS_SKILL_SOURCE =
+  process.env.STUDYCLAW_STUDY_HABITS_SKILL_SOURCE ??
+  '/home/ubuntu/StudyBeta/openclaw-home/skills/study-habits/SKILL.md';
+const STUDY_BUDDY_AI_SKILL_SOURCE =
+  process.env.STUDYCLAW_STUDY_BUDDY_AI_SKILL_SOURCE ??
+  '/home/ubuntu/StudyBeta/openclaw-home/skills/study-buddy-ai/SKILL.md';
+const STUDY_TUTOR_SKILL_SOURCE =
+  process.env.STUDYCLAW_STUDY_TUTOR_SKILL_SOURCE ??
+  '/home/ubuntu/StudyBeta/openclaw-home/skills/study-tutor/SKILL.md';
+const COURSE_STUDY_SKILL_SOURCE =
+  process.env.STUDYCLAW_COURSE_STUDY_SKILL_SOURCE ??
+  '/home/ubuntu/StudyBeta/openclaw-home/skills/course-study/SKILL.md';
+const STUDY_BUDDY_SKILL_SOURCE =
+  process.env.STUDYCLAW_STUDY_BUDDY_SKILL_SOURCE ??
+  '/home/ubuntu/StudyBeta/openclaw-home/skills/study-buddy/SKILL.md';
+const STUDY_REVISION_PLANNER_SKILL_SOURCE =
+  process.env.STUDYCLAW_STUDY_REVISION_PLANNER_SKILL_SOURCE ??
+  '/home/ubuntu/StudyBeta/openclaw-home/skills/study-revision-planner/SKILL.md';
+const LEARN_COG_SKILL_SOURCE =
+  process.env.STUDYCLAW_LEARN_COG_SKILL_SOURCE ??
+  '/home/ubuntu/StudyBeta/openclaw-home/skills/learn-cog/SKILL.md';
+const EXAM_SKILL_SOURCE =
+  process.env.STUDYCLAW_EXAM_SKILL_SOURCE ??
+  '/home/ubuntu/StudyBeta/openclaw-home/skills/exam/SKILL.md';
+const LEARNING_OPTIMIZER_SKILL_SOURCE =
+  process.env.STUDYCLAW_LEARNING_OPTIMIZER_SKILL_SOURCE ??
+  '/home/ubuntu/StudyBeta/openclaw-home/skills/learning-optimizer/SKILL.md';
+const GOOGLE_WORKSPACE_SKILL_SOURCE =
+  process.env.STUDYCLAW_GOOGLE_WORKSPACE_SKILL_SOURCE ??
+  '/home/ubuntu/StudyBeta/openclaw-home/skills/google-workspace/SKILL.md';
+const BROWSER_SKILL_SOURCE =
+  process.env.STUDYCLAW_BROWSER_SKILL_SOURCE ??
+  '/home/ubuntu/.openclaw/workspace/skills/openclaw-agent-browser/SKILL.md';
 const OPENLIBRARY_TOOL_NAMES = [
   'openlibrary_search_books',
   'openlibrary_get_subject_books',
@@ -29,20 +58,28 @@ const OPENLIBRARY_TOOL_NAMES = [
   'openlibrary_get_cover_url',
   'openlibrary_search_inside_book',
 ] as const;
-
-type ListedAgent = {
-  id: string;
-  workspace?: string;
-  agentDir?: string;
-};
-
-type AgentListResponse = {
-  count?: number;
-  agents?: ListedAgent[];
-};
+const DEFAULT_STUDENT_SKILLS = [
+  { name: 'study-library', source: STUDY_LIBRARY_SKILL_SOURCE },
+  { name: 'grade-tracker', source: GRADE_TRACKER_SKILL_SOURCE },
+  { name: 'class-scheduler', source: CLASS_SCHEDULER_SKILL_SOURCE },
+  { name: 'study-habits', source: STUDY_HABITS_SKILL_SOURCE },
+  { name: 'study-buddy-ai', source: STUDY_BUDDY_AI_SKILL_SOURCE },
+  { name: 'study-tutor', source: STUDY_TUTOR_SKILL_SOURCE },
+  { name: 'course-study', source: COURSE_STUDY_SKILL_SOURCE },
+  { name: 'study-buddy', source: STUDY_BUDDY_SKILL_SOURCE },
+  { name: 'study-revision-planner', source: STUDY_REVISION_PLANNER_SKILL_SOURCE },
+  { name: 'learn-cog', source: LEARN_COG_SKILL_SOURCE },
+  { name: 'exam', source: EXAM_SKILL_SOURCE },
+  { name: 'learning-optimizer', source: LEARNING_OPTIMIZER_SKILL_SOURCE },
+  { name: 'google-workspace', source: GOOGLE_WORKSPACE_SKILL_SOURCE },
+] as const;
+const DEFAULT_STUDENT_SKILL_NAMES = DEFAULT_STUDENT_SKILLS.map((entry) => entry.name);
+const DEFAULT_STUDENT_THINKING_LEVEL = 'off';
+const DEFAULT_STUDENT_REASONING_LEVEL = 'off';
 
 type OpenClawConfigFile = {
   agents?: {
+    defaults?: Record<string, unknown>;
     list?: Array<Record<string, unknown>>;
   };
 };
@@ -186,11 +223,49 @@ export function getAdminAgentStateDir() {
   return getAdminWorkspacePath();
 }
 
-async function listAgents() {
-  const { stdout } = await execFileAsync('openclaw', ['agents', 'list', '--json'], {
-    maxBuffer: 4 * 1024 * 1024,
-  });
-  return JSON.parse(extractJsonPayload(stdout)) as AgentListResponse;
+async function upsertOpenClawAgentEntry(input: {
+  agentId: string;
+  workspacePath: string;
+  agentStateDir: string;
+  modelKey: string;
+  thinkingDefault?: string;
+  reasoningDefault?: string;
+}) {
+  const configPath = join(OPENCLAW_HOME, 'openclaw.json');
+  const raw = await readFile(configPath, 'utf8');
+  const config = JSON.parse(raw) as OpenClawConfigFile;
+  const agents = config.agents?.list ?? [];
+  const existingEntry = agents.find((item) => item.id === input.agentId) as Record<string, unknown> | undefined;
+
+  if (existingEntry) {
+    existingEntry.name = String(existingEntry.name ?? input.agentId);
+    existingEntry.workspace = input.workspacePath;
+    existingEntry.agentDir = input.agentStateDir;
+    existingEntry.model = input.modelKey;
+    if (input.thinkingDefault) {
+      existingEntry.thinkingDefault = input.thinkingDefault;
+    }
+    if (input.reasoningDefault) {
+      existingEntry.reasoningDefault = input.reasoningDefault;
+    }
+  } else {
+    agents.push({
+      id: input.agentId,
+      name: input.agentId,
+      workspace: input.workspacePath,
+      agentDir: input.agentStateDir,
+      model: input.modelKey,
+      ...(input.thinkingDefault ? { thinkingDefault: input.thinkingDefault } : {}),
+      ...(input.reasoningDefault ? { reasoningDefault: input.reasoningDefault } : {}),
+    });
+  }
+
+  config.agents = {
+    ...(config.agents ?? {}),
+    list: agents,
+  };
+
+  await writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
 }
 
 async function syncOpenClawAgentModel(agentId: string, modelKey?: string) {
@@ -219,35 +294,27 @@ async function syncOpenClawAgentModel(agentId: string, modelKey?: string) {
 
 async function ensureWorkspaceBrowserSkill(workspacePath: string) {
   const skillPath = join(workspacePath, 'skills', 'openclaw-agent-browser');
+  const destination = join(skillPath, 'SKILL.md');
 
   try {
-    await readFile(join(skillPath, 'SKILL.md'), 'utf8');
+    await readFile(destination, 'utf8');
     return;
   } catch {
     // install below
   }
 
   await mkdir(workspacePath, { recursive: true });
+  await mkdir(skillPath, { recursive: true });
 
   try {
-    await execFileAsync(
-      'openclaw',
-      ['skills', 'install', 'openclaw-agent-browser'],
-      {
-        cwd: workspacePath,
-        maxBuffer: 8 * 1024 * 1024,
-      }
-    );
-  } catch (error: any) {
-    const message = String(error?.stderr ?? error?.message ?? '');
-    if (!message.toLowerCase().includes('already exists')) {
-      throw error;
-    }
+    await copyFile(BROWSER_SKILL_SOURCE, destination);
+  } catch {
+    console.warn(`[studyclaw] Browser skill source unavailable at ${BROWSER_SKILL_SOURCE}; continuing without local browser skill copy.`);
   }
 }
 
-async function ensureWorkspaceStudyLibrarySkill(workspacePath: string) {
-  const skillPath = join(workspacePath, 'skills', 'study-library');
+async function ensureWorkspaceSkill(workspacePath: string, skillName: string, sourcePath: string) {
+  const skillPath = join(workspacePath, 'skills', skillName);
 
   try {
     await readFile(join(skillPath, 'SKILL.md'), 'utf8');
@@ -256,39 +323,15 @@ async function ensureWorkspaceStudyLibrarySkill(workspacePath: string) {
     // write below
   }
 
-  const source = await readFile(STUDY_LIBRARY_SKILL_SOURCE, 'utf8');
+  const source = await readFile(sourcePath, 'utf8');
   await mkdir(skillPath, { recursive: true });
   await writeFile(join(skillPath, 'SKILL.md'), source, 'utf8');
 }
 
-async function ensureWorkspaceGradeTrackerSkill(workspacePath: string) {
-  const skillPath = join(workspacePath, 'skills', 'grade-tracker');
-
-  try {
-    await readFile(join(skillPath, 'SKILL.md'), 'utf8');
-    return;
-  } catch {
-    // write below
+async function ensureWorkspaceDefaultSkills(workspacePath: string) {
+  for (const skill of DEFAULT_STUDENT_SKILLS) {
+    await ensureWorkspaceSkill(workspacePath, skill.name, skill.source);
   }
-
-  const source = await readFile(GRADE_TRACKER_SKILL_SOURCE, 'utf8');
-  await mkdir(skillPath, { recursive: true });
-  await writeFile(join(skillPath, 'SKILL.md'), source, 'utf8');
-}
-
-async function ensureWorkspaceClassSchedulerSkill(workspacePath: string) {
-  const skillPath = join(workspacePath, 'skills', 'class-scheduler');
-
-  try {
-    await readFile(join(skillPath, 'SKILL.md'), 'utf8');
-    return;
-  } catch {
-    // write below
-  }
-
-  const source = await readFile(CLASS_SCHEDULER_SKILL_SOURCE, 'utf8');
-  await mkdir(skillPath, { recursive: true });
-  await writeFile(join(skillPath, 'SKILL.md'), source, 'utf8');
 }
 
 async function syncStudentAgentToolAndSkillAccess(agentId: string) {
@@ -307,6 +350,9 @@ async function syncStudentAgentToolAndSkillAccess(agentId: string) {
     return;
   }
 
+  entry.thinkingDefault = DEFAULT_STUDENT_THINKING_LEVEL;
+  entry.reasoningDefault = DEFAULT_STUDENT_REASONING_LEVEL;
+
   const currentTools = Array.isArray(entry.tools?.alsoAllow)
     ? entry.tools!.alsoAllow.map((value) => String(value))
     : [];
@@ -318,9 +364,11 @@ async function syncStudentAgentToolAndSkillAccess(agentId: string) {
   };
 
   if (Array.isArray(entry.skills)) {
-    entry.skills = Array.from(new Set([...entry.skills.map((value) => String(value)), 'study-library', 'grade-tracker', 'class-scheduler'])).sort(
-      (left, right) => left.localeCompare(right)
-    );
+    entry.skills = Array.from(
+      new Set([...entry.skills.map((value) => String(value)).filter((value) => value !== 'gog'), ...DEFAULT_STUDENT_SKILL_NAMES])
+    ).sort((left, right) => left.localeCompare(right));
+  } else {
+    entry.skills = [...DEFAULT_STUDENT_SKILL_NAMES].sort((left, right) => left.localeCompare(right));
   }
 
   config.agents = {
@@ -547,41 +595,20 @@ export async function ensurePersonalAgent(input: {
   const agentId = buildUserAgentId(input.userId);
   const workspacePath = getUserWorkspacePath(input.userId);
   const agentStateDir = getUserAgentStateDir(input.userId);
-  const existing = (await listAgents()).agents?.find((agent) => agent.id === agentId);
-
-  if (!existing) {
-    try {
-      await execFileAsync(
-        'openclaw',
-        [
-          'agents',
-          'add',
-          agentId,
-          '--workspace',
-          workspacePath,
-          '--agent-dir',
-          agentStateDir,
-          '--model',
-          input.modelKey ?? process.env.OPENCLAW_DEFAULT_MODEL ?? 'openrouter/auto',
-          '--non-interactive',
-          '--json',
-        ],
-        { maxBuffer: 4 * 1024 * 1024 }
-      );
-    } catch (error: any) {
-      const message = error?.stderr ?? error?.message ?? '';
-      if (!String(message).includes('already exists')) {
-        throw error;
-      }
-    }
-  }
+  const effectiveModelKey = input.modelKey ?? process.env.OPENCLAW_DEFAULT_MODEL ?? 'openrouter/auto';
 
   await ensureEmptyAuthStore(agentStateDir);
   await ensureWorkspaceBrowserSkill(workspacePath);
-  await ensureWorkspaceStudyLibrarySkill(workspacePath);
-  await ensureWorkspaceGradeTrackerSkill(workspacePath);
-  await ensureWorkspaceClassSchedulerSkill(workspacePath);
-  await syncOpenClawAgentModel(agentId, input.modelKey);
+  await ensureWorkspaceDefaultSkills(workspacePath);
+  await upsertOpenClawAgentEntry({
+    agentId,
+    workspacePath,
+    agentStateDir,
+    modelKey: effectiveModelKey,
+    thinkingDefault: DEFAULT_STUDENT_THINKING_LEVEL,
+    reasoningDefault: DEFAULT_STUDENT_REASONING_LEVEL,
+  });
+  await syncOpenClawAgentModel(agentId, effectiveModelKey);
   await syncStudentAgentToolAndSkillAccess(agentId);
   await writeWorkspaceFiles(input.userId, input.email, {
     personaName: input.personaName,
@@ -603,41 +630,18 @@ export async function ensureAdminAgent(input: {
   const agentId = buildAdminAgentId();
   const workspacePath = getAdminWorkspacePath();
   const agentStateDir = workspacePath;
-  const existing = (await listAgents()).agents?.find((agent) => agent.id === agentId);
+  const effectiveModelKey = input.modelKey ?? process.env.OPENCLAW_DEFAULT_MODEL ?? 'openrouter/auto';
 
-  if (!existing) {
-    try {
-      await execFileAsync(
-        'openclaw',
-        [
-          'agents',
-          'add',
-          agentId,
-          '--workspace',
-          workspacePath,
-          '--agent-dir',
-          workspacePath,
-          '--model',
-          input.modelKey ?? process.env.OPENCLAW_DEFAULT_MODEL ?? 'openrouter/auto',
-          '--non-interactive',
-          '--json',
-        ],
-        { maxBuffer: 4 * 1024 * 1024 }
-      );
-    } catch (error: any) {
-      const message = error?.stderr ?? error?.message ?? '';
-      if (!String(message).includes('already exists')) {
-        throw error;
-      }
-    }
-  }
-
-  await syncOpenClawAgentModel(agentId, input.modelKey);
+  await upsertOpenClawAgentEntry({
+    agentId,
+    workspacePath,
+    agentStateDir,
+    modelKey: effectiveModelKey,
+  });
+  await syncOpenClawAgentModel(agentId, effectiveModelKey);
   await mkdir(workspacePath, { recursive: true });
   await ensureEmptyAuthStore(agentStateDir);
-  await ensureWorkspaceStudyLibrarySkill(workspacePath);
-  await ensureWorkspaceGradeTrackerSkill(workspacePath);
-  await ensureWorkspaceClassSchedulerSkill(workspacePath);
+  await ensureWorkspaceDefaultSkills(workspacePath);
   await writeAdminWorkspaceFiles({
     workspacePath,
     ownerUserId: input.ownerUserId,
@@ -743,9 +747,9 @@ export async function syncUserWorkspaceProfile(input: {
 }) {
   const workspacePath = getUserWorkspacePath(input.userId);
   await mkdir(workspacePath, { recursive: true });
-  await ensureWorkspaceStudyLibrarySkill(workspacePath);
-  await ensureWorkspaceGradeTrackerSkill(workspacePath);
-  await ensureWorkspaceClassSchedulerSkill(workspacePath);
+  await ensureWorkspaceBrowserSkill(workspacePath);
+  await ensureWorkspaceDefaultSkills(workspacePath);
+  await syncStudentAgentToolAndSkillAccess(buildUserAgentId(input.userId));
 
   await writeFile(
     join(workspacePath, 'USER.md'),
@@ -792,9 +796,9 @@ export async function syncUserWorkspaceIdentity(input: {
   personaName?: string | null;
   tone?: string | null;
 }) {
-  await ensureWorkspaceStudyLibrarySkill(getUserWorkspacePath(input.userId));
-  await ensureWorkspaceGradeTrackerSkill(getUserWorkspacePath(input.userId));
-  await ensureWorkspaceClassSchedulerSkill(getUserWorkspacePath(input.userId));
+  await ensureWorkspaceBrowserSkill(getUserWorkspacePath(input.userId));
+  await ensureWorkspaceDefaultSkills(getUserWorkspacePath(input.userId));
+  await syncStudentAgentToolAndSkillAccess(buildUserAgentId(input.userId));
   await writeWorkspaceFiles(input.userId, input.email, {
     personaName: input.personaName,
     tone: input.tone,
