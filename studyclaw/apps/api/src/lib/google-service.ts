@@ -1350,3 +1350,130 @@ export async function upsertCalendarEventForReminder(input: {
     return null;
   }
 }
+
+// --- Gmail extended functions ---
+
+export async function searchGmailMessages(userId: string, query: string, maxResults = 10) {
+  const payload = await googleApiFetch<{
+    messages?: Array<{ id: string; threadId: string }>;
+  }>(
+    userId,
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=${maxResults}`
+  );
+
+  const messages = await Promise.all(
+    (payload.messages ?? []).slice(0, maxResults).map(async (msg) => {
+      const detail = await googleApiFetch<{
+        id: string;
+        threadId: string;
+        payload: { headers?: Array<{ name: string; value: string }>; snippet?: string };
+        internalDate?: string;
+      }>(userId, `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=FULL`);
+
+      const getHeader = (name: string) =>
+        detail.payload.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? '';
+
+      return {
+        id: detail.id,
+        threadId: detail.threadId,
+        from: getHeader('From'),
+        subject: getHeader('Subject'),
+        date: new Date(parseInt(detail.internalDate ?? '0')).toISOString(),
+        snippet: detail.payload.snippet ?? '',
+      };
+    })
+  );
+
+  return messages;
+}
+
+export async function replyToGmailMessage(userId: string, threadId: string, to: string, subject: string, body: string) {
+  const replySubject = subject.startsWith('Re:') ? subject : `Re: ${subject}`;
+  const raw = Buffer.from(
+    `To: ${to}\r\nSubject: ${replySubject}\r\nIn-Reply-To: ${threadId}\r\nReferences: ${threadId}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${body}`
+  ).toString('base64url');
+
+  const result = await googleApiFetch<{ id: string; threadId: string }>(
+    userId,
+    'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+    { method: 'POST', body: JSON.stringify({ raw }) }
+  );
+
+  return { id: result.id, threadId: result.threadId };
+}
+
+export async function createGmailDraft(userId: string, to: string, subject: string, body: string) {
+  const raw = Buffer.from(
+    `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${body}`
+  ).toString('base64url');
+
+  const result = await googleApiFetch<{ id: string }>(
+    userId,
+    'https://gmail.googleapis.com/gmail/v1/users/me/drafts',
+    { method: 'POST', body: JSON.stringify({ message: { raw } }) }
+  );
+
+  return { id: result.id };
+}
+
+export async function listGmailDrafts(userId: string, maxResults = 10) {
+  const payload = await googleApiFetch<{ drafts?: Array<{ id: string; message: { threadId: string } }> }>(
+    userId,
+    `https://gmail.googleapis.com/gmail/v1/users/me/drafts?maxResults=${maxResults}`
+  );
+
+  return (payload.drafts ?? []).map((d) => ({
+    id: d.id,
+    threadId: d.message.threadId,
+  }));
+}
+
+export async function sendGmailDraft(userId: string, draftId: string) {
+  const result = await googleApiFetch<{ id: string; threadId: string }>(
+    userId,
+    `https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}/send`,
+    { method: 'POST' }
+  );
+  return { id: result.id, threadId: result.threadId };
+}
+
+
+// --- Sheets functions ---
+
+export async function readSheets(userId: string, spreadsheetId: string, range: string) {
+  const payload = await googleApiFetch<{ values?: string[][] }>(
+    userId,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`
+  );
+  return { values: payload.values ?? [] };
+}
+
+export async function updateSheets(userId: string, spreadsheetId: string, range: string, values: string[][]) {
+  const result = await googleApiFetch<{ updatedRange: string }>(
+    userId,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`,
+    { method: 'PUT', body: JSON.stringify({ values }) }
+  );
+  return { updatedRange: result.updatedRange };
+}
+
+export async function appendSheets(userId: string, spreadsheetId: string, range: string, values: string[][]) {
+  const result = await googleApiFetch<{ tableRange: string }>(
+    userId,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`,
+    { method: 'POST', body: JSON.stringify({ values }) }
+  );
+  return { tableRange: result.tableRange };
+}
+
+// --- Docs functions ---
+
+export async function exportDocs(userId: string, docId: string, format: 'txt' | 'html' | 'pdf' = 'txt') {
+  const mimeType = format === 'txt' ? 'text/plain' : format === 'html' ? 'text/html' : 'application/pdf';
+  const payload = await googleApiFetch<{ data: string }>(
+    userId,
+    `https://docs.googleapis.com/v1/documents/${docId}/export?mimeType=${encodeURIComponent(mimeType)}`
+  );
+  const text = Buffer.from(payload.data, 'base64').toString('utf-8');
+  return { text };
+}

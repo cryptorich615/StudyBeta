@@ -67,6 +67,31 @@ test('parseGoogleWorkspaceIntent parses follow-up Gmail send with message phrasi
   });
 });
 
+test('parseGoogleWorkspaceIntent parses Gmail send retry confirmation from conversation context', () => {
+  const intent = parseGoogleWorkspaceIntent('Yes', {
+    history:
+      'Send an email to dixieloveswillow@gmail.com leave the subject empty and just say hey how are you\nWant me to try again now?',
+  });
+
+  assert.deepEqual(intent, {
+    action: 'send_gmail',
+    to: 'dixieloveswillow@gmail.com',
+    subject: '',
+    bodyText: 'hey how are you',
+  });
+});
+
+test('parseGoogleWorkspaceIntent parses Gmail send status follow-up from conversation context', () => {
+  const intent = parseGoogleWorkspaceIntent('Did you send the email?', {
+    history:
+      'Send an email to dixieloveswillow@gmail.com leave the subject empty and just say hey how are you\nI sent that email to dixieloveswillow@gmail.com with an empty subject line.',
+  });
+
+  assert.deepEqual(intent, {
+    action: 'check_gmail_send_status',
+  });
+});
+
 test('parseBrowserIntent detects browser status and launch requests', () => {
   assert.deepEqual(parseBrowserIntent('Is browser access available right now?'), { action: 'status' });
   assert.deepEqual(parseBrowserIntent('Open the browser for me'), { action: 'launch' });

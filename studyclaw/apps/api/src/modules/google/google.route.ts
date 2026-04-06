@@ -10,6 +10,16 @@ import {
   listUpcomingCalendarEvents,
   listRecentDriveFiles,
   sendGmailMessage,
+  searchGmailMessages,
+  replyToGmailMessage,
+  createGmailDraft,
+  listGmailDrafts,
+  sendGmailDraft,
+  createCalendarEvent,
+  readSheets,
+  updateSheets,
+  appendSheets,
+  exportDocs,
   syncGoogleSkillForUser,
 } from '../../lib/google-service';
 
@@ -360,5 +370,95 @@ googleRouter.get('/drive/:fileId/reader', async (req: AuthedRequest, res) => {
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Failed to load Google file preview';
     res.status(500).json({ error: 'fetch_error', message: msg });
+  }
+});
+
+// GET /sheets - read Google Sheets
+googleRouter.get('/sheets', async (req: AuthedRequest, res) => {
+  const googleStatus = await getGoogleConnectionStatus(req.user!.id);
+  if (!googleStatus.connected) {
+    return res.status(400).json({ error: 'not_connected', message: 'Google account not connected' });
+  }
+
+  const { spreadsheetId, range } = req.query as { spreadsheetId?: string; range?: string };
+  if (!spreadsheetId || !range) {
+    return res.status(400).json({ error: 'missing_params', message: 'spreadsheetId and range are required' });
+  }
+
+  try {
+    const result = await readSheets(req.user!.id, spreadsheetId, range);
+    res.json(result);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Failed to read sheet';
+    res.status(500).json({ error: 'fetch_error', message: msg });
+  }
+});
+
+// POST /sheets - update Google Sheets
+googleRouter.post('/sheets', async (req: AuthedRequest, res) => {
+  const googleStatus = await getGoogleConnectionStatus(req.user!.id);
+  if (!googleStatus.connected) {
+    return res.status(400).json({ error: 'not_connected', message: 'Google account not connected' });
+  }
+
+  const { spreadsheetId, range, values } = req.body as {
+    spreadsheetId?: string; range?: string; values?: string[][];
+  };
+  if (!spreadsheetId || !range || !values) {
+    return res.status(400).json({ error: 'missing_params', message: 'spreadsheetId, range, and values are required' });
+  }
+
+  try {
+    const result = await updateSheets(req.user!.id, spreadsheetId, range, values);
+    res.json({ ok: true, updatedRange: result.updatedRange });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Failed to update sheet';
+    res.status(500).json({ error: 'update_error', message: msg });
+  }
+});
+
+// POST /sheets/append - append to Google Sheets
+googleRouter.post('/sheets/append', async (req: AuthedRequest, res) => {
+  const googleStatus = await getGoogleConnectionStatus(req.user!.id);
+  if (!googleStatus.connected) {
+    return res.status(400).json({ error: 'not_connected', message: 'Google account not connected' });
+  }
+
+  const { spreadsheetId, range, values } = req.body as {
+    spreadsheetId?: string; range?: string; values?: string[][];
+  };
+  if (!spreadsheetId || !range || !values) {
+    return res.status(400).json({ error: 'missing_params', message: 'spreadsheetId, range, and values are required' });
+  }
+
+  try {
+    const result = await appendSheets(req.user!.id, spreadsheetId, range, values);
+    res.json({ ok: true, tableRange: result.tableRange });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Failed to append to sheet';
+    res.status(500).json({ error: 'append_error', message: msg });
+  }
+});
+
+// GET /docs - export Google Docs
+googleRouter.get('/docs', async (req: AuthedRequest, res) => {
+  const googleStatus = await getGoogleConnectionStatus(req.user!.id);
+  if (!googleStatus.connected) {
+    return res.status(400).json({ error: 'not_connected', message: 'Google account not connected' });
+  }
+
+  const { docId, format } = req.query as { docId?: string; format?: string };
+  if (!docId) {
+    return res.status(400).json({ error: 'missing_params', message: 'docId is required' });
+  }
+
+  const validFormat = ['txt', 'html', 'pdf'].includes(format as string) ? (format as 'txt' | 'html' | 'pdf') : 'txt';
+
+  try {
+    const result = await exportDocs(req.user!.id, docId, validFormat);
+    res.json({ text: result.text });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Failed to export doc';
+    res.status(500).json({ error: 'export_error', message: msg });
   }
 });

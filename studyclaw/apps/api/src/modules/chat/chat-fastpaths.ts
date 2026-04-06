@@ -2,6 +2,7 @@ export type GoogleWorkspaceIntent =
   | { action: 'list_files'; kind: 'all' | 'docs' | 'sheets' | 'slides'; limit: number }
   | { action: 'list_gmail'; limit: number; query: string }
   | { action: 'send_gmail'; to: string; subject: string; bodyText: string }
+  | { action: 'check_gmail_send_status' }
   | { action: 'create_doc'; title: string; bodyText: string };
 
 export type BrowserIntent = { action: 'status' | 'launch' };
@@ -89,17 +90,8 @@ function parseSendGmailIntent(message: string): GoogleWorkspaceIntent | null {
   };
 }
 
-function parseFollowupSendGmailIntent(message: string, history: string | null | undefined): GoogleWorkspaceIntent | null {
+function extractLastSendGmailIntent(history: string | null | undefined) {
   if (!history?.trim()) {
-    return null;
-  }
-
-  if (!/\b(?:send|write)\b.*\b(?:them|it)?\b.*\b(?:another|one more)\b.*\b(?:email|message|one)\b/i.test(message)) {
-    return null;
-  }
-
-  const bodyText = parseGmailBodyInstruction(message);
-  if (!bodyText) {
     return null;
   }
 
@@ -111,20 +103,58 @@ function parseFollowupSendGmailIntent(message: string, history: string | null | 
 
   for (const line of historyLines) {
     const previousIntent = parseSendGmailIntent(line);
-    if (!previousIntent) {
-      continue;
+    if (previousIntent?.action === 'send_gmail') {
+      return previousIntent;
     }
+  }
 
-    if (previousIntent.action !== 'send_gmail') {
-      continue;
+  return null;
+}
+
+function parseFollowupSendGmailIntent(message: string, history: string | null | undefined): GoogleWorkspaceIntent | null {
+  const lastIntent = extractLastSendGmailIntent(history);
+  if (!lastIntent) {
+    return null;
+  }
+
+  if (
+    /^(?:yes|yeah|yep|please do|do it|send it|send it now|send that|try again|retry|resend it|go ahead)\b/i.test(message) &&
+    /\b(?:try again|send it|send that|email|gmail)\b/i.test(history ?? '')
+  ) {
+    return lastIntent;
+  }
+
+  if (/\b(?:send|write)\b.*\b(?:them|it)?\b.*\b(?:another|one more)\b.*\b(?:email|message|one)\b/i.test(message)) {
+    const bodyText = parseGmailBodyInstruction(message);
+    if (!bodyText) {
+      return null;
     }
 
     return {
       action: 'send_gmail',
-      to: previousIntent.to,
-      subject: /\bsubject\b/i.test(message) ? parseGmailSubjectInstruction(message) : previousIntent.subject,
+      to: lastIntent.to,
+      subject: /\bsubject\b/i.test(message) ? parseGmailSubjectInstruction(message) : lastIntent.subject,
       bodyText,
     };
+  }
+
+  if (/^(?:try again|retry|resend(?: it)?|send it now|send that now)\b/i.test(message)) {
+    return lastIntent;
+  }
+
+  return null;
+}
+
+function parseGmailSendStatusIntent(message: string, history: string | null | undefined): GoogleWorkspaceIntent | null {
+  if (!extractLastSendGmailIntent(history)) {
+    return null;
+  }
+
+  if (
+    /\b(?:did|was|has)\b[\s\S]*\b(?:email|gmail|message|mail)\b[\s\S]*\b(?:send|sent|go through|gone through|work|worked)\b/i.test(message) ||
+    /\b(?:did|was)\b[\s\S]*\b(?:that|it)\b[\s\S]*\b(?:send|sent|go through|gone through|work|worked)\b/i.test(message)
+  ) {
+    return { action: 'check_gmail_send_status' };
   }
 
   return null;
@@ -157,6 +187,11 @@ export function parseGoogleWorkspaceIntent(message: string, options?: { history?
   const followupSendIntent = parseFollowupSendGmailIntent(normalized, options?.history);
   if (followupSendIntent) {
     return followupSendIntent;
+  }
+
+  const sendStatusIntent = parseGmailSendStatusIntent(normalized, options?.history);
+  if (sendStatusIntent) {
+    return sendStatusIntent;
   }
 
   if (/\b(gmail|email|mail|inbox|messages?)\b/i.test(normalized)) {

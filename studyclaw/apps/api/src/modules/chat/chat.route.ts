@@ -1594,6 +1594,31 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
     /^(check( now)?|try again|did it work|is it fixed|did admin fix it|can you access it now)\b/i.test(trimmedMessage) &&
     /\b(google|gmail|drive|docs?|sheets?|slides?|calendar)\b/i.test(recentHistoryText);
 
+  function inferRecentGmailSendOutcome(history: string) {
+    const normalizedHistory = history.toLowerCase();
+    if (!/\bemail\b|\bgmail\b|\bmail\b/.test(normalizedHistory)) {
+      return { attempted: false, success: false };
+    }
+
+    if (/i sent that email to\b/.test(normalizedHistory)) {
+      return { attempted: true, success: true };
+    }
+
+    if (
+      /gmail send access is not granted yet|unknown channel: gmail|message failed|couldn't send|did not go through|still failing|failed again|send never went through/.test(
+        normalizedHistory
+      )
+    ) {
+      return { attempted: true, success: false };
+    }
+
+    if (/\b(?:send|write)\b.*\bemail\b.*\bto\b/.test(normalizedHistory)) {
+      return { attempted: true, success: false };
+    }
+
+    return { attempted: false, success: false };
+  }
+
   const attachmentSummary = normalizedAttachments.length
     ? `Attached ${normalizedAttachments.length} document${normalizedAttachments.length === 1 ? '' : 's'}: ${normalizedAttachments.map((attachment) => attachment.name).join(', ')}`
     : '';
@@ -2302,6 +2327,40 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
               googleWorkspace: true,
               gmailLookup: true,
               resultCount: messages.length,
+              capabilityBadges: buildAssistantCapabilityBadges({}),
+            }),
+          ]
+        );
+        await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+        return res.json({
+          threadId: activeThreadId,
+          openclawSessionId,
+          assistantMessage: assistantText,
+        });
+      }
+
+      if (googleWorkspaceIntent.action === 'check_gmail_send_status') {
+        const gmailOutcome = inferRecentGmailSendOutcome(recentHistoryText);
+        const assistantText = styleDeterministicAssistantReply(
+          gmailOutcome.attempted
+            ? gmailOutcome.success
+              ? 'Yes. The last Gmail send in this chat went through successfully.'
+              : 'No. The last Gmail send in this chat did not go through.'
+            : 'I do not see a Gmail send attempt in this chat yet.',
+          agent.persona_name
+        );
+
+        await db.query(
+          `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+          [
+            activeThreadId,
+            assistantText,
+            JSON.stringify({
+              googleWorkspace: true,
+              gmailSendStatusLookup: true,
+              lastSendAttempted: gmailOutcome.attempted,
+              lastSendSucceeded: gmailOutcome.success,
               capabilityBadges: buildAssistantCapabilityBadges({}),
             }),
           ]
