@@ -8,10 +8,14 @@ import {
   summarizeReaderAvailability,
 } from './reader-workspace';
 
-test('inferReaderFormat recognizes uploaded pdfs and word docs safely', () => {
+test('inferReaderFormat recognizes uploaded pdfs and common student document formats safely', () => {
   assert.equal(inferReaderFormat({ assetType: 'uploaded_pdf', title: 'lecture.pdf' }), 'pdf');
   assert.equal(inferReaderFormat({ title: 'essay.docx' }), 'word');
+  assert.equal(inferReaderFormat({ title: 'lab-data.xlsx' }), 'spreadsheet');
+  assert.equal(inferReaderFormat({ title: 'review-slides.pptx' }), 'presentation');
+  assert.equal(inferReaderFormat({ title: 'teacher-note.rtf' }), 'richtext');
   assert.equal(inferReaderFormat({ title: 'chapter.epub' }), 'epub');
+  assert.equal(inferReaderFormat({ title: 'table.csv' }), 'text');
   assert.equal(inferReaderFormat({ assetType: 'typed_note', title: 'notes.txt' }), 'text');
 });
 
@@ -32,8 +36,13 @@ test('summarizeReaderAvailability explains support and fallbacks clearly', () =>
   assert.equal(supported.supported, true);
   assert.match(supported.message, /PDF/i);
 
+  const spreadsheet = summarizeReaderAvailability({ format: 'spreadsheet', hasContent: true, hasFileUrl: false });
+  assert.equal(spreadsheet.supported, true);
+  assert.match(spreadsheet.message, /Spreadsheet/i);
+
   const unsupported = summarizeReaderAvailability({ format: 'unknown', hasContent: false, hasFileUrl: true });
   assert.equal(isReaderSupported('unknown'), false);
+  assert.equal(isReaderSupported('presentation'), true);
   assert.equal(unsupported.supported, false);
   assert.match(unsupported.message, /not fully supported/i);
 });

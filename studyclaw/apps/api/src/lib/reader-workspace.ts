@@ -1,4 +1,15 @@
-export type ReaderFormat = 'pdf' | 'epub' | 'text' | 'html' | 'word' | 'image' | 'audio' | 'unknown';
+export type ReaderFormat =
+  | 'pdf'
+  | 'epub'
+  | 'text'
+  | 'html'
+  | 'word'
+  | 'spreadsheet'
+  | 'presentation'
+  | 'richtext'
+  | 'image'
+  | 'audio'
+  | 'unknown';
 
 type ReaderAttachment = {
   name?: string | null;
@@ -36,8 +47,50 @@ export function inferReaderFormat(input: InferReaderFormatInput): ReaderFormat {
   if (candidates.some((value) => value === 'html' || value === 'htm' || value.includes('text/html'))) {
     return 'html';
   }
-  if (candidates.some((value) => ['doc', 'docx', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'].includes(value))) {
+  if (
+    candidates.some((value) =>
+      [
+        'doc',
+        'docx',
+        'odt',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.oasis.opendocument.text',
+      ].includes(value)
+    )
+  ) {
     return 'word';
+  }
+  if (
+    candidates.some((value) =>
+      [
+        'xls',
+        'xlsx',
+        'ods',
+        'application/vnd.ms-excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.oasis.opendocument.spreadsheet',
+      ].includes(value)
+    )
+  ) {
+    return 'spreadsheet';
+  }
+  if (
+    candidates.some((value) =>
+      [
+        'ppt',
+        'pptx',
+        'odp',
+        'application/vnd.ms-powerpoint',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'application/vnd.oasis.opendocument.presentation',
+      ].includes(value)
+    )
+  ) {
+    return 'presentation';
+  }
+  if (candidates.some((value) => ['rtf', 'application/rtf', 'text/rtf'].includes(value))) {
+    return 'richtext';
   }
   if (input.assetType === 'image_note' || candidates.some((value) => value.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic'].includes(value))) {
     return 'image';
@@ -45,7 +98,14 @@ export function inferReaderFormat(input: InferReaderFormatInput): ReaderFormat {
   if (input.assetType === 'audio_note' || candidates.some((value) => value.startsWith('audio/') || ['mp3', 'wav', 'aac', 'ogg', 'm4a'].includes(value))) {
     return 'audio';
   }
-  if (candidates.some((value) => value === 'txt' || value === 'md' || value.includes('text/plain'))) {
+  if (
+    candidates.some((value) =>
+      ['txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'log'].includes(value) ||
+      value.includes('text/plain') ||
+      value.includes('text/csv') ||
+      value.includes('application/json')
+    )
+  ) {
     return 'text';
   }
   if (input.assetType === 'typed_note') {
@@ -55,7 +115,16 @@ export function inferReaderFormat(input: InferReaderFormatInput): ReaderFormat {
 }
 
 export function isReaderSupported(format: ReaderFormat) {
-  return format === 'pdf' || format === 'epub' || format === 'text' || format === 'html' || format === 'word';
+  return (
+    format === 'pdf' ||
+    format === 'epub' ||
+    format === 'text' ||
+    format === 'html' ||
+    format === 'word' ||
+    format === 'spreadsheet' ||
+    format === 'presentation' ||
+    format === 'richtext'
+  );
 }
 
 export function getDocumentBody(input: { processedText?: string | null; originalText?: string | null }) {
@@ -109,6 +178,12 @@ export function summarizeReaderAvailability(input: {
       message:
         input.format === 'word'
           ? 'Word documents open in extracted-text mode for reading and study actions.'
+          : input.format === 'spreadsheet'
+            ? 'Spreadsheets open in extracted-text mode so tables and rows stay readable in StudyClaw.'
+            : input.format === 'presentation'
+              ? 'Presentations open in extracted-text mode with slide-by-slide reading support.'
+              : input.format === 'richtext'
+                ? 'Rich text files open in extracted-text mode for reading and study actions.'
           : input.format === 'pdf'
             ? 'PDFs open in StudyClaw reader mode with extracted text when available.'
             : 'This document can be opened directly in StudyClaw reader mode.',

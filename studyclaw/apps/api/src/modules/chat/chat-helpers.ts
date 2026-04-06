@@ -132,6 +132,12 @@ export function buildStreamingProgressMessages(input: {
   if (input.strategy.calendarAgendaRequest) {
     return [initial, 'Checking your Google Calendar...'];
   }
+  if (/\b(?:open|launch|start|use)\b.*\b(?:browser|web browser|research browser)\b/i.test(normalized)) {
+    return [initial, 'Opening your StudyClaw browser...', 'Preparing a browser session for you...'];
+  }
+  if (/\b(?:browser|web browser)\b.*\b(?:available|working|enabled|ready|access)\b/i.test(normalized)) {
+    return [initial, 'Checking browser access...'];
+  }
   if (/\b(send|write)\b.*\bemail\b/i.test(normalized)) {
     return [initial, 'Using Gmail tools...', 'Preparing that email through your connected Google account...'];
   }
@@ -181,6 +187,12 @@ export function buildStreamingHeartbeatMessage(input: {
 
   if (input.strategy.calendarAgendaRequest) {
     return isEvenTick ? 'Still checking your Google Calendar...' : 'Working through your upcoming events...';
+  }
+  if (/\b(?:open|launch|start|use)\b.*\b(?:browser|web browser|research browser)\b/i.test(normalized)) {
+    return isEvenTick ? 'Still opening your StudyClaw browser...' : 'Preparing the browser session...';
+  }
+  if (/\b(?:browser|web browser)\b.*\b(?:available|working|enabled|ready|access)\b/i.test(normalized)) {
+    return isEvenTick ? 'Still checking browser access...' : 'Verifying the browser service is ready...';
   }
   if (/\b(send|write)\b.*\bemail\b/i.test(normalized)) {
     return isEvenTick ? 'Still using Gmail send tools...' : 'Sending through your connected Google account...';

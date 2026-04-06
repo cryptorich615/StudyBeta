@@ -15,6 +15,18 @@ export type BrowserSessionRecord = {
   endedAt: string | null;
 };
 
+export type BrowserCapabilityStatus = {
+  enabled: boolean;
+  available: boolean;
+  canLaunch: boolean;
+  provider: string;
+  embedAllowed: boolean;
+  timeoutMinutes: number;
+  restrictionsEnabled: boolean;
+  unavailableReason: string | null;
+  activeSession: BrowserSessionRecord | null;
+};
+
 type BrowserSessionRow = {
   id: string;
   user_id: string;
@@ -114,4 +126,22 @@ export async function getOrCreateBrowserSession(userId: string) {
   }
 
   return startBrowserSession(userId);
+}
+
+export async function getBrowserCapabilityStatus(userId: string): Promise<BrowserCapabilityStatus> {
+  const config = getBrowserConfig();
+  const activeSession = config.enabled ? await getActiveBrowserSession(userId) : null;
+  const canLaunch = config.enabled && canUserLaunchBrowser(userId);
+
+  return {
+    enabled: config.enabled,
+    available: config.enabled && canLaunch,
+    canLaunch,
+    provider: config.provider,
+    embedAllowed: config.embedAllowed,
+    timeoutMinutes: config.timeoutMinutes,
+    restrictionsEnabled: config.restrictionsEnabled,
+    unavailableReason: config.enabled ? null : config.unavailableReason || 'Browser Access is not configured on this server yet.',
+    activeSession,
+  };
 }

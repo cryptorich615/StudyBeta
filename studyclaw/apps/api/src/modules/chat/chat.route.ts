@@ -23,6 +23,7 @@ import {
 import { syncUserWorkspaceProfile } from '../../lib/user-agent';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
 import { syncUserModelRuntimeConfig } from '../../lib/model-settings';
+import { getBrowserCapabilityStatus, getOrCreateBrowserSession } from '../../lib/browser-session';
 import {
   ManagedUsageLimitError,
   finalizeManagedUsageEvent,
@@ -68,6 +69,7 @@ import {
   type ChatRequestStrategy,
 } from './chat-helpers';
 import {
+  parseBrowserIntent,
   formatGoogleWorkspaceListLabel,
   isRetryableChatFailure,
   looksLikeReminderStatusQuestion,
@@ -713,11 +715,12 @@ function buildAssistantCapabilityBadges(input: {
   hasAttachments?: boolean;
   reminderCreated?: boolean;
   reminderLookup?: boolean;
+  browserSession?: boolean;
   researchResult?: ResearchResultCard | null;
 }) {
   const badges: AssistantCapabilityBadge[] = [];
 
-  if (input.isResearchRequest) {
+  if (input.isResearchRequest || input.browserSession) {
     badges.push({ key: 'browser', label: 'Used browser research' });
   }
 
@@ -1584,6 +1587,9 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
     .map((row: { role: string; content: string }) => row.content)
     .filter(Boolean)
     .join('\n');
+  const browserFollowupCheck =
+    /^(check( now)?|try again|did it work|is it fixed|can you open it now|open it now)\b/i.test(trimmedMessage) &&
+    /\b(browser|research browser|web browser)\b/i.test(recentHistoryText);
   const googleFollowupRecheck =
     /^(check( now)?|try again|did it work|is it fixed|did admin fix it|can you access it now)\b/i.test(trimmedMessage) &&
     /\b(google|gmail|drive|docs?|sheets?|slides?|calendar)\b/i.test(recentHistoryText);
@@ -1651,11 +1657,12 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
 
   try {
     const context = isAdmin
-      ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] }, grades: { line: 'Grade tracker: unavailable for admin mode.', conceptLine: 'Wrong-answer patterns: unavailable for admin mode.' }, schedule: { line: 'Schedule: unavailable for admin mode.', todayLine: 'Today\'s classes: unavailable for admin mode.', detailLine: 'Relevant class detail: unavailable for admin mode.', context: null, referencedEntry: null }, googleWorkspace: { status: null, files: [] } }
+      ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] }, grades: { line: 'Grade tracker: unavailable for admin mode.', conceptLine: 'Wrong-answer patterns: unavailable for admin mode.' }, schedule: { line: 'Schedule: unavailable for admin mode.', todayLine: 'Today\'s classes: unavailable for admin mode.', detailLine: 'Relevant class detail: unavailable for admin mode.', context: null, referencedEntry: null }, googleWorkspace: { status: null, files: [] }, browser: null }
       : await buildStudyContext(req.user!.id, {
-          query: [trimmedMessage || effectiveMessage, googleFollowupRecheck ? recentHistoryText : ''].filter(Boolean).join('\n\n'),
+          query: [trimmedMessage || effectiveMessage, googleFollowupRecheck || browserFollowupCheck ? recentHistoryText : ''].filter(Boolean).join('\n\n'),
           scope: requestStrategy.contextScope,
         });
+    const browserIntent = trimmedMessage ? parseBrowserIntent(trimmedMessage) : null;
     const reminderStatusReply = trimmedMessage
       ? await tryHandleReminderStatusQuestion({
           userId: req.user!.id,
@@ -1677,6 +1684,104 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
             capabilityBadges: buildAssistantCapabilityBadges({
               reminderLookup: true,
             }),
+          }),
+        ]
+      );
+      await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+      return res.json({
+        threadId: activeThreadId,
+        openclawSessionId,
+        assistantMessage: assistantText,
+      });
+    }
+
+    if (browserIntent || browserFollowupCheck) {
+      const browserStatus = await getBrowserCapabilityStatus(req.user!.id).catch(() => null);
+
+      if (!browserStatus?.available) {
+        const assistantText = styleDeterministicAssistantReply(
+          browserStatus?.unavailableReason
+            ? `Browser access is not available right now. ${browserStatus.unavailableReason}`
+            : 'Browser access is not available right now.',
+          agent.persona_name
+        );
+
+        await db.query(
+          `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+          [
+            activeThreadId,
+            assistantText,
+            JSON.stringify({
+              browserStatusLookup: true,
+              capabilityBadges: buildAssistantCapabilityBadges({}),
+            }),
+          ]
+        );
+        await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+        return res.json({
+          threadId: activeThreadId,
+          openclawSessionId,
+          assistantMessage: assistantText,
+        });
+      }
+
+      if (browserIntent?.action === 'launch') {
+        const session = await getOrCreateBrowserSession(req.user!.id);
+        const assistantText = styleDeterministicAssistantReply(
+          `I opened your StudyClaw browser. Go to the Browser page to use it, or open it directly here: ${session.launchUrl}`,
+          agent.persona_name
+        );
+
+        await db.query(
+          `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+          [
+            activeThreadId,
+            assistantText,
+            JSON.stringify({
+              browserSession: true,
+              browserSessionId: session.id,
+              browserLaunchUrl: session.launchUrl,
+              capabilityBadges: buildAssistantCapabilityBadges({
+                browserSession: true,
+              }),
+            }),
+          ]
+        );
+        await db.query(`update chat_threads set last_message_at = now() where id = $1`, [activeThreadId]);
+
+        return res.json({
+          threadId: activeThreadId,
+          openclawSessionId,
+          assistantMessage: assistantText,
+          artifacts: [
+            {
+              type: 'browser_session',
+              id: session.id,
+              launchUrl: session.launchUrl,
+              embedUrl: session.embedUrl ?? null,
+              remoteUrl: session.remoteUrl,
+            },
+          ],
+        });
+      }
+
+      const assistantText = styleDeterministicAssistantReply(
+        browserStatus.activeSession
+          ? `Browser access is available through StudyClaw and your browser session is already active. You can use it from the Browser page now.`
+          : `Browser access is available through StudyClaw and I can open it for you whenever you want.`,
+        agent.persona_name
+      );
+
+      await db.query(
+        `insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'assistant', $2, $3)`,
+        [
+          activeThreadId,
+          assistantText,
+          JSON.stringify({
+            browserStatusLookup: true,
+            capabilityBadges: buildAssistantCapabilityBadges({}),
           }),
         ]
       );

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseGoogleWorkspaceIntent } from './chat-fastpaths';
+import { parseBrowserIntent, parseGoogleWorkspaceIntent } from './chat-fastpaths';
 
 test('parseGoogleWorkspaceIntent parses Gmail send with explicit subject/body format', () => {
   const intent = parseGoogleWorkspaceIntent('Send an email to dixieloveswillow@gmail.com subject Hey body Hello');
@@ -65,4 +65,9 @@ test('parseGoogleWorkspaceIntent parses follow-up Gmail send with message phrasi
     subject: '',
     bodyText: 'what time is the interview tomorrow',
   });
+});
+
+test('parseBrowserIntent detects browser status and launch requests', () => {
+  assert.deepEqual(parseBrowserIntent('Is browser access available right now?'), { action: 'status' });
+  assert.deepEqual(parseBrowserIntent('Open the browser for me'), { action: 'launch' });
 });

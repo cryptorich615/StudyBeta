@@ -95,7 +95,7 @@ export type GoogleWorkspacePreview = {
   webViewLink: string | null;
   supported: boolean;
   supportMessage: string;
-  format: 'text' | 'html' | 'unknown';
+  format: 'pdf' | 'text' | 'html' | 'word' | 'spreadsheet' | 'presentation' | 'richtext' | 'unknown';
   content: string;
   summary: string | null;
 };
@@ -348,6 +348,176 @@ async function googleApiFetchText(userId: string, url: string, init?: RequestIni
   }
 
   return response.text();
+}
+
+async function googleApiFetchBuffer(userId: string, url: string, init?: RequestInit) {
+  const accessToken = await getAccessToken(userId);
+  if (!accessToken) {
+    throw new Error('Google Drive and Calendar are not connected for this user.');
+  }
+
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      ...(init?.headers ?? {}),
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google API request failed with ${response.status}: ${await response.text()}`);
+  }
+
+  return Buffer.from(await response.arrayBuffer());
+}
+
+async function loadZipBuffer(buffer: Buffer) {
+  const JSZip = (await import('jszip')).default;
+  return JSZip.loadAsync(buffer);
+}
+
+function decodeEntities(value: string) {
+  return value
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec: string) => String.fromCodePoint(parseInt(dec, 10)));
+}
+
+function normalizeExtractedText(value: string) {
+  return decodeEntities(value)
+    .replace(/<w:tab\/>/g, '\t')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\r/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
+async function extractDocxBufferText(buffer: Buffer) {
+  const zip = await loadZipBuffer(buffer);
+  const parts = await Promise.all(
+    ['word/document.xml', 'word/footnotes.xml', 'word/endnotes.xml']
+      .map((path) => zip.file(path))
+      .filter(Boolean)
+      .map((entry) => entry!.async('text'))
+  );
+
+  return parts
+    .map((part) =>
+      normalizeExtractedText(
+        part
+          .replace(/<\/w:p>/g, '\n\n')
+          .replace(/<w:br[^>]*\/>/g, '\n')
+      )
+    )
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+}
+
+async function extractSpreadsheetBufferText(buffer: Buffer) {
+  const zip = await loadZipBuffer(buffer);
+  const workbookXml = await zip.file('xl/workbook.xml')?.async('text');
+  const sheetEntries = Object.keys(zip.files)
+    .filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(path))
+    .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+
+  const sheetNames = Array.from(workbookXml?.matchAll(/<sheet[^>]+name="([^"]+)"/g) ?? []).map((match) => decodeEntities(match[1]));
+  const sharedStringsXml = await zip.file('xl/sharedStrings.xml')?.async('text');
+  const sharedStrings = Array.from(sharedStringsXml?.matchAll(/<si[\s\S]*?<\/si>/g) ?? []).map((match) =>
+    normalizeExtractedText(match[0].replace(/<\/t>/g, ' '))
+  );
+
+  const sheets = await Promise.all(
+    sheetEntries.map(async (path, index) => {
+      const xml = await zip.file(path)?.async('text');
+      if (!xml) return '';
+      const rows = Array.from(xml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)).map((rowMatch) => {
+        const values = Array.from(rowMatch[1].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g))
+          .map((cellMatch) => {
+            const attributes = cellMatch[1];
+            const cellXml = cellMatch[2];
+            const inlineString = cellXml.match(/<is>([\s\S]*?)<\/is>/);
+            if (inlineString?.[1]) {
+              return normalizeExtractedText(inlineString[1]);
+            }
+
+            const valueMatch = cellXml.match(/<v>([\s\S]*?)<\/v>/);
+            if (!valueMatch?.[1]) {
+              return '';
+            }
+
+            const rawValue = decodeEntities(valueMatch[1]);
+            if (/\bt="s"/.test(attributes)) {
+              return sharedStrings[Number(rawValue)] ?? rawValue;
+            }
+
+            return rawValue;
+          })
+          .filter(Boolean);
+
+        return values.join(' | ');
+      }).filter(Boolean);
+
+      return [`Sheet: ${sheetNames[index] || `Sheet ${index + 1}`}`, ...rows].join('\n');
+    })
+  );
+
+  return sheets.filter(Boolean).join('\n\n').trim();
+}
+
+async function extractPresentationBufferText(buffer: Buffer) {
+  const zip = await loadZipBuffer(buffer);
+  const slideEntries = Object.keys(zip.files)
+    .filter((path) => /^ppt\/slides\/slide\d+\.xml$/i.test(path))
+    .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+
+  const slides = await Promise.all(
+    slideEntries.map(async (path, index) => {
+      const xml = await zip.file(path)?.async('text');
+      if (!xml) return '';
+      const text = Array.from(xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g))
+        .map((match) => decodeEntities(match[1]))
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return `Slide ${index + 1}\n${text || 'No extracted text'}`;
+    })
+  );
+
+  return slides.filter(Boolean).join('\n\n').trim();
+}
+
+async function extractPdfBufferText(buffer: Buffer) {
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(buffer),
+    useWorkerFetch: false,
+    isEvalSupported: false,
+  });
+  const pdf = await loadingTask.promise;
+  const pageTexts: string[] = [];
+
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const text = content.items
+      .map((item: any) => ('str' in item ? String(item.str) : ''))
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+
+    if (text) {
+      pageTexts.push(text);
+    }
+  }
+
+  return pageTexts.join('\n\n').trim();
 }
 
 export function buildGoogleAuthUrl(input: GoogleAuthState) {
@@ -880,6 +1050,133 @@ export async function getGoogleWorkspacePreview(userId: string, fileId: string):
       format: 'text',
       content: slidesText,
       summary: summarizeGoogleWorkspaceContent(slidesText),
+    };
+  }
+
+  if (
+    file.mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    file.mimeType === 'application/vnd.oasis.opendocument.text'
+  ) {
+    const buffer = await googleApiFetchBuffer(
+      userId,
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`
+    );
+    const content = await extractDocxBufferText(buffer);
+
+    return {
+      id: file.id,
+      title: file.name,
+      mimeType: file.mimeType,
+      modifiedTime: file.modifiedTime ?? null,
+      webViewLink: file.webViewLink ?? null,
+      supported: Boolean(content),
+      supportMessage: content
+        ? 'Word documents from Google Drive open in extracted-text mode for reading and study actions.'
+        : 'This Google-hosted Word document does not have readable extracted text yet.',
+      format: 'word',
+      content,
+      summary: summarizeGoogleWorkspaceContent(content),
+    };
+  }
+
+  if (
+    file.mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+    file.mimeType === 'application/vnd.oasis.opendocument.spreadsheet'
+  ) {
+    const buffer = await googleApiFetchBuffer(
+      userId,
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`
+    );
+    const content = await extractSpreadsheetBufferText(buffer);
+
+    return {
+      id: file.id,
+      title: file.name,
+      mimeType: file.mimeType,
+      modifiedTime: file.modifiedTime ?? null,
+      webViewLink: file.webViewLink ?? null,
+      supported: Boolean(content),
+      supportMessage: content
+        ? 'Spreadsheets from Google Drive open in extracted-text mode so rows stay readable in StudyClaw.'
+        : 'This Google-hosted spreadsheet does not have a readable preview yet.',
+      format: 'spreadsheet',
+      content,
+      summary: summarizeGoogleWorkspaceContent(content),
+    };
+  }
+
+  if (
+    file.mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
+    file.mimeType === 'application/vnd.oasis.opendocument.presentation'
+  ) {
+    const buffer = await googleApiFetchBuffer(
+      userId,
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`
+    );
+    const content = await extractPresentationBufferText(buffer);
+
+    return {
+      id: file.id,
+      title: file.name,
+      mimeType: file.mimeType,
+      modifiedTime: file.modifiedTime ?? null,
+      webViewLink: file.webViewLink ?? null,
+      supported: Boolean(content),
+      supportMessage: content
+        ? 'Presentations from Google Drive open in extracted-text mode with slide-by-slide reading support.'
+        : 'This Google-hosted presentation does not have a readable preview yet.',
+      format: 'presentation',
+      content,
+      summary: summarizeGoogleWorkspaceContent(content),
+    };
+  }
+
+  if (file.mimeType === 'application/pdf') {
+    const buffer = await googleApiFetchBuffer(
+      userId,
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`
+    );
+    const content = await extractPdfBufferText(buffer);
+
+    return {
+      id: file.id,
+      title: file.name,
+      mimeType: file.mimeType,
+      modifiedTime: file.modifiedTime ?? null,
+      webViewLink: file.webViewLink ?? null,
+      supported: Boolean(content),
+      supportMessage: content
+        ? 'PDFs from Google Drive open in StudyClaw reader mode with extracted text.'
+        : 'This Google-hosted PDF does not have readable extracted text yet.',
+      format: 'pdf',
+      content,
+      summary: summarizeGoogleWorkspaceContent(content),
+    };
+  }
+
+  if (
+    file.mimeType.startsWith('text/') ||
+    file.mimeType === 'application/json' ||
+    file.mimeType === 'application/rtf'
+  ) {
+    const content = await googleApiFetchText(
+      userId,
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`
+    );
+
+    return {
+      id: file.id,
+      title: file.name,
+      mimeType: file.mimeType,
+      modifiedTime: file.modifiedTime ?? null,
+      webViewLink: file.webViewLink ?? null,
+      supported: Boolean(content.trim()),
+      supportMessage: content.trim()
+        ? 'This Google-hosted text document is ready to read in StudyClaw.'
+        : 'This Google-hosted text document is empty right now.',
+      format: file.mimeType.includes('html') ? 'html' : file.mimeType.includes('rtf') ? 'richtext' : 'text',
+      content,
+      summary: summarizeGoogleWorkspaceContent(content),
     };
   }
 

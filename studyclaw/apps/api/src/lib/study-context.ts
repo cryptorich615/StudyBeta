@@ -3,6 +3,7 @@ import { buildStudentContext, renderStudentMemoryContext, type StudentContextSco
 import { buildGradeTrackerContext } from './grade-tracker';
 import { buildScheduleContext } from './class-scheduler';
 import { getGoogleIntegration, listRecentDriveFiles } from './google-service';
+import { getBrowserCapabilityStatus } from './browser-session';
 
 type AgentProfile = {
   openclaw_agent_id: string;
@@ -27,7 +28,7 @@ export async function buildStudyContext(
   const shouldLoadGoogleWorkspace =
     typeof options?.query === 'string' && /\b(google|drive|docs?|sheets?|slides?|gmail|mail|email|inbox)\b/i.test(options.query);
 
-  const [studentContext, gradeContext, scheduleContext, googleWorkspace] = await Promise.all([
+  const [studentContext, gradeContext, scheduleContext, googleWorkspace, browser] = await Promise.all([
     buildStudentContext(userId, options),
     buildGradeTrackerContext(userId, options?.query).catch(() => ({
       line: 'Grade tracker: none recorded yet.',
@@ -47,6 +48,7 @@ export async function buildStudyContext(
       status,
       files: files as Array<{ name?: string | null; mimeType?: string | null; modifiedTime?: string | null }>,
     })),
+    getBrowserCapabilityStatus(userId).catch(() => null),
   ]);
 
   return {
@@ -54,6 +56,7 @@ export async function buildStudyContext(
     grades: gradeContext,
     schedule: scheduleContext,
     googleWorkspace,
+    browser,
   };
 }
 
@@ -118,6 +121,11 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
           .map((file) => `${file.name ?? 'Untitled'} (${file.mimeType ?? 'unknown type'}${file.modifiedTime ? `, ${file.modifiedTime}` : ''})`)
           .join(' | ')}`
       : 'Recent Google files: none loaded.';
+  const browserLine = context.browser
+    ? context.browser.available
+      ? `Browser: available via ${context.browser.provider}${context.browser.activeSession ? ' with an active session ready now' : ' and can be launched on request'}.`
+      : `Browser: unavailable${context.browser.unavailableReason ? ` (${context.browser.unavailableReason})` : '.'}`
+    : 'Browser: unavailable.';
 
   return [
     systemPrompt.trim(),
@@ -137,6 +145,7 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
     scheduleDetailLine,
     googleWorkspaceLine,
     googleWorkspaceFilesLine,
+    browserLine,
     '',
     'Behavior rules:',
     `- Your configured assistant name is ${personaName}.`,
@@ -156,6 +165,7 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
     '- If app data is missing, say so plainly instead of pretending the data exists.',
     '- You are operating inside StudyClaw, not a raw standalone OpenClaw shell. StudyClaw may execute connected integrations and deterministic app actions even when they are not exposed as raw tool names in your visible toolkit list.',
     '- Do not decide that a capability is unavailable just because you do not see a matching raw skill name like gmail, google-workspace, gh, or exec in a tool list.',
+    '- Treat the injected Browser status the same way: if StudyClaw says browser access is available, do not claim the browser is missing just because you do not see a raw browser toolkit listing.',
     '- If Google workspace is marked connected in this context, do not claim you lack Google integration or say you need a browser workaround first.',
     '- If Google workspace is marked connected in this context, treat that as authoritative proof that StudyClaw can use the connected Google account for the permissions listed there.',
     '- If Gmail send is available in the injected Google workspace status and the student asks to send an email, use StudyClaw’s Gmail path rather than talking about generic message channels.',
@@ -164,6 +174,8 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
     '- If the student asks for Gmail, Google Drive, Docs, Sheets, or Slides help and the Google workspace connection is missing or incomplete, tell them to reconnect Google from the Calendar page so StudyClaw can request the needed workspace permissions.',
     '- If the student asks whether you currently have Google access, answer from the injected Google workspace status directly instead of speculating about your raw toolkit.',
     '- For short follow-ups like "check now", "try again", or "did the admin fix it", reuse the existing Google workspace status in context instead of inventing a new limitation.',
+    '- If the student asks whether browser access is available, answer from the injected Browser status directly.',
+    '- If browser access is available and the student asks you to open or launch it, use StudyClaw’s browser path instead of treating it like a missing tool.',
     '- Prefer concrete, prioritized study actions over generic encouragement.',
     '- When the student asks for current facts, source verification, live web research, or screenshots of what you found, use the browser capability instead of relying only on memory.',
     '- When the student asks for textbooks, books by subject, editions, reading lists, book-based research, or an easier alternative to a dense book, use the Open Library tools first before broader web research.',

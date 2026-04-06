@@ -4,6 +4,8 @@ export type GoogleWorkspaceIntent =
   | { action: 'send_gmail'; to: string; subject: string; bodyText: string }
   | { action: 'create_doc'; title: string; bodyText: string };
 
+export type BrowserIntent = { action: 'status' | 'launch' };
+
 export function looksLikeReminderStatusQuestion(message: string) {
   const normalized = message.toLowerCase();
   if (!normalized.includes('reminder')) {
@@ -195,6 +197,26 @@ export function formatGoogleWorkspaceListLabel(kind: 'all' | 'docs' | 'sheets' |
   if (kind === 'sheets') return 'Google Sheets';
   if (kind === 'slides') return 'Google Slides';
   return 'Google Drive files';
+}
+
+export function parseBrowserIntent(message: string): BrowserIntent | null {
+  const normalized = message.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (/\b(?:open|launch|start|use)\b.*\b(?:browser|web browser|research browser)\b/i.test(normalized)) {
+    return { action: 'launch' };
+  }
+
+  if (
+    /\b(?:is|do|can)\b.*\b(?:browser|web browser)\b.*\b(?:available|working|enabled|ready|access)\b/i.test(normalized) ||
+    /\b(?:browser|web browser)\b.*\b(?:available|working|enabled|ready|access)\b/i.test(normalized)
+  ) {
+    return { action: 'status' };
+  }
+
+  return null;
 }
 
 export function isRetryableChatFailure(messageText: string) {

@@ -45,7 +45,7 @@ type ReaderDocument = {
   sectionName: string;
   metadata: Record<string, any>;
   content: string;
-  format: 'pdf' | 'epub' | 'text' | 'html' | 'word' | 'image' | 'audio' | 'unknown';
+  format: 'pdf' | 'epub' | 'text' | 'html' | 'word' | 'spreadsheet' | 'presentation' | 'richtext' | 'image' | 'audio' | 'unknown';
   supported: boolean;
   supportMessage: string;
   summary?: string | null;
@@ -114,7 +114,7 @@ type GoogleReaderDocument = {
   webViewLink: string | null;
   supported: boolean;
   supportMessage: string;
-  format: 'text' | 'html' | 'unknown';
+  format: 'pdf' | 'text' | 'html' | 'word' | 'spreadsheet' | 'presentation' | 'richtext' | 'unknown';
   content: string;
   summary: string | null;
 };
@@ -140,9 +140,13 @@ function inferFormat(asset: ReaderAsset) {
   const candidate = `${asset.title} ${attachment?.name ?? ''} ${attachment?.type ?? ''}`.toLowerCase();
   if (asset.assetType === 'uploaded_pdf' || candidate.includes('.pdf') || candidate.includes('application/pdf')) return 'pdf';
   if (candidate.includes('.epub')) return 'epub';
-  if (candidate.includes('.doc') || candidate.includes('wordprocessingml') || candidate.includes('application/msword')) return 'word';
+  if (candidate.includes('.doc') || candidate.includes('.odt') || candidate.includes('wordprocessingml') || candidate.includes('application/msword')) return 'word';
+  if (candidate.includes('.xls') || candidate.includes('.xlsx') || candidate.includes('.ods') || candidate.includes('spreadsheetml') || candidate.includes('application/vnd.ms-excel')) return 'spreadsheet';
+  if (candidate.includes('.ppt') || candidate.includes('.pptx') || candidate.includes('.odp') || candidate.includes('presentationml') || candidate.includes('application/vnd.ms-powerpoint')) return 'presentation';
+  if (candidate.includes('.rtf') || candidate.includes('application/rtf') || candidate.includes('text/rtf')) return 'richtext';
   if (asset.assetType === 'image_note') return 'image';
   if (asset.assetType === 'audio_note') return 'audio';
+  if (candidate.includes('.html') || candidate.includes('.htm') || candidate.includes('text/html')) return 'html';
   return 'text';
 }
 
@@ -151,6 +155,9 @@ function iconForFormat(format: string) {
     case 'pdf':
     case 'epub':
     case 'word':
+    case 'spreadsheet':
+    case 'presentation':
+    case 'richtext':
     case 'text':
       return FileText;
     case 'image':
@@ -170,6 +177,12 @@ function labelForFormat(format: string) {
       return 'EPUB';
     case 'word':
       return 'DOC/DOCX';
+    case 'spreadsheet':
+      return 'XLS/XLSX';
+    case 'presentation':
+      return 'PPT/PPTX';
+    case 'richtext':
+      return 'RTF';
     case 'image':
       return 'Image';
     case 'audio':
@@ -220,6 +233,16 @@ function labelForGoogleMimeType(mimeType?: string) {
       return 'Google Sheet';
     case 'application/vnd.google-apps.presentation':
       return 'Google Slides';
+    case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+      return 'DOCX in Google Drive';
+    case 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+      return 'XLSX in Google Drive';
+    case 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+      return 'PPTX in Google Drive';
+    case 'application/pdf':
+      return 'PDF in Google Drive';
+    case 'text/plain':
+      return 'TXT in Google Drive';
     default:
       return 'Google file';
   }
@@ -246,7 +269,7 @@ export default function DocumentReaderWorkspace({
   const [loadingDocument, setLoadingDocument] = useState(false);
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
-  const [typeFilter, setTypeFilter] = useState<'all' | 'documents' | 'books' | 'pdf' | 'text'>('all');
+  const [typeFilter, setTypeFilter] = useState<'all' | 'documents' | 'books' | 'pdf' | 'office' | 'text'>('all');
   const [sort, setSort] = useState<'recent' | 'updated' | 'title'>('recent');
   const [view, setView] = useState<'list' | 'grid'>('list');
   const [mobileExplorerOpen, setMobileExplorerOpen] = useState(false);
@@ -337,7 +360,7 @@ export default function DocumentReaderWorkspace({
             ? 'image'
             : format === 'audio'
               ? 'audio'
-              : format === 'word'
+              : format === 'word' || format === 'spreadsheet' || format === 'presentation' || format === 'richtext'
                 ? 'file'
                 : 'text';
       return {
@@ -386,9 +409,20 @@ export default function DocumentReaderWorkspace({
     if (typeFilter === 'documents') items = items.filter((item) => item.kind === 'asset' || item.kind === 'google');
     if (typeFilter === 'books') items = items.filter((item) => item.kind === 'book');
     if (typeFilter === 'pdf') items = items.filter((item) => item.kind === 'asset' && item.typeLabel === 'PDF');
+    if (typeFilter === 'office') {
+      items = items.filter((item) =>
+        item.kind === 'asset'
+          ? ['DOC/DOCX', 'XLS/XLSX', 'PPT/PPTX', 'RTF'].includes(item.typeLabel)
+          : item.kind === 'google'
+            ? /Google (Doc|Sheet|Slides)|DOCX in Google Drive|XLSX in Google Drive|PPTX in Google Drive/.test(item.typeLabel)
+            : false
+      );
+    }
     if (typeFilter === 'text') {
       items = items.filter((item) =>
-        item.kind === 'google' || (item.kind === 'asset' && item.typeLabel !== 'PDF')
+        item.kind === 'google'
+          ? !/DOCX in Google Drive|XLSX in Google Drive|PPTX in Google Drive|PDF in Google Drive/.test(item.typeLabel)
+          : item.kind === 'asset' && !['PDF', 'DOC/DOCX', 'XLS/XLSX', 'PPT/PPTX', 'RTF'].includes(item.typeLabel)
       );
     }
 
@@ -820,6 +854,7 @@ export default function DocumentReaderWorkspace({
             <option value="documents">Workspace docs</option>
             <option value="books">Saved books</option>
             <option value="pdf">PDFs</option>
+            <option value="office">DOCX, XLSX, PPTX, RTF</option>
             <option value="text">Text docs</option>
           </select>
           <select value={sort} onChange={(event) => setSort(event.target.value as any)}>
@@ -974,7 +1009,7 @@ export default function DocumentReaderWorkspace({
       ) : (
         <div className="reader-workspace__empty">
           <strong>Upload a document to start reading in your workspace.</strong>
-          <p>Backpack uploads, saved textbook results, and recent reading progress will appear here.</p>
+          <p>Backpack uploads, Google workspace files, saved textbook results, and recent reading progress will appear here.</p>
         </div>
       )}
     </aside>

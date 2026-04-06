@@ -791,7 +791,7 @@ ${text}
 `;
 
   const context = isAdmin
-    ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] }, grades: { line: 'Grade tracker: unavailable for admin mode.', conceptLine: 'Wrong-answer patterns: unavailable for admin mode.' }, schedule: { line: 'Schedule: unavailable for admin mode.', todayLine: 'Today\'s classes: unavailable for admin mode.', detailLine: 'Relevant class detail: unavailable for admin mode.', context: null, referencedEntry: null }, googleWorkspace: { status: null, files: [] } }
+    ? { profile: null, subjects: [], reminders: [], memory: { courses: [], topics: [], assignments: [], matchedCourseIds: [], matchedTopicIds: [], memories: [], snapshots: [] }, calendar: { status: 'not_connected' as const, items: [] }, grades: { line: 'Grade tracker: unavailable for admin mode.', conceptLine: 'Wrong-answer patterns: unavailable for admin mode.' }, schedule: { line: 'Schedule: unavailable for admin mode.', todayLine: 'Today\'s classes: unavailable for admin mode.', detailLine: 'Relevant class detail: unavailable for admin mode.', context: null, referencedEntry: null }, googleWorkspace: { status: null, files: [] }, browser: null }
     : await buildStudyContext(req.user!.id, { query: `${title}\n\n${text.slice(0, 600)}` });
   const usageReservation = isAdmin
     ? { eventId: null as string | null }
