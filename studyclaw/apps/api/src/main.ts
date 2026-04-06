@@ -31,10 +31,47 @@ const allowedOrigins = (process.env.CORS_ORIGIN ?? '*')
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+function parseOrigin(origin: string) {
+  try {
+    return new URL(origin);
+  } catch {
+    return null;
+  }
+}
+
+function isLoopbackHost(hostname: string) {
+  return hostname === 'localhost' || hostname === '127.0.0.1';
+}
+
+function isAllowedOrigin(origin: string) {
+  if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+    return true;
+  }
+
+  const requested = parseOrigin(origin);
+  if (!requested) {
+    return false;
+  }
+
+  return allowedOrigins.some((allowedOrigin) => {
+    const allowed = parseOrigin(allowedOrigin);
+    if (!allowed) {
+      return false;
+    }
+
+    return (
+      allowed.protocol === requested.protocol
+      && allowed.port === requested.port
+      && isLoopbackHost(allowed.hostname)
+      && isLoopbackHost(requested.hostname)
+    );
+  });
+}
+
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      if (!origin || isAllowedOrigin(origin)) {
         return callback(null, true);
       }
 

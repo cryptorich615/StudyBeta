@@ -519,11 +519,19 @@ export async function getRelevantStudentMemory(input: StudentMemoryQuery) {
   };
 }
 
-export async function buildStudentContext(userId: string, options?: { query?: string | null }) {
+export type StudentContextScope = 'minimal' | 'targeted' | 'full';
+
+export async function buildStudentContext(
+  userId: string,
+  options?: { query?: string | null; scope?: StudentContextScope }
+) {
   await ensurePlatformSchema();
-  const shouldLoadCalendar = /calendar|schedule|scheduled|plan|planning|deadline|due|exam|quiz|session|study block|reminder|today|tomorrow|week/i.test(
-    String(options?.query ?? '')
-  );
+  const scope = options?.scope ?? 'full';
+  const shouldLoadCalendar =
+    scope !== 'minimal' &&
+    /calendar|schedule|scheduled|plan|planning|deadline|due|exam|quiz|session|study block|reminder|today|tomorrow|week/i.test(
+      String(options?.query ?? '')
+    );
   const [profileResult, subjectsResult, remindersResult, memory, calendar] = await Promise.all([
     db.query(
       `select u.full_name, sp.school_name, sp.school_level, sp.grade_year, sp.major, sp.timezone, sp.learning_style, sp.onboarding_complete
@@ -540,18 +548,30 @@ export async function buildStudentContext(userId: string, options?: { query?: st
        limit 12`,
       [userId]
     ),
-    db.query(
-      `select type, title, reminder_at, status
-       from reminders
-       where user_id = $1
-       order by reminder_at asc
-       limit 8`,
-      [userId]
-    ),
-    getRelevantStudentMemory({
-      userId,
-      query: options?.query ?? null,
-    }),
+    scope === 'minimal'
+      ? Promise.resolve({ rows: [] as Array<{ type: string; title: string; reminder_at: string; status: string }> })
+      : db.query(
+          `select type, title, reminder_at, status
+           from reminders
+           where user_id = $1
+           order by reminder_at asc
+           limit 8`,
+          [userId]
+        ),
+    scope === 'full'
+      ? getRelevantStudentMemory({
+          userId,
+          query: options?.query ?? null,
+        })
+      : Promise.resolve({
+          courses: [],
+          topics: [],
+          assignments: [],
+          matchedCourseIds: [],
+          matchedTopicIds: [],
+          memories: [],
+          snapshots: [],
+        }),
     shouldLoadCalendar
       ? getUpcomingCalendarItemsForStudent(userId, { maxResults: 6 })
       : Promise.resolve({ status: 'not_connected' as const, items: [] }),

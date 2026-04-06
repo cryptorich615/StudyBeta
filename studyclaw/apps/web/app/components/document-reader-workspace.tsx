@@ -78,6 +78,7 @@ type SavedBook = {
   description?: string | null;
   openLibraryUrl?: string | null;
   savedAt?: string;
+  lastOpenedAt?: string | null;
 };
 
 type BookSearchResult = {
@@ -120,6 +121,7 @@ type GoogleReaderDocument = {
 
 type Props = {
   initialAssetId?: string | null;
+  initialBookId?: string | null;
   mode?: 'embedded' | 'full';
   onUseForFlashcards?: (input: { title: string; text: string }) => void;
   onUseForQuiz?: (input: { title: string; text: string }) => void;
@@ -225,6 +227,7 @@ function labelForGoogleMimeType(mimeType?: string) {
 
 export default function DocumentReaderWorkspace({
   initialAssetId = null,
+  initialBookId = null,
   mode = 'embedded',
   onUseForFlashcards,
   onUseForQuiz,
@@ -259,16 +262,35 @@ export default function DocumentReaderWorkspace({
   useEffect(() => {
     void loadAssets();
     void loadGoogleFiles();
-    loadSavedBooksFromStorage();
+    void loadSavedBooks();
   }, []);
 
   useEffect(() => {
-    if (!assets.length) return;
-    const nextId = initialAssetId || assets[0]?.id;
-    if (nextId) {
-      void openAsset(nextId);
+    if (initialBookId) {
+      if (activeBook && buildSavedBookId(activeBook) === initialBookId) {
+        return;
+      }
+      const matchingBook = savedBooks.find((book) => buildSavedBookId(book) === initialBookId);
+      if (matchingBook) {
+        void openSavedBook(matchingBook);
+      }
+      return;
     }
-  }, [assets, initialAssetId]);
+
+    if (initialAssetId) {
+      if (activeAsset?.id === initialAssetId) {
+        return;
+      }
+      if (assets.some((asset) => asset.id === initialAssetId)) {
+        void openAsset(initialAssetId);
+      }
+      return;
+    }
+
+    if (assets.length) {
+      void openAsset(assets[0].id);
+    }
+  }, [activeAsset?.id, activeBook, assets, initialAssetId, initialBookId, savedBooks]);
 
   useEffect(() => {
     if (!activeAsset) return;
@@ -334,11 +356,11 @@ export default function DocumentReaderWorkspace({
       kind: 'book' as const,
       id: String(book.key || book.gb_id || book.title),
       title: book.title,
-      updatedAt: String(book.savedAt || book.first_publish_year || ''),
-      progress: 0,
-      typeLabel: 'Saved book',
-      icon: 'book' as const,
-      source: book,
+        updatedAt: String(book.lastOpenedAt || book.savedAt || book.first_publish_year || ''),
+        progress: 0,
+        typeLabel: 'Saved book',
+        icon: 'book' as const,
+        source: book,
     }));
 
     const googleItems = googleFiles.map((file) => ({
@@ -385,6 +407,32 @@ export default function DocumentReaderWorkspace({
       .sort((left, right) => String(right.lastOpenedAt || right.updatedAt).localeCompare(String(left.lastOpenedAt || left.updatedAt)))
       .slice(0, 4);
   }, [assets]);
+
+  const recentLibraryItems = useMemo(() => {
+    const books = savedBooks
+      .filter((book) => book.lastOpenedAt || book.savedAt)
+      .map((book) => ({
+        kind: 'book' as const,
+        id: buildSavedBookId(book),
+        title: book.title,
+        progressLabel: book.author_name?.[0] || 'Saved book',
+        openedAt: String(book.lastOpenedAt || book.savedAt || ''),
+        source: book,
+      }));
+
+    const documents = recentDocuments.map((asset) => ({
+      kind: 'asset' as const,
+      id: asset.id,
+      title: asset.title,
+      progressLabel: `${Math.round(asset.readingProgress ?? 0)}% read`,
+      openedAt: String(asset.lastOpenedAt || asset.updatedAt || ''),
+      source: asset,
+    }));
+
+    return [...documents, ...books]
+      .sort((left, right) => right.openedAt.localeCompare(left.openedAt))
+      .slice(0, 4);
+  }, [recentDocuments, savedBooks]);
 
   const activePages = useMemo(() => splitPages(activeAsset?.content ?? ''), [activeAsset?.content]);
   const activePage = activePages[pageIndex] ?? '';
@@ -438,12 +486,12 @@ export default function DocumentReaderWorkspace({
   }
 
   function loadSavedBooksFromStorage() {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined') return [] as SavedBook[];
     try {
       const parsed = JSON.parse(window.localStorage.getItem(EREADER_LIBRARY_KEY) || '[]');
-      setSavedBooks(Array.isArray(parsed) ? parsed : []);
+      return Array.isArray(parsed) ? parsed as SavedBook[] : [];
     } catch {
-      setSavedBooks([]);
+      return [];
     }
   }
 
@@ -451,6 +499,47 @@ export default function DocumentReaderWorkspace({
     setSavedBooks(nextBooks);
     if (typeof window !== 'undefined') {
       window.localStorage.setItem(EREADER_LIBRARY_KEY, JSON.stringify(nextBooks));
+    }
+  }
+
+  function buildSavedBookId(book: SavedBook) {
+    return String(book.key || book.gb_id || book.openLibraryUrl || book.title);
+  }
+
+  async function loadSavedBooks() {
+    try {
+      const response = await apiFetch('/api/study/library/books');
+      const payload = await readApiPayload(response);
+      if (!response.ok) {
+        throw new Error(getApiErrorMessage(payload, 'Failed to load saved books'));
+      }
+
+      const serverBooks = Array.isArray(payload) ? payload as SavedBook[] : [];
+      const localBooks = loadSavedBooksFromStorage();
+
+      if (localBooks.length) {
+        const known = new Set(serverBooks.map((book) => buildSavedBookId(book)));
+        const missing = localBooks.filter((book) => !known.has(buildSavedBookId(book)));
+        if (missing.length) {
+          await Promise.all(
+            missing.map((book) =>
+              apiFetch('/api/study/library/books', {
+                method: 'PUT',
+                body: JSON.stringify(book),
+              }).catch(() => null)
+            )
+          );
+          const refreshed = await apiFetch('/api/study/library/books');
+          const refreshedPayload = await readApiPayload(refreshed);
+          const merged = Array.isArray(refreshedPayload) ? refreshedPayload as SavedBook[] : serverBooks;
+          persistSavedBooks(merged);
+          return;
+        }
+      }
+
+      persistSavedBooks(serverBooks);
+    } catch {
+      persistSavedBooks(loadSavedBooksFromStorage());
     }
   }
 
@@ -482,7 +571,7 @@ export default function DocumentReaderWorkspace({
     }
   }
 
-  function saveBookToLibrary(book: BookSearchResult) {
+  async function saveBookToLibrary(book: BookSearchResult) {
     const key = book.openLibraryWorkKey || book.openLibraryEditionKey || book.openLibraryUrl || book.title;
     const nextBook: SavedBook = {
       key: book.openLibraryWorkKey || undefined,
@@ -498,18 +587,28 @@ export default function DocumentReaderWorkspace({
       savedAt: new Date().toISOString(),
     };
 
-    const existing = savedBooks.find((item) => String(item.key || item.gb_id || item.title) === String(key));
-    const nextBooks = existing
-      ? savedBooks.map((item) =>
-          String(item.key || item.gb_id || item.title) === String(key)
-            ? { ...item, ...nextBook, savedAt: item.savedAt || nextBook.savedAt }
-            : item
-        )
-      : [nextBook, ...savedBooks];
+    const existing = savedBooks.find((item) => buildSavedBookId(item) === String(key));
 
-    persistSavedBooks(nextBooks);
-    openSavedBook(nextBook);
-    setBookSearchStatus(existing ? 'Book already in your library. Opened it in the reader.' : 'Saved to your library.');
+    try {
+      const response = await apiFetch('/api/study/library/books', {
+        method: 'PUT',
+        body: JSON.stringify(nextBook),
+      });
+      const payload = await readApiPayload(response);
+      if (!response.ok) {
+        throw new Error(getApiErrorMessage(payload, 'Failed to save this book'));
+      }
+
+      const saved = payload as SavedBook;
+      const nextBooks = existing
+        ? savedBooks.map((item) => (buildSavedBookId(item) === buildSavedBookId(saved) ? saved : item))
+        : [saved, ...savedBooks];
+      persistSavedBooks(nextBooks);
+      await openSavedBook(saved);
+      setBookSearchStatus(existing ? 'Book already in your library. Opened it in the reader.' : 'Saved to your library.');
+    } catch (nextError) {
+      setBookSearchStatus(nextError instanceof Error ? nextError.message : 'Failed to save this book');
+    }
   }
 
   async function openAsset(assetId: string) {
@@ -636,7 +735,24 @@ export default function DocumentReaderWorkspace({
     void createAnnotation('highlight', selection.slice(0, 400));
   }
 
-  function openSavedBook(book: SavedBook) {
+  async function openSavedBook(book: SavedBook) {
+    const bookId = encodeURIComponent(buildSavedBookId(book));
+    try {
+      const response = await apiFetch(`/api/study/library/books/${bookId}/open`, {
+        method: 'POST',
+      });
+      const payload = await readApiPayload(response);
+      if (response.ok) {
+        const saved = payload as SavedBook;
+        setSavedBooks((current) =>
+          current.map((item) => (buildSavedBookId(item) === buildSavedBookId(saved) ? saved : item))
+        );
+        book = saved;
+      }
+    } catch {
+      // Ignore open-state sync failures and still let the reader open the book locally.
+    }
+
     setActiveAsset(null);
     setActiveGoogleFile(null);
     setActiveBook(book);
@@ -786,14 +902,19 @@ export default function DocumentReaderWorkspace({
         <Link href="/reader" className="ghost-button">Open full reader</Link>
       </div>
 
-      {recentDocuments.length ? (
+      {recentLibraryItems.length ? (
         <section className="reader-workspace__recent">
           <p className="eyebrow">Continue reading</p>
           <div className="reader-workspace__recent-list">
-            {recentDocuments.map((asset) => (
-              <button key={asset.id} type="button" className="reader-workspace__recent-item" onClick={() => void openAsset(asset.id)}>
-                <strong>{asset.title}</strong>
-                <span>{Math.round(asset.readingProgress ?? 0)}% read</span>
+            {recentLibraryItems.map((item) => (
+              <button
+                key={`${item.kind}-${item.id}`}
+                type="button"
+                className="reader-workspace__recent-item"
+                onClick={() => (item.kind === 'asset' ? void openAsset(item.id) : void openSavedBook(item.source))}
+              >
+                <strong>{item.title}</strong>
+                <span>{item.progressLabel}</span>
               </button>
             ))}
           </div>
@@ -831,7 +952,7 @@ export default function DocumentReaderWorkspace({
                     ? void openAsset(item.id)
                     : item.kind === 'google'
                       ? void openGoogleFile(item.id)
-                      : openSavedBook(item.source)
+                      : void openSavedBook(item.source)
                 }
               >
                 <div className="reader-workspace__item-icon"><Icon className="w-4 h-4" /></div>

@@ -33,6 +33,12 @@ import {
     buildFallbackQuiz,
 } from '../../lib/study-generation-fallback';
 import { openLibrarySearchBooks } from '../../lib/openlibrary';
+import {
+    deleteSavedLibraryBook,
+    listSavedLibraryBooks,
+    markSavedLibraryBookOpened,
+    upsertSavedLibraryBook,
+} from '../../lib/library-workspace';
 
 export const studyToolsRouter = Router();
 studyToolsRouter.use(requireAuth);
@@ -77,6 +83,67 @@ studyToolsRouter.get('/books/search', async (req: AuthedRequest, res) => {
             error: error instanceof Error ? error.message : 'Book search failed',
         });
     }
+});
+
+studyToolsRouter.get('/library/books', async (req: AuthedRequest, res) => {
+    await ensurePlatformSchema();
+    const books = await listSavedLibraryBooks(req.user!.id);
+    res.json(books);
+});
+
+studyToolsRouter.put('/library/books', async (req: AuthedRequest, res) => {
+    await ensurePlatformSchema();
+    try {
+        const saved = await upsertSavedLibraryBook(req.user!.id, req.body ?? {});
+        res.json(saved);
+    } catch (error) {
+        res.status(400).json({
+            error: 'bad_request',
+            message: error instanceof Error ? error.message : 'Could not save this book to your library',
+        });
+    }
+});
+
+studyToolsRouter.post('/library/books/:bookId/open', async (req: AuthedRequest, res) => {
+    await ensurePlatformSchema();
+    const bookId = decodeURIComponent(String(req.params.bookId ?? '').trim());
+    if (!bookId) {
+        return res.status(400).json({
+            error: 'bad_request',
+            message: 'Saved book id is required',
+        });
+    }
+
+    const saved = await markSavedLibraryBookOpened(req.user!.id, bookId);
+    if (!saved) {
+        return res.status(404).json({
+            error: 'not_found',
+            message: 'Saved book not found',
+        });
+    }
+
+    return res.json(saved);
+});
+
+studyToolsRouter.delete('/library/books/:bookId', async (req: AuthedRequest, res) => {
+    await ensurePlatformSchema();
+    const bookId = decodeURIComponent(String(req.params.bookId ?? '').trim());
+    if (!bookId) {
+        return res.status(400).json({
+            error: 'bad_request',
+            message: 'Saved book id is required',
+        });
+    }
+
+    const removed = await deleteSavedLibraryBook(req.user!.id, bookId);
+    if (!removed) {
+        return res.status(404).json({
+            error: 'not_found',
+            message: 'Saved book not found',
+        });
+    }
+
+    return res.json({ ok: true, bookId });
 });
 
 async function getStudentAgentRecord(userId: string) {

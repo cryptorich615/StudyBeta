@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { type ChangeEvent, type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiFetch, getApiErrorMessage, readApiPayload } from '../../lib/api';
+import { streamChatRequest, type ChatStreamEvent } from '../../lib/chat-stream';
 import { extractDocumentText } from '../../lib/document-text';
 import { readStoredSession } from '../../lib/session';
 import GenerationStatusCard, { type GenerationStatus } from '../components/generation-status-card';
@@ -73,6 +74,13 @@ type ChatMessage = {
       quizId?: string | null;
     } | null;
   };
+};
+
+type LiveAssistantState = {
+  id: string;
+  role: 'assistant';
+  content: string;
+  createdAt?: string;
 };
 
 type CommandHelpers = {
@@ -425,6 +433,8 @@ export default function ChatPage() {
   const [studyMode, setStudyMode] = useState<StudyMode>('general');
   const [savingResearchId, setSavingResearchId] = useState<string | null>(null);
   const [activeResearchActionKey, setActiveResearchActionKey] = useState<string | null>(null);
+  const [liveAssistant, setLiveAssistant] = useState<LiveAssistantState | null>(null);
+  const [liveProgress, setLiveProgress] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const prevMsgCountRef = useRef(-1);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -757,10 +767,14 @@ export default function ChatPage() {
     } else {
       setActiveThreadId(null);
       setMessages([]);
+      setLiveAssistant(null);
+      setLiveProgress([]);
     }
   }
 
   async function loadThread(threadId: string) {
+    setLiveAssistant(null);
+    setLiveProgress([]);
     const res = await apiFetch(`/api/chat/threads/${threadId}`);
     const data = await readApiPayload(res);
 
@@ -800,6 +814,110 @@ export default function ChatPage() {
     }
 
     return false;
+  }
+
+  function pushLiveProgress(nextMessage: string) {
+    setLiveProgress((current) => {
+      if (!nextMessage.trim()) {
+        return current;
+      }
+
+      const deduped = current.filter((entry) => entry !== nextMessage);
+      return [...deduped, nextMessage].slice(-4);
+    });
+  }
+
+  function handleChatStreamEvent(
+    event: ChatStreamEvent,
+    context: {
+      userMsg: ChatMessage;
+      persistedUserMessage: ChatMessage;
+      baselineMessageCount: number;
+    }
+  ) {
+    if (event.type === 'status') {
+      pushLiveProgress(event.message);
+      return;
+    }
+
+    if (event.type === 'thread' && typeof event.threadId === 'string') {
+      setActiveThreadId(event.threadId);
+      return;
+    }
+
+    if (event.type === 'assistant_start') {
+      setLiveAssistant({
+        id: `streaming-assistant-${Date.now()}`,
+        role: 'assistant',
+        content: '',
+        createdAt: event.createdAt || new Date().toISOString(),
+      });
+      return;
+    }
+
+    if (event.type === 'assistant_delta') {
+      setLiveAssistant((current) =>
+        current
+          ? {
+              ...current,
+              content: `${current.content}${event.delta}`,
+            }
+          : {
+              id: `streaming-assistant-${Date.now()}`,
+              role: 'assistant',
+              content: event.delta,
+              createdAt: new Date().toISOString(),
+            }
+      );
+      return;
+    }
+
+    if (event.type === 'pending') {
+      setPendingDocuments([]);
+      setLiveAssistant(null);
+      setMessages((prev) => [...prev.filter((m) => m.id !== context.userMsg.id), context.persistedUserMessage]);
+      setFeedback(event.message?.trim() ? event.message : 'Still working on that response. It should appear in the chat shortly.');
+      if (event.threadId) {
+        setActiveThreadId(event.threadId);
+      }
+      return;
+    }
+
+    if (event.type === 'assistant_final') {
+      const payload = event.payload ?? {};
+      const nextThreadId = typeof payload?.threadId === 'string' ? payload.threadId : activeThreadId;
+      const normalizedAssistantEntry =
+        payload?.assistantEntry && typeof payload.assistantEntry === 'object'
+          ? normalizeChatMessage(payload.assistantEntry)
+          : {
+              id: `local-assistant-${Date.now() + 1}`,
+              role: 'assistant',
+              content:
+                typeof payload?.assistantMessage === 'string'
+                  ? payload.assistantMessage
+                  : liveAssistant?.content ?? '',
+              createdAt: new Date().toISOString(),
+            };
+
+      if (nextThreadId) {
+        setActiveThreadId(nextThreadId);
+      }
+      setPendingDocuments([]);
+      setLiveAssistant(null);
+      setLiveProgress([]);
+      setMessages((prev) => [
+        ...prev.filter((m) => m.id !== context.userMsg.id),
+        context.persistedUserMessage,
+        normalizedAssistantEntry,
+      ]);
+      setFeedback('');
+      void loadThreads(nextThreadId ?? undefined).catch(() => undefined);
+      return;
+    }
+
+    if (event.type === 'error') {
+      throw new Error(event.message || 'Failed to send message');
+    }
   }
 
   async function saveResearchToNotes(messageId: string) {
@@ -1086,15 +1204,18 @@ export default function ChatPage() {
     setSending(true);
     setIsTyping(true);
     setFeedback('');
+    setLiveAssistant(null);
+    setLiveProgress([`${agentName} is thinking...`]);
 
     setTimeout(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, 50);
 
     try {
-      const res = await apiFetch('/api/chat/send', {
-        method: 'POST',
-        body: JSON.stringify({
+      let pendingThreadId: string | null = null;
+      let receivedPending = false;
+      await streamChatRequest(
+        {
           threadId: activeThreadId,
           message: effectivePrompt,
           studyMode,
@@ -1103,67 +1224,33 @@ export default function ChatPage() {
             type: document.type,
             extractedText: document.extractedText,
           })),
-        }),
-      });
-      const data = await readApiPayload(res);
-      if (res.status === 202 || data?.pending) {
-        setPendingDocuments([]);
-        const pendingThreadId = typeof data?.threadId === 'string' ? data.threadId : activeThreadId;
-        if (pendingThreadId) {
-          setActiveThreadId(pendingThreadId);
-        }
-        setMessages((prev) => [...prev.filter((m) => m.id !== userMsg.id), persistedUserMessage]);
-        setFeedback(
-          typeof data?.message === 'string' && data.message.trim()
-            ? data.message
-            : 'Still working on that response. It should appear in the chat shortly.'
-        );
-
-        if (pendingThreadId) {
-          const resolved = await waitForAssistantReply(pendingThreadId, baselineMessageCount);
-          if (resolved) {
-            setFeedback('');
+        },
+        (event) => {
+          if (event.type === 'pending') {
+            receivedPending = true;
+            pendingThreadId = typeof event.threadId === 'string' ? event.threadId : activeThreadId;
           }
+          handleChatStreamEvent(event, {
+            userMsg,
+            persistedUserMessage,
+            baselineMessageCount,
+          });
         }
-        return;
-      }
-      if (!res.ok) {
-        setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
-        throw new Error(getApiErrorMessage(data, 'Failed to send message'));
-      }
+      );
 
-      setPendingDocuments([]);
-      const nextThreadId = typeof data?.threadId === 'string' ? data.threadId : activeThreadId;
-      if (nextThreadId) {
-        setActiveThreadId(nextThreadId);
+      if (receivedPending && pendingThreadId) {
+        const resolved = await waitForAssistantReply(pendingThreadId, baselineMessageCount);
+        if (resolved) {
+          setFeedback('');
+        }
       }
-
-      if (typeof data?.assistantMessage === 'string' && data.assistantMessage.trim()) {
-        const normalizedAssistantEntry =
-          data?.assistantEntry && typeof data.assistantEntry === 'object'
-            ? normalizeChatMessage(data.assistantEntry)
-            : {
-                id: `local-assistant-${Date.now() + 1}`,
-                role: 'assistant',
-                content: data.assistantMessage,
-                createdAt: new Date().toISOString(),
-              };
-        setMessages((prev) => [
-          ...prev.filter((m) => m.id !== userMsg.id),
-          persistedUserMessage,
-          normalizedAssistantEntry,
-        ]);
-      } else {
-        await loadThreads(nextThreadId ?? undefined);
-      }
-
-      void loadThreads(nextThreadId ?? undefined).catch(() => undefined);
     } catch (error: unknown) {
       const nextMessage = error instanceof Error ? error.message : 'Failed to send message';
       const shouldWaitForReply =
         activeThreadId && /internal error|internal server error|timed out|could not get a response/i.test(nextMessage);
       if (shouldWaitForReply) {
         setMessages((prev) => [...prev.filter((m) => m.id !== userMsg.id), persistedUserMessage]);
+        setLiveAssistant(null);
         setFeedback('Still working on that response. It should appear in the chat shortly.');
         const resolved = await waitForAssistantReply(activeThreadId, baselineMessageCount);
         if (resolved) {
@@ -1171,11 +1258,13 @@ export default function ChatPage() {
         }
       } else {
         setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
+        setLiveAssistant(null);
         setFeedback(nextMessage);
       }
     } finally {
       setSending(false);
       setIsTyping(false);
+      setLiveProgress([]);
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       }, 100);
@@ -1220,6 +1309,8 @@ export default function ChatPage() {
             onNewChat={() => {
               setActiveThreadId(null);
               setMessages([]);
+              setLiveAssistant(null);
+              setLiveProgress([]);
               setFeedback('Started a fresh study chat.');
             }}
             capabilities={[
@@ -1287,6 +1378,8 @@ export default function ChatPage() {
             messages={messages}
             isTyping={isTyping}
             agentName={agentName}
+            liveAssistant={liveAssistant}
+            liveProgress={liveProgress}
             messagesEndRef={messagesEndRef}
             onPromptSelect={(prompt) => setMessage(prompt)}
             onBubbleAction={(instruction) => setMessage(instruction)}

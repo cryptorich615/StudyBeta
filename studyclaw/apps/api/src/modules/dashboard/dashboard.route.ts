@@ -6,6 +6,7 @@ import { ensurePlatformSchema } from '../../lib/platform-schema';
 import { buildWeeklyStudyPlan } from '../../lib/weekly-study-plan';
 import { listGradeDashboard } from '../../lib/grade-tracker';
 import { getScheduleSnapshot } from '../../lib/class-scheduler';
+import { listContinueReadingItems } from '../../lib/library-workspace';
 
 type ReminderRow = {
   id: string;
@@ -73,6 +74,43 @@ function buildRecommendations(reminders: ReminderRow[], counts: {
   return recommendations.slice(0, 4);
 }
 
+function buildWorkloadTimeline(input: {
+  reminders: ReminderRow[];
+  calendarEvents: Array<{ id: string; title: string; startsAt: string | null; endsAt: string | null; htmlLink: string | null }>;
+  continueReading: Array<{ kind: 'asset' | 'book'; id: string; title: string; progressPercent: number; lastOpenedAt: string | null; href: string; detail: string }>;
+}) {
+  const reminderItems = input.reminders.slice(0, 5).map((reminder) => ({
+    id: `reminder:${reminder.id}`,
+    kind: 'reminder' as const,
+    title: reminder.title,
+    when: reminder.reminder_at,
+    detail: `${reminder.type} · ${describeUrgency(reminder.reminder_at)}`,
+    href: '/reminders',
+  }));
+
+  const calendarItems = input.calendarEvents.slice(0, 4).map((event) => ({
+    id: `calendar:${event.id}`,
+    kind: 'calendar' as const,
+    title: event.title,
+    when: event.startsAt,
+    detail: event.startsAt && event.endsAt ? `${event.startsAt} → ${event.endsAt}` : 'Calendar event',
+    href: event.htmlLink || '/calendar',
+  }));
+
+  const readingItems = input.continueReading.slice(0, 3).map((item) => ({
+    id: `${item.kind}:${item.id}`,
+    kind: 'reading' as const,
+    title: item.title,
+    when: item.lastOpenedAt,
+    detail: `Continue reading · ${item.detail}`,
+    href: item.href,
+  }));
+
+  return [...reminderItems, ...calendarItems, ...readingItems]
+    .sort((left, right) => String(left.when ?? '').localeCompare(String(right.when ?? '')))
+    .slice(0, 8);
+}
+
 export const dashboardRouter = Router();
 
 dashboardRouter.use(requireAuth);
@@ -93,6 +131,7 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
     googleStatus,
     gradesSnapshot,
     scheduleSnapshot,
+    continueReading,
   ] = await Promise.all([
     db.query(
       `select id, title, type, status, reminder_at, metadata_json
@@ -144,6 +183,7 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
         message: 'No classes are scheduled yet.',
       },
     })),
+    listContinueReadingItems(userId, 4).catch(() => []),
   ]);
 
   const reminders = (remindersResult.rows as ReminderRow[])
@@ -170,6 +210,11 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
   const weeklyStudyPlan = buildWeeklyStudyPlan({
     reminders,
     calendarEvents,
+  });
+  const workloadTimeline = buildWorkloadTimeline({
+    reminders,
+    calendarEvents,
+    continueReading,
   });
 
   res.json({
@@ -213,6 +258,8 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
           .sort((left: any, right: any) => (left.estimatedPercent ?? 0) - (right.estimatedPercent ?? 0))[0] ?? null,
       topConcepts: gradesSnapshot.reviewPatterns.slice(0, 3),
     },
+    continueReading,
+    workloadTimeline,
     todayTasks: todayTasks.map((task) => ({
       ...task,
       urgencyLabel: describeUrgency(task.reminder_at),

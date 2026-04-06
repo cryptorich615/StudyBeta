@@ -18,7 +18,11 @@ export default function ReaderPage() {
         </div>
       </header>
 
-      <DocumentReaderWorkspace initialAssetId={searchParams.get('assetId')} mode="full" />
+      <DocumentReaderWorkspace
+        initialAssetId={searchParams.get('assetId')}
+        initialBookId={searchParams.get('book')}
+        mode="full"
+      />
     </div>
   );
 }

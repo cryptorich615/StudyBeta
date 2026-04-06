@@ -1,9 +1,11 @@
 import { mkdir, readFile, writeFile, copyFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
+  buildBootstrapMarkdown,
   buildCoreTraitsMarkdown,
   buildIdentityMarkdown,
-  getBootstrapIntro,
+  buildSoulMarkdown,
+  buildStudentPowersMarkdown,
   mergeAgentConfig,
   resolveAgentPresetFromPersonaName,
 } from './agent-config';
@@ -315,17 +317,20 @@ async function ensureWorkspaceBrowserSkill(workspacePath: string) {
 
 async function ensureWorkspaceSkill(workspacePath: string, skillName: string, sourcePath: string) {
   const skillPath = join(workspacePath, 'skills', skillName);
+  const destination = join(skillPath, 'SKILL.md');
+  const source = await readFile(sourcePath, 'utf8');
 
   try {
-    await readFile(join(skillPath, 'SKILL.md'), 'utf8');
-    return;
+    const existing = await readFile(destination, 'utf8');
+    if (existing === source) {
+      return;
+    }
   } catch {
     // write below
   }
 
-  const source = await readFile(sourcePath, 'utf8');
   await mkdir(skillPath, { recursive: true });
-  await writeFile(join(skillPath, 'SKILL.md'), source, 'utf8');
+  await writeFile(destination, source, 'utf8');
 }
 
 async function ensureWorkspaceDefaultSkills(workspacePath: string) {
@@ -420,23 +425,13 @@ async function writeWorkspaceFiles(
 
   await writeFile(
     join(workspacePath, 'BOOTSTRAP.md'),
-    [
-      '# BOOTSTRAP.md',
-      '',
-      `Your identity is already configured. Your name is ${resolvedConfig.personaName}.`,
-      'Use the following voice as your opening anchor when the student first engages:',
-      '',
-      getBootstrapIntro(agentType),
-      '',
-      'Do not ask the student to decide your name or persona again.',
-      'Use the configured identity consistently in every response.',
-      'Focus your first conversation on understanding the student profile, immediate workload, and how to help with school work.',
-      '',
-    ].join('\n'),
+    buildBootstrapMarkdown(resolvedConfig, agentType),
     'utf8'
   );
 
   await writeFile(join(workspacePath, 'CORE_TRAITS.md'), buildCoreTraitsMarkdown(), 'utf8');
+  await writeFile(join(workspacePath, 'SOUL.md'), buildSoulMarkdown(resolvedConfig), 'utf8');
+  await writeFile(join(workspacePath, 'POWERS.md'), buildStudentPowersMarkdown(resolvedConfig), 'utf8');
 }
 
 async function writeAdminWorkspaceFiles(input: {
@@ -746,6 +741,11 @@ export async function syncUserWorkspaceProfile(input: {
   subjects?: string[];
 }) {
   const workspacePath = getUserWorkspacePath(input.userId);
+  const existingIdentityRaw = await readFile(join(workspacePath, 'IDENTITY.md'), 'utf8').catch(() => '');
+  const personaMatch = existingIdentityRaw.match(/^- Name:\s+(.+)$/m);
+  const resolvedConfig = mergeAgentConfig(resolveAgentPresetFromPersonaName(personaMatch?.[1] ?? null), {
+    personaName: personaMatch?.[1] ?? undefined,
+  });
   await mkdir(workspacePath, { recursive: true });
   await ensureWorkspaceBrowserSkill(workspacePath);
   await ensureWorkspaceDefaultSkills(workspacePath);
@@ -770,22 +770,18 @@ export async function syncUserWorkspaceProfile(input: {
 
   await writeFile(
     join(workspacePath, 'SOUL.md'),
-    [
-      '# SOUL.md',
-      '',
-      'Role: personal StudyClaw agent for one student only.',
-      'Boundaries:',
-      '- Stay isolated to this student workspace.',
-      '- Do not mix another student\'s data or memory into this agent.',
-      '- Personalize advice using the user profile and course list in this workspace.',
-      '',
-      'Current student context:',
-      `- Student: ${input.studentName ?? 'unknown'}`,
-      `- School: ${input.schoolName ?? 'unknown'}`,
-      `- Grade / year: ${input.gradeYear ?? 'unknown'}`,
-      `- Courses: ${(input.subjects ?? []).length ? input.subjects!.join(', ') : 'unknown'}`,
-      '',
-    ].join('\n'),
+    buildSoulMarkdown(resolvedConfig, {
+      studentName: input.studentName,
+      schoolName: input.schoolName,
+      gradeYear: input.gradeYear,
+      subjects: input.subjects,
+    }),
+    'utf8'
+  );
+
+  await writeFile(
+    join(workspacePath, 'POWERS.md'),
+    buildStudentPowersMarkdown(resolvedConfig),
     'utf8'
   );
 }

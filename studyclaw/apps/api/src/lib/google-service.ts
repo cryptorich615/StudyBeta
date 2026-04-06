@@ -18,6 +18,8 @@ const GOOGLE_CONNECT_SCOPES = [
   'https://www.googleapis.com/auth/calendar.readonly',
   'https://www.googleapis.com/auth/calendar.events',
   'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/documents',
   'https://www.googleapis.com/auth/spreadsheets.readonly',
   'https://www.googleapis.com/auth/presentations.readonly',
@@ -26,6 +28,8 @@ const GOOGLE_CONNECT_SCOPES = [
 const CALENDAR_READ_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
 const CALENDAR_WRITE_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 const DRIVE_READ_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+const GMAIL_READ_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+const GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
 const DOCS_SCOPE = 'https://www.googleapis.com/auth/documents';
 const SHEETS_READ_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
 const SLIDES_READ_SCOPE = 'https://www.googleapis.com/auth/presentations.readonly';
@@ -63,6 +67,8 @@ export type GoogleIntegrationStatus = {
   canReadCalendar: boolean;
   canWriteCalendar: boolean;
   canReadDrive: boolean;
+  canUseGmail: boolean;
+  canSendGmail: boolean;
   canUseDocs: boolean;
   canUseSheets: boolean;
   canUseSlides: boolean;
@@ -177,6 +183,8 @@ function buildIntegrationStatus(input: {
   const canReadCalendar = hasScope(scopes, CALENDAR_READ_SCOPE) || hasScope(scopes, CALENDAR_WRITE_SCOPE);
   const canWriteCalendar = hasScope(scopes, CALENDAR_WRITE_SCOPE);
   const canReadDrive = hasScope(scopes, DRIVE_READ_SCOPE);
+  const canUseGmail = hasScope(scopes, GMAIL_READ_SCOPE);
+  const canSendGmail = hasScope(scopes, GMAIL_SEND_SCOPE);
   const canUseDocs = hasScope(scopes, DOCS_SCOPE);
   const canUseSheets = hasScope(scopes, SHEETS_READ_SCOPE);
   const canUseSlides = hasScope(scopes, SLIDES_READ_SCOPE);
@@ -192,10 +200,12 @@ function buildIntegrationStatus(input: {
     canReadCalendar,
     canWriteCalendar,
     canReadDrive,
+    canUseGmail,
+    canSendGmail,
     canUseDocs,
     canUseSheets,
     canUseSlides,
-    canUseWorkspaceSkill: canReadCalendar || canReadDrive || canUseDocs || canUseSheets || canUseSlides,
+    canUseWorkspaceSkill: canReadCalendar || canReadDrive || canUseGmail || canSendGmail || canUseDocs || canUseSheets || canUseSlides,
     hasAccessToken: input.hasAccessToken ?? false,
     hasRefreshToken: input.hasRefreshToken ?? false,
     lastSyncAt: input.lastSyncAt ?? null,
@@ -264,13 +274,21 @@ export function deriveGoogleIntegrationStatus(input: {
   const hasAccessToken = input.hasAccessToken ?? false;
   const hasRefreshToken = input.hasRefreshToken ?? false;
   const canReadCalendar = hasScope(scopes, CALENDAR_READ_SCOPE) || hasScope(scopes, CALENDAR_WRITE_SCOPE);
+  const canUseWorkspace =
+    canReadCalendar ||
+    hasScope(scopes, DRIVE_READ_SCOPE) ||
+    hasScope(scopes, GMAIL_READ_SCOPE) ||
+    hasScope(scopes, GMAIL_SEND_SCOPE) ||
+    hasScope(scopes, DOCS_SCOPE) ||
+    hasScope(scopes, SHEETS_READ_SCOPE) ||
+    hasScope(scopes, SLIDES_READ_SCOPE);
   const isExpired = tokenIsExpired(expiresAt, 0);
 
   let error: string | null = null;
   if (!hasAccessToken) {
     error = 'missing_access_token';
-  } else if (!canReadCalendar) {
-    error = 'missing_calendar_scope';
+  } else if (!canUseWorkspace) {
+    error = 'missing_workspace_scope';
   } else if (isExpired && !hasRefreshToken) {
     error = 'missing_refresh_token';
   } else if (isExpired && input.refreshSucceeded === false) {
@@ -640,6 +658,93 @@ export async function listRecentDriveFiles(
   );
 
   return payload.files ?? [];
+}
+
+export async function listRecentGmailMessages(
+  userId: string,
+  options?: {
+    maxResults?: number;
+    query?: string;
+  }
+) {
+  const maxResults = Math.min(Math.max(Number(options?.maxResults ?? 10), 1), 25);
+  const query = String(options?.query ?? 'is:unread').trim() || 'is:unread';
+
+  const list = await googleApiFetch<{
+    messages?: Array<{ id: string }>;
+  }>(
+    userId,
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=${maxResults}`
+  );
+
+  const messages = await Promise.all(
+    (list.messages ?? []).slice(0, maxResults).map(async (message) => {
+      const detail = await googleApiFetch<{
+        id: string;
+        snippet?: string;
+        payload?: {
+          headers?: Array<{ name: string; value: string }>;
+        };
+      }>(
+        userId,
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${message.id}?format=metadata&metadataHeaders=subject&metadataHeaders=from&metadataHeaders=date`
+      );
+      const headers = detail.payload?.headers ?? [];
+
+      return {
+        id: detail.id,
+        subject: headers.find((header) => header.name.toLowerCase() === 'subject')?.value ?? '',
+        from: headers.find((header) => header.name.toLowerCase() === 'from')?.value ?? '',
+        date: headers.find((header) => header.name.toLowerCase() === 'date')?.value ?? '',
+        snippet: detail.snippet ?? '',
+      };
+    })
+  );
+
+  return messages;
+}
+
+export async function sendGmailMessage(
+  userId: string,
+  input: {
+    to: string;
+    subject: string;
+    bodyText: string;
+  }
+) {
+  const integration = await getGoogleIntegration(userId);
+  if (!integration.connected || !integration.canSendGmail) {
+    throw new Error('Gmail send access is not granted yet. Reconnect Google from the Calendar page so StudyClaw can request Gmail send permission.');
+  }
+
+  const to = input.to.trim();
+  const subject = input.subject.trim();
+  const bodyText = input.bodyText;
+
+  if (!to) {
+    throw new Error('recipient email is required to send a Gmail message');
+  }
+
+  const mimeMessage = [
+    'Content-Type: text/plain; charset="UTF-8"',
+    'MIME-Version: 1.0',
+    'Content-Transfer-Encoding: 7bit',
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    '',
+    bodyText || '',
+  ].join('\r\n');
+
+  const raw = Buffer.from(mimeMessage, 'utf8').toString('base64url');
+
+  return googleApiFetch<{
+    id: string;
+    threadId?: string;
+    labelIds?: string[];
+  }>(userId, 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    body: JSON.stringify({ raw }),
+  });
 }
 
 function summarizeGoogleWorkspaceContent(content: string) {

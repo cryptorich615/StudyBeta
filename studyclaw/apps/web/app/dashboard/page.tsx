@@ -69,6 +69,23 @@ type DashboardData = {
     courseNeedingAttention?: { courseName: string; estimatedPercent: number | null; letterGrade: string | null } | null;
     topConcepts: Array<{ concept: string; misses: number }>;
   };
+  continueReading: Array<{
+    kind: 'asset' | 'book';
+    id: string;
+    title: string;
+    progressPercent: number;
+    lastOpenedAt: string | null;
+    href: string;
+    detail: string;
+  }>;
+  workloadTimeline: Array<{
+    id: string;
+    kind: 'reminder' | 'calendar' | 'reading';
+    title: string;
+    when: string | null;
+    detail: string;
+    href: string;
+  }>;
   todayTasks: DashboardTask[];
   dueSoon: DashboardTask[];
   nextExam: DashboardTask | null;
@@ -578,6 +595,70 @@ function CalendarPanel({ data, handleGoogleConnect }: Pick<DashboardRenderProps,
   );
 }
 
+function ContinueReadingPanel({ data }: Pick<DashboardRenderProps, 'data'>) {
+  return (
+    <section className="student-dashboard-panel">
+      <div className="section-head">
+        <div>
+          <p className="eyebrow">Reader</p>
+          <h2 className="section-title">Continue where you left off</h2>
+        </div>
+      </div>
+      {(data?.continueReading ?? []).length ? (
+        <div className="stack-list">
+          {data?.continueReading.map((item) => (
+            <article key={`${item.kind}-${item.id}`} className="stack-item">
+              <div>
+                <strong>{item.title}</strong>
+                <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                  {item.detail}{item.lastOpenedAt ? ` · ${formatDate(item.lastOpenedAt)}` : ''}
+                </p>
+              </div>
+              <Link href={item.href} className="ghost-button">
+                Open
+              </Link>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="muted-copy">Open a document or saved book in the StudyClaw reader and it will show up here for quick return access.</p>
+      )}
+    </section>
+  );
+}
+
+function WorkloadTimelinePanel({ data }: Pick<DashboardRenderProps, 'data'>) {
+  return (
+    <section className="student-dashboard-panel">
+      <div className="section-head">
+        <div>
+          <p className="eyebrow">Timeline</p>
+          <h2 className="section-title">What is approaching next</h2>
+        </div>
+      </div>
+      <div className="timeline">
+        {(data?.workloadTimeline ?? []).length ? (
+          data?.workloadTimeline.map((item) => (
+            <div key={item.id} className="timeline-item">
+              <strong>{item.title}</strong>
+              <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                {item.detail}{item.when ? ` · ${formatDate(item.when)}` : ''}
+              </p>
+              <div style={{ marginTop: '10px' }}>
+                <Link href={item.href} className="ghost-button">
+                  Open
+                </Link>
+              </div>
+            </div>
+          ))
+        ) : (
+          <p className="muted-copy">As your reminders, calendar, and reading activity build up, StudyClaw will surface the most relevant upcoming work here.</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function ActivityPanel({ data }: Pick<DashboardRenderProps, 'data'>) {
   return (
     <section className="student-dashboard-panel">
@@ -666,12 +747,14 @@ function DefaultDashboardLayout(props: DashboardRenderProps) {
         <aside className="student-dashboard-side">
           <DueSoonPanel data={data} />
           <UpcomingExamsPanel upcomingExams={upcomingExams} />
+          <ContinueReadingPanel data={data} />
           <CalendarPanel data={data} handleGoogleConnect={handleGoogleConnect} />
         </aside>
       </section>
 
       <section className="student-dashboard-bottom">
         <ActivityPanel data={data} />
+        <WorkloadTimelinePanel data={data} />
         <HeartbeatPanel data={data} />
       </section>
     </section>
@@ -784,10 +867,12 @@ function AlternateDashboardLayout(props: DashboardRenderProps) {
             <TodayTasksPanel {...props} />
             <WeeklyPlanPanel data={data} />
             <ActivityPanel data={data} />
+            <WorkloadTimelinePanel data={data} />
           </div>
 
           <div className="dashboard-alt-grid__side">
             <ShortcutsPanel data={data} />
+            <ContinueReadingPanel data={data} />
             <PriorityMessagesPanel data={data} />
             <DueSoonPanel data={data} />
             <UpcomingExamsPanel upcomingExams={upcomingExams} />

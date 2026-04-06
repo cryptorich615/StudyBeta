@@ -434,6 +434,7 @@ export default function StudyPage() {
 
             <DocumentReaderWorkspace
               initialAssetId={searchParams.get('doc')}
+              initialBookId={searchParams.get('book')}
               onUseForFlashcards={({ title: nextTitle, text }) => {
                 setTitle(nextTitle);
                 setNotes(text);

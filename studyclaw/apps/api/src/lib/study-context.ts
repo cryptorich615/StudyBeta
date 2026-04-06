@@ -1,5 +1,5 @@
 import { db } from './db';
-import { buildStudentContext, renderStudentMemoryContext } from './student-memory';
+import { buildStudentContext, renderStudentMemoryContext, type StudentContextScope } from './student-memory';
 import { buildGradeTrackerContext } from './grade-tracker';
 import { buildScheduleContext } from './class-scheduler';
 import { getGoogleIntegration, listRecentDriveFiles } from './google-service';
@@ -20,9 +20,12 @@ export async function loadAgentProfile(userId: string): Promise<AgentProfile | n
   return result.rows[0] ?? null;
 }
 
-export async function buildStudyContext(userId: string, options?: { query?: string | null }) {
+export async function buildStudyContext(
+  userId: string,
+  options?: { query?: string | null; scope?: StudentContextScope }
+) {
   const shouldLoadGoogleWorkspace =
-    typeof options?.query === 'string' && /\b(google|drive|docs?|sheets?|slides?)\b/i.test(options.query);
+    typeof options?.query === 'string' && /\b(google|drive|docs?|sheets?|slides?|gmail|mail|email|inbox)\b/i.test(options.query);
 
   const [studentContext, gradeContext, scheduleContext, googleWorkspace] = await Promise.all([
     buildStudentContext(userId, options),
@@ -37,12 +40,13 @@ export async function buildStudyContext(userId: string, options?: { query?: stri
       context: null,
       referencedEntry: null,
     })),
-    shouldLoadGoogleWorkspace
-      ? Promise.all([
-          getGoogleIntegration(userId).catch(() => null),
-          listRecentDriveFiles(userId, 5).catch(() => []),
-        ]).then(([status, files]) => ({ status, files }))
-      : Promise.resolve({ status: null, files: [] as Array<{ name?: string | null; mimeType?: string | null; modifiedTime?: string | null }> }),
+    Promise.all([
+      getGoogleIntegration(userId).catch(() => null),
+      shouldLoadGoogleWorkspace ? listRecentDriveFiles(userId, 5).catch(() => []) : Promise.resolve([]),
+    ]).then(([status, files]) => ({
+      status,
+      files: files as Array<{ name?: string | null; mimeType?: string | null; modifiedTime?: string | null }>,
+    })),
   ]);
 
   return {
@@ -101,11 +105,11 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
     ? context.googleWorkspace.status.connected
       ? `Google workspace: connected for ${context.googleWorkspace.status.googleEmail ?? 'this account'}${
           context.googleWorkspace.status.canUseWorkspaceSkill
-            ? ` (Calendar${context.googleWorkspace.status.canReadDrive ? ', Drive' : ''}${context.googleWorkspace.status.canUseDocs ? ', Docs' : ''}${context.googleWorkspace.status.canUseSheets ? ', Sheets' : ''}${context.googleWorkspace.status.canUseSlides ? ', Slides' : ''})`
+            ? ` (Calendar${context.googleWorkspace.status.canReadDrive ? ', Drive' : ''}${context.googleWorkspace.status.canUseGmail ? ', Gmail read' : ''}${context.googleWorkspace.status.canSendGmail ? ', Gmail send' : ''}${context.googleWorkspace.status.canUseDocs ? ', Docs' : ''}${context.googleWorkspace.status.canUseSheets ? ', Sheets' : ''}${context.googleWorkspace.status.canUseSlides ? ', Slides' : ''})`
             : ''
         }`
       : context.googleWorkspace.status.needsReconnect
-        ? 'Google workspace: reconnect required before StudyClaw can use Calendar, Drive, Docs, Sheets, or Slides.'
+        ? 'Google workspace: reconnect required before StudyClaw can use Calendar, Gmail, Drive, Docs, Sheets, or Slides.'
         : 'Google workspace: not connected.'
     : 'Google workspace: not requested in this chat context.';
   const googleWorkspaceFilesLine =
@@ -138,11 +142,28 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
     `- Your configured assistant name is ${personaName}.`,
     `- If asked your name or how to address you, answer with ${personaName}.`,
     personaName === 'StudyClaw' ? '- You may refer to yourself as StudyClaw.' : '- Do not say your name is StudyClaw.',
+    personaName === 'Dixie'
+      ? '- You are the sprint coach. Lead with activation, focus defense, rapid reps, and protective momentum. Use pitbull-flavored metaphors lightly, not constantly.'
+      : personaName === 'Willow'
+        ? '- You are the deep-focus coach. Lead with calm understanding, gentle pacing, precise correction, and reflective confidence. Use cat-flavored metaphors lightly, not constantly.'
+        : '- Stay practical and student-focused without adding persona theater.',
+    personaName === 'Dixie'
+      ? '- When the student is drifting, make the next step immediate and concrete. When the student is overloaded, downshift instead of pushing harder.'
+      : personaName === 'Willow'
+        ? '- When the student is anxious or tangled up, slow the pace and knead the concept until it softens. When urgency rises, compress gently without losing clarity.'
+        : '- Match the student’s energy and workload without becoming generic.',
     '- Base your response on the student context when it is relevant.',
     '- If app data is missing, say so plainly instead of pretending the data exists.',
+    '- You are operating inside StudyClaw, not a raw standalone OpenClaw shell. StudyClaw may execute connected integrations and deterministic app actions even when they are not exposed as raw tool names in your visible toolkit list.',
+    '- Do not decide that a capability is unavailable just because you do not see a matching raw skill name like gmail, google-workspace, gh, or exec in a tool list.',
+    '- If Google workspace is marked connected in this context, do not claim you lack Google integration or say you need a browser workaround first.',
+    '- If Google workspace is marked connected in this context, treat that as authoritative proof that StudyClaw can use the connected Google account for the permissions listed there.',
+    '- If Gmail send is available in the injected Google workspace status and the student asks to send an email, use StudyClaw’s Gmail path rather than talking about generic message channels.',
     '- If the student asks for Google Calendar scheduling or live calendar data and Google is not connected, tell them to connect Google Calendar from the Calendar page before promising calendar actions.',
     '- Do not ask the student to run or authenticate a separate Google CLI tool. Use StudyClaw’s connected Google integration instead.',
-    '- If the student asks for Google Drive, Docs, Sheets, or Slides help and the Google workspace connection is missing or incomplete, tell them to reconnect Google from the Calendar page so StudyClaw can request the needed workspace permissions.',
+    '- If the student asks for Gmail, Google Drive, Docs, Sheets, or Slides help and the Google workspace connection is missing or incomplete, tell them to reconnect Google from the Calendar page so StudyClaw can request the needed workspace permissions.',
+    '- If the student asks whether you currently have Google access, answer from the injected Google workspace status directly instead of speculating about your raw toolkit.',
+    '- For short follow-ups like "check now", "try again", or "did the admin fix it", reuse the existing Google workspace status in context instead of inventing a new limitation.',
     '- Prefer concrete, prioritized study actions over generic encouragement.',
     '- When the student asks for current facts, source verification, live web research, or screenshots of what you found, use the browser capability instead of relying only on memory.',
     '- When the student asks for textbooks, books by subject, editions, reading lists, book-based research, or an easier alternative to a dense book, use the Open Library tools first before broader web research.',
@@ -155,6 +176,8 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
     '- When the student asks about missed questions or what they keep getting wrong, use the stored wrong-answer review patterns and explain the misconception in a supportive way.',
     '- When the student asks about what class they have now, next, later today, by period, by time, by teacher, by room, or by notes, use the saved schedule context if it exists.',
     '- Use the current or upcoming class context when it is genuinely helpful for school-related requests, but do not overstate certainty when the schedule is incomplete.',
+    '- If StudyClaw already injected a direct answer source such as saved schedule data, grade summaries, calendar items, reminders, or Google workspace status, answer from that first instead of wandering into generic tool use.',
+    '- For quick greetings, short tutoring prompts, or lightweight follow-ups, stay lean and do not re-summarize the entire student workspace unless it directly helps the answer.',
     '- For browser-based research, prefer reliable educational or primary sources, summarize what you verified, and include direct source links in plain language whenever they are available.',
     '- Do not browse or continue if the destination is sexual, explicit, or otherwise inappropriate for students; explain briefly that the site is blocked.',
   ].join('\n');
@@ -162,9 +185,12 @@ export function buildStudyInstructions(systemPrompt: string, context: Awaited<Re
 
 export function buildChatTranscript(
   history: Array<{ role: string; content: string }>,
-  latestMessage: string
+  latestMessage: string,
+  options?: { limit?: number }
 ) {
-  const transcript = history
+  const relevantHistory =
+    typeof options?.limit === 'number' && options.limit > 0 ? history.slice(-options.limit) : history;
+  const transcript = relevantHistory
     .filter((message) => message.role === 'user' || message.role === 'assistant')
     .map((message) => `${message.role === 'assistant' ? 'Assistant' : 'User'}: ${message.content}`)
     .join('\n\n');

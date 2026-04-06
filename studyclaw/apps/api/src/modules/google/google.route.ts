@@ -6,8 +6,10 @@ import {
   disconnectGoogleIntegration,
   getGoogleConnectionStatus,
   getGoogleWorkspacePreview,
+  listRecentGmailMessages,
   listUpcomingCalendarEvents,
   listRecentDriveFiles,
+  sendGmailMessage,
   syncGoogleSkillForUser,
 } from '../../lib/google-service';
 
@@ -114,6 +116,8 @@ googleRouter.get('/', async (req: AuthedRequest, res) => {
       canReadCalendar: status.canReadCalendar,
       canWriteCalendar: status.canWriteCalendar,
       canReadDrive: status.canReadDrive,
+      canUseGmail: status.canUseGmail,
+      canSendGmail: status.canSendGmail,
       canUseDocs: status.canUseDocs,
       canUseSheets: status.canUseSheets,
       canUseSlides: status.canUseSlides,
@@ -131,6 +135,8 @@ googleRouter.get('/', async (req: AuthedRequest, res) => {
       canReadCalendar: status.canReadCalendar,
       canWriteCalendar: status.canWriteCalendar,
       canReadDrive: status.canReadDrive,
+      canUseGmail: status.canUseGmail,
+      canSendGmail: status.canSendGmail,
       canUseDocs: status.canUseDocs,
       canUseSheets: status.canUseSheets,
       canUseSlides: status.canUseSlides,
@@ -171,7 +177,7 @@ googleRouter.post('/disconnect', async (req: AuthedRequest, res) => {
 googleRouter.get('/calendar', async (req: AuthedRequest, res) => {
   try {
     const status = await getGoogleConnectionStatus(req.user!.id);
-    if (!status.connected) {
+    if (!status.connected || !status.canReadCalendar) {
       console.warn('[google] calendar fetch blocked by connection state', {
         userId: req.user!.id,
         status: status.status,
@@ -180,8 +186,10 @@ googleRouter.get('/calendar', async (req: AuthedRequest, res) => {
       return res.status(400).json({
         connected: false,
         status: status.status,
-        error: status.needsReconnect ? 'reconnect_required' : 'not_connected',
-        message: status.needsReconnect
+        error: status.connected ? 'missing_calendar_scope' : status.needsReconnect ? 'reconnect_required' : 'not_connected',
+        message: status.connected
+          ? 'Google is connected, but Calendar access is missing. Reconnect Google to grant Calendar permission.'
+          : status.needsReconnect
           ? 'Google Calendar needs to be reconnected before events can load.'
           : 'Google account not connected.',
       });
@@ -259,50 +267,63 @@ googleRouter.get('/gmail', async (req: AuthedRequest, res) => {
     if (!status.connected) {
       return res.status(400).json({ error: 'not_connected', message: 'Google account not connected' });
     }
+    if (!status.canUseGmail) {
+      return res.status(400).json({
+        error: 'missing_gmail_scope',
+        message: 'Google is connected, but Gmail access has not been granted. Reconnect Google to add Gmail access.',
+      });
+    }
     
     const max = Math.min(Math.max(parseInt(req.query.max as string) || 10, 1), 50);
     const q = (req.query.q as string) || 'is:unread';
-    
-    // Fetch message list
-    const listRes = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=${max}`,
-      { headers: { Authorization: `Bearer ${await getAccessToken(req.user!.id)}` } }
-    );
-    
-    if (!listRes.ok) {
-      if (listRes.status === 401) {
-        return res.status(400).json({ connected: false, error: 'Token expired or not authorized' });
-      }
-      throw new Error(`Gmail API error: ${listRes.status}`);
-    }
-    
-    const listData = await listRes.json() as { messages?: Array<{ id: string }> };
-    const messages = listData.messages ?? [];
-    
-    // Fetch metadata for each message
-    const results = await Promise.all(
-      messages.slice(0, max).map(async (msg) => {
-        const detailRes = await fetch(
-          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=subject,from,date`,
-          { headers: { Authorization: `Bearer ${await getAccessToken(req.user!.id)}` } }
-        );
-        if (!detailRes.ok) return null;
-        const detail = await detailRes.json() as { payload?: { headers?: Array<{ name: string; value: string }> }; snippet?: string; id: string };
-        const headers = detail.payload?.headers ?? [];
-        return {
-          id: detail.id,
-          subject: headers.find(h => h.name === 'Subject')?.value ?? '',
-          from: headers.find(h => h.name === 'From')?.value ?? '',
-          date: headers.find(h => h.name === 'Date')?.value ?? '',
-          snippet: detail.snippet ?? '',
-        };
-      })
-    );
-    
-    res.json(results.filter(Boolean));
+    const results = await listRecentGmailMessages(req.user!.id, { maxResults: max, query: q });
+    res.json(results);
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Failed to fetch Gmail messages';
     res.status(500).json({ error: 'fetch_error', message: msg });
+  }
+});
+
+googleRouter.post('/gmail/send', async (req: AuthedRequest, res) => {
+  try {
+    const status = await getGoogleConnectionStatus(req.user!.id);
+    if (!status.connected) {
+      return res.status(400).json({ error: 'not_connected', message: 'Google account not connected' });
+    }
+    if (!status.canSendGmail) {
+      return res.status(400).json({
+        error: 'missing_gmail_send_scope',
+        message: 'Google is connected, but Gmail send access has not been granted. Reconnect Google to add Gmail send access.',
+      });
+    }
+
+    const { to, subject, bodyText } = req.body as {
+      to?: string;
+      subject?: string;
+      bodyText?: string;
+    };
+
+    if (!to?.trim()) {
+      return res.status(400).json({
+        error: 'bad_request',
+        message: 'recipient email is required',
+      });
+    }
+
+    const result = await sendGmailMessage(req.user!.id, {
+      to: to.trim(),
+      subject: subject?.trim() || '',
+      bodyText: bodyText?.trim() || '',
+    });
+
+    res.status(201).json({
+      id: result.id,
+      threadId: result.threadId ?? null,
+      labelIds: result.labelIds ?? [],
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Failed to send Gmail message';
+    res.status(500).json({ error: 'gmail_send_failed', message: msg });
   }
 });
 
@@ -341,13 +362,3 @@ googleRouter.get('/drive/:fileId/reader', async (req: AuthedRequest, res) => {
     res.status(500).json({ error: 'fetch_error', message: msg });
   }
 });
-
-// Helper to get access token (re-exported for internal use)
-async function getAccessToken(userId: string) {
-  const { getAccessToken: getToken } = await import('../../lib/google-service.js');
-  const token = await getToken(userId);
-  if (!token) {
-    throw new Error('Google account not connected');
-  }
-  return token;
-}

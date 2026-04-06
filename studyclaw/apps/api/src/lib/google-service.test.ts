@@ -35,13 +35,47 @@ test('deriveGoogleIntegrationStatus exposes workspace capability flags for Drive
   });
 
   assert.equal(status.canReadDrive, true);
+  assert.equal(status.canUseGmail, false);
+  assert.equal(status.canSendGmail, false);
   assert.equal(status.canUseDocs, true);
   assert.equal(status.canUseSheets, true);
   assert.equal(status.canUseSlides, true);
   assert.equal(status.canUseWorkspaceSkill, true);
 });
 
-test('deriveGoogleIntegrationStatus requires reconnect when calendar scopes are missing', () => {
+test('deriveGoogleIntegrationStatus treats Gmail-only workspace access as connected', () => {
+  const status = deriveGoogleIntegrationStatus({
+    hasStoredToken: true,
+    hasAccessToken: true,
+    hasRefreshToken: true,
+    scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  });
+
+  assert.equal(status.connected, true);
+  assert.equal(status.status, 'connected');
+  assert.equal(status.canUseGmail, true);
+  assert.equal(status.canSendGmail, false);
+  assert.equal(status.canUseWorkspaceSkill, true);
+  assert.equal(status.error, null);
+});
+
+test('deriveGoogleIntegrationStatus exposes Gmail send capability when granted', () => {
+  const status = deriveGoogleIntegrationStatus({
+    hasStoredToken: true,
+    hasAccessToken: true,
+    hasRefreshToken: true,
+    scopes: ['https://www.googleapis.com/auth/gmail.send'],
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  });
+
+  assert.equal(status.connected, true);
+  assert.equal(status.canUseGmail, false);
+  assert.equal(status.canSendGmail, true);
+  assert.equal(status.canUseWorkspaceSkill, true);
+});
+
+test('deriveGoogleIntegrationStatus requires reconnect when workspace scopes are missing', () => {
   const status = deriveGoogleIntegrationStatus({
     hasStoredToken: true,
     hasAccessToken: true,
@@ -52,7 +86,7 @@ test('deriveGoogleIntegrationStatus requires reconnect when calendar scopes are 
 
   assert.equal(status.connected, false);
   assert.equal(status.status, 'reconnect_required');
-  assert.equal(status.error, 'missing_calendar_scope');
+  assert.equal(status.error, 'missing_workspace_scope');
 });
 
 test('deriveGoogleIntegrationStatus requires reconnect when an expired token has no refresh token', () => {
@@ -76,6 +110,8 @@ test('getGoogleScopesForPurpose includes calendar scopes for connect and sign-in
   assert.equal(connectScopes.includes('https://www.googleapis.com/auth/calendar.readonly'), true);
   assert.equal(connectScopes.includes('https://www.googleapis.com/auth/calendar.events'), true);
   assert.equal(connectScopes.includes('https://www.googleapis.com/auth/drive.readonly'), true);
+  assert.equal(connectScopes.includes('https://www.googleapis.com/auth/gmail.readonly'), true);
+  assert.equal(connectScopes.includes('https://www.googleapis.com/auth/gmail.send'), true);
   assert.equal(connectScopes.includes('https://www.googleapis.com/auth/documents'), true);
   assert.equal(connectScopes.includes('https://www.googleapis.com/auth/spreadsheets.readonly'), true);
   assert.equal(connectScopes.includes('https://www.googleapis.com/auth/presentations.readonly'), true);

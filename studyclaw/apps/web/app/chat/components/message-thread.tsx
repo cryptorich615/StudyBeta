@@ -38,6 +38,8 @@ type MessageThreadProps = {
   messages: ChatEntry[];
   isTyping: boolean;
   agentName: string;
+  liveAssistant: ChatEntry | null;
+  liveProgress: string[];
   messagesEndRef: RefObject<HTMLDivElement | null>;
   onPromptSelect: (prompt: string) => void;
   onBubbleAction: (instruction: string) => void;
@@ -51,6 +53,8 @@ export default function MessageThread({
   messages,
   isTyping,
   agentName,
+  liveAssistant,
+  liveProgress,
   messagesEndRef,
   onPromptSelect,
   onBubbleAction,
@@ -59,6 +63,9 @@ export default function MessageThread({
   onResearchAction,
   activeResearchActionKey,
 }: MessageThreadProps) {
+  const currentLiveStatus = liveProgress.length ? liveProgress[liveProgress.length - 1] : null;
+  const previousLiveStatuses = currentLiveStatus ? liveProgress.slice(0, -1) : [];
+
   return (
     <div className="study-chat-thread">
       {messages.length ? (
@@ -78,7 +85,7 @@ export default function MessageThread({
         <ChatEmptyState agentName={agentName} onPromptSelect={onPromptSelect} />
       )}
 
-      {isTyping ? (
+      {isTyping && !liveAssistant && !liveProgress.length ? (
         <div className="study-chat-typing">
           <span className="study-chat-typing__dots">
             <span />
@@ -87,6 +94,45 @@ export default function MessageThread({
           </span>
           <span className="study-chat-typing__label">{agentName} is typing…</span>
         </div>
+      ) : null}
+
+      {liveAssistant || liveProgress.length ? (
+        <article className="study-chat-bubble is-assistant is-streaming">
+          <div className="study-chat-bubble__meta">
+            <span>{agentName}</span>
+            <span className="study-chat-bubble__timestamp">live</span>
+          </div>
+          {currentLiveStatus ? (
+            <div className="study-chat-live-activity" aria-live="polite">
+              <div className="study-chat-live-activity__header">
+                <span className="study-chat-typing__dots" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+                <div>
+                  <p className="study-chat-live-activity__eyebrow">Working live</p>
+                  <strong className="study-chat-live-activity__current">{currentLiveStatus}</strong>
+                </div>
+              </div>
+              {previousLiveStatuses.length ? (
+                <div className="study-chat-live-progress">
+                  {previousLiveStatuses.map((item) => (
+                    <div key={item} className="study-chat-live-progress__item">
+                      {item}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {liveAssistant?.content ? (
+            <div className="study-chat-bubble__content">
+              {liveAssistant.content}
+              <span className="study-chat-live-cursor" aria-hidden="true" />
+            </div>
+          ) : null}
+        </article>
       ) : null}
 
       <div ref={messagesEndRef} />
