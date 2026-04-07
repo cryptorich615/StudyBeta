@@ -1,9 +1,10 @@
 {
   "framework": "nextjs",
-  "buildCommand": "cd apps/web && npm install && npm run build",
-  "outputDirectory": "apps/web/.next",
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
   "installCommand": "npm install",
-  "devCommand": "cd apps/web && npm run dev",
+  "devCommand": "npm run dev",
+  "rootDirectory": "apps/web",
   "rewrites": [
     {
       "source": "/api/:path*",
