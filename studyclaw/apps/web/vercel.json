@@ -4,7 +4,6 @@
   "outputDirectory": ".next",
   "installCommand": "npm install",
   "devCommand": "npm run dev",
-  "rootDirectory": "apps/web",
   "rewrites": [
     {
       "source": "/api/:path*",
