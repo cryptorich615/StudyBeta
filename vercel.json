@@ -1,8 +1,7 @@
 {
   "framework": "nextjs",
-  "buildCommand": "cd studyclaw && npm install && cd apps/web && npm install && npm run build",
+  "buildCommand": "npm install --prefix studyclaw && npm run build --prefix studyclaw/apps/web",
   "outputDirectory": "studyclaw/apps/web/.next",
-  "installCommand": "npm install --prefix studyclaw",
   "devCommand": "npm run dev --prefix studyclaw/apps/web",
   "rewrites": [
     {
