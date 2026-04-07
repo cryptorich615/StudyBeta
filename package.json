@@ -1,0 +1,9 @@
+{
+  "name": "studybeta-vercel-test",
+  "private": true,
+  "workspaces": ["studyclaw"],
+  "scripts": {
+    "build": "npm run build --prefix studyclaw/apps/web",
+    "dev": "npm run dev --prefix studyclaw/apps/web"
+  }
+}
