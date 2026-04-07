@@ -7,7 +7,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://ec2-3-148-233-46.us-east-2.compute.amazonaws.com/api/:path*"
+      "destination": "http://ec2-3-148-233-46.us-east-2.compute.amazonaws.com:4000/api/:path*"
     }
   ],
   "headers": [
