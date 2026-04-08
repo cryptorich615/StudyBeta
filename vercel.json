@@ -3,12 +3,6 @@
   "buildCommand": "npm install --prefix studyclaw && npm run build --prefix studyclaw/apps/web",
   "outputDirectory": "studyclaw/apps/web/.next",
   "devCommand": "npm run dev --prefix studyclaw/apps/web",
-  "rewrites": [
-    {
-      "source": "/api/:path*",
-      "destination": "http://ec2-3-148-233-46.us-east-2.compute.amazonaws.com:4000/api/:path*"
-    }
-  ],
   "headers": [
     {
       "source": "/api/:path*",
