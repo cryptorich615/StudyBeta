@@ -169,7 +169,7 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
     [req.user!.id]
   );
   if (!credentialCheck.rows[0]?.api_key) {
-    return res.status(403).json({ error: 'onboarding_required', message: 'Complete onboarding first: choose Dixie or Willow and enter your API key.' });
+    return res.status(403).json({ error: 'onboarding_required', message: 'Complete onboarding first: choose your tier, companion, and model.' });
   }
 
   const agent = await loadAgentProfile(req.user!.id);
@@ -180,20 +180,48 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
     return res.status(400).json({ error: 'missing_agent', message: 'Complete onboarding first' });
   }
 
-  const quotaResult = await db.query(
-    `select count(*)::int as count
-     from agent_actions aa
-     where aa.agent_id = $1
-       and aa.created_at >= date_trunc('day', now())`,
-    [studentAgent.id]
+  // Rolling 5-hour credit window check
+  const profileResult = await db.query(
+    `select tier, messages_sent, window_start from student_profiles where user_id = $1`,
+    [req.user!.id]
   );
-  const usedToday = quotaResult.rows[0]?.count ?? 0;
-  const dailyQuota = Number(process.env.STUDYCLAW_STUDENT_DAILY_AGENT_ACTIONS ?? 150);
-  if (usedToday >= dailyQuota) {
+  const profile = profileResult.rows[0];
+  const tierLimits: Record<number, number> = {
+    1: Number(process.env.STUDYCLAW_TIER1_LIMIT ?? 1000),
+    2: Number(process.env.STUDYCLAW_TIER2_LIMIT ?? 3000),
+    3: Number(process.env.STUDYCLAW_TIER3_LIMIT ?? 5000),
+  };
+  const limit = tierLimits[profile?.tier ?? 1] ?? 1000;
+  const resetHours = Number(process.env.STUDYCLAW_RESET_INTERVAL_HOURS ?? 5);
+  const windowStart = profile?.window_start ? new Date(profile.window_start) : null;
+  const now = new Date();
+  const windowExpired = !windowStart || (now.getTime() - windowStart.getTime()) > resetHours * 60 * 60 * 1000;
+  const messagesSent = windowExpired ? 0 : (profile?.messages_sent ?? 0);
+
+  if (messagesSent >= limit) {
+    const resetAt = windowStart
+      ? new Date(windowStart.getTime() + resetHours * 60 * 60 * 1000)
+      : null;
+    const minutesLeft = resetAt ? Math.max(0, Math.ceil((resetAt.getTime() - now.getTime()) / 60000)) : resetHours * 60;
     return res.status(429).json({
       error: 'quota_reached',
-      message: `Daily agent quota reached (${usedToday}/${dailyQuota}).`,
+      message: `Out of credits — your window resets in ${minutesLeft} minutes. Consider upgrading your tier for more credits.`,
+      minutesLeft,
+      resetAt: resetAt?.toISOString() ?? null,
     });
+  }
+
+  // Increment message counter (reset window if expired)
+  if (windowExpired) {
+    await db.query(
+      `update student_profiles set messages_sent = 1, window_start = now() where user_id = $1`,
+      [req.user!.id]
+    );
+  } else {
+    await db.query(
+      `update student_profiles set messages_sent = messages_sent + 1 where user_id = $1`,
+      [req.user!.id]
+    );
   }
 
   let activeThreadId = threadId;

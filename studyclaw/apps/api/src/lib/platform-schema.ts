@@ -18,6 +18,12 @@ const statements = [
       add column if not exists major text
   `,
   `
+    alter table student_profiles
+      add column if not exists tier int default 1,
+      add column if not exists messages_sent int default 0,
+      add column if not exists window_start timestamptz default now()
+  `,
+  `
     create table if not exists agents (
       id uuid primary key default gen_random_uuid(),
       user_id uuid not null unique references users(id) on delete cascade,

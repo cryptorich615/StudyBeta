@@ -373,6 +373,10 @@ export default function ChatPage() {
       if (!res.ok) {
         // Remove optimistic message on error
         setMessages((prev: any[]) => prev.filter((m: any) => m.id !== userMsg.id));
+        if (data.error === 'quota_reached') {
+          const minutesLeft = data.minutesLeft ?? 'a few';
+          throw new Error(`⚠️ Out of credits — window resets in ~${minutesLeft} min. Need more? Upgrade your tier.`);
+        }
         throw new Error(data.message || 'Failed to send message');
       }
 

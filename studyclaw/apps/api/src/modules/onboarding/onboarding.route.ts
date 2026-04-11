@@ -120,6 +120,30 @@ const LOCKED_PERSONALITIES: Record<string, {
   },
 };
 
+// POST /api/onboarding/testing-tier — save tier selection
+onboardingRouter.post('/testing-tier', requireAuth, async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+  const { tier } = req.body as { tier?: number };
+  if (!tier || tier < 1 || tier > 3) {
+    return res.status(400).json({ error: 'bad_request', message: 'tier must be 1, 2, or 3' });
+  }
+  await db.query(
+    `insert into student_profiles (user_id, tier, messages_sent, window_start)
+     values ($1, $2, 0, now())
+     on conflict (user_id) do update set
+       tier = excluded.tier,
+       messages_sent = 0,
+       window_start = now()`,
+    [req.user!.id, tier]
+  );
+  const tierLimits: Record<number, number> = {
+    1: Number(process.env.STUDYCLAW_TIER1_LIMIT ?? 1000),
+    2: Number(process.env.STUDYCLAW_TIER2_LIMIT ?? 3000),
+    3: Number(process.env.STUDYCLAW_TIER3_LIMIT ?? 5000),
+  };
+  res.json({ ok: true, tier, limit: tierLimits[tier] ?? 1000 });
+});
+
 onboardingRouter.get('/options', requireAuth, async (_req, res) => {
   await ensurePlatformSchema();
   await ensureUserModelConfigsTable();
@@ -206,11 +230,11 @@ onboardingRouter.post('/model-config', requireAuth, async (req: AuthedRequest, r
     tone: agent.tone,
   });
   const existingCredential = await db.query(`select api_key from user_model_credentials where user_id = $1`, [req.user!.id]);
-  const nextApiKey =
-    apiKey?.trim() ||
-    existingCredential.rows[0]?.api_key ||
-    LOCAL_PROVIDER_PLACEHOLDER_KEYS[model.provider] ||
-    null;
+  // MiniMax uses the master key from OpenClaw config — no per-user key needed
+  const isMinimax = model.provider === 'minimax';
+  const nextApiKey = isMinimax
+    ? 'virt-minimax'
+    : (apiKey?.trim() || existingCredential.rows[0]?.api_key || LOCAL_PROVIDER_PLACEHOLDER_KEYS[model.provider] || null);
 
   if (!nextApiKey) {
     return res.status(400).json({ error: 'bad_request', message: 'apiKey is required for the first model setup' });
