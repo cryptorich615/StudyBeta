@@ -60,7 +60,7 @@ authRouter.get('/google/callback', async (req, res) => {
     }
 
     if (!isAdmin) {
-      await ensurePersonalAgent({ userId: user.id, email: user.email });
+      ensurePersonalAgent({ userId: user.id, email: user.email }).catch(e => console.error("Background agent setup error:", e));
       await db.query(
         `insert into agents (user_id, openclaw_agent_id, name, agent_type, config)
          values ($1, $2, $3, $4, $5)
@@ -137,7 +137,7 @@ authRouter.post('/signup', async (req, res) => {
       await db.query(`update users set password_hash = $2 where id = $1`, [user.id, hashPassword(password)]);
     }
 
-    await ensurePersonalAgent({ userId: user.id, email: user.email });
+    ensurePersonalAgent({ userId: user.id, email: user.email }).catch(e => console.error("Background agent setup error:", e));
     await db.query(
       `insert into agents (user_id, openclaw_agent_id, name, agent_type, config)
        values ($1, $2, $3, $4, $5)
@@ -160,7 +160,7 @@ authRouter.post('/signup', async (req, res) => {
   );
 
   const user = created.rows[0];
-  await ensurePersonalAgent({ userId: user.id, email: user.email });
+  ensurePersonalAgent({ userId: user.id, email: user.email }).catch(e => console.error("Background agent setup error:", e));
   await db.query(
     `insert into agents (user_id, openclaw_agent_id, name, agent_type, config)
      values ($1, $2, $3, $4, $5)`,
@@ -191,7 +191,7 @@ authRouter.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'invalid_credentials', message: 'Invalid email or password' });
   }
 
-  await ensurePersonalAgent({ userId: user.id, email: user.email });
+  ensurePersonalAgent({ userId: user.id, email: user.email }).catch(e => console.error("Background agent setup error:", e));
   await db.query(
     `insert into agents (user_id, openclaw_agent_id, name, agent_type, config)
      values ($1, $2, $3, $4, $5)

@@ -7,11 +7,14 @@ function normalizeApiPath(path: string) {
 }
 
 export function getApiBaseUrl() {
+  const envUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '');
+  if (envUrl) return envUrl;
+  
   if (typeof window !== 'undefined') {
     return window.location.origin;
   }
-
-  return process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '') || FALLBACK_API_BASE;
+  
+  return FALLBACK_API_BASE;
 }
 
 export function resolveApiUrl(path: string) {

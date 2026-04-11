@@ -57,11 +57,16 @@ export function getAdminAgentStateDir() {
   return join(getAdminAgentRoot(), 'agent');
 }
 
-async function listAgents() {
-  const { stdout } = await execFileAsync('openclaw', ['agents', 'list', '--json'], {
-    maxBuffer: 4 * 1024 * 1024,
-  });
-  return JSON.parse(stdout) as AgentListResponse;
+async function listAgents(): Promise<AgentListResponse> {
+  const configPath = join(OPENCLAW_HOME, 'openclaw.json');
+  const raw = await readFile(configPath, 'utf8');
+  const config = JSON.parse(raw) as OpenClawConfigFile;
+  const list = config.agents?.list ?? [];
+  const agents: ListedAgent[] = list.map((item: Record<string, unknown>) => ({
+    id: item.id as string,
+    agentDir: item.agentDir as string | undefined,
+  }));
+  return { count: agents.length, agents };
 }
 
 async function syncOpenClawAgentModel(agentId: string, modelKey?: string) {
