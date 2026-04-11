@@ -264,7 +264,7 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
       instructions: buildStudyInstructions(agent.system_prompt, context),
       sessionId: openclawSessionId,
       message: buildChatTranscript(historyResult.rows, message),
-      model: agent.model_key,
+      model: `openclaw/${agent.openclaw_agent_id}`,
       metadata: {
         feature: 'chat',
         threadId: activeThreadId,

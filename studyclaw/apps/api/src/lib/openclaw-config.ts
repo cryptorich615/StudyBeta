@@ -1,6 +1,4 @@
-import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { promisify } from 'node:util';
 
 type OpenClawConfig = {
   auth?: {
@@ -33,8 +31,7 @@ export type OpenClawModelOption = {
   available: boolean;
 };
 
-const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH ?? '/home/ubuntu/.openclaw/openclaw.json';
-const execFileAsync = promisify(execFile);
+const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH ?? '/home/martinez_a_richard/.openclaw/openclaw.json';
 
 function modelNameFromKey(key: string, config: OpenClawConfig) {
   const provider = key.split('/')[0] ?? 'unknown';
@@ -68,12 +65,22 @@ export async function loadOpenClawModels(): Promise<OpenClawModelOption[]> {
       ...Object.keys(config.agents?.defaults?.models ?? {}),
     ].filter((key): key is string => !!key)
   );
-  const { stdout } = await execFileAsync('openclaw', ['models', 'list', '--all', '--json'], {
-    maxBuffer: 16 * 1024 * 1024,
+
+  // Build models from config instead of calling the hanging CLI
+  const configModels = config.agents?.defaults?.models ?? {};
+  const mapped: OpenClawModelOption[] = Object.entries(configModels).map(([key, cfg]) => {
+    const provider = key.split('/')[0] ?? 'unknown';
+    const oauthAvailable = Object.values(config.auth?.profiles ?? {}).some(
+      (profile) => profile.provider === provider && profile.mode === 'oauth'
+    );
+    return {
+      key,
+      name: cfg?.alias ?? modelNameFromKey(key, config),
+      provider,
+      oauthAvailable,
+      available: authProviders.has(provider) || preferredKeys.has(key),
+    };
   });
-  const payload = JSON.parse(stdout) as {
-    models?: Array<{ key: string; name?: string; available?: boolean }>;
-  };
 
   const finalizeModels = (models: OpenClawModelOption[]) =>
     Array.from(
@@ -95,55 +102,7 @@ export async function loadOpenClawModels(): Promise<OpenClawModelOption[]> {
         return left.name.localeCompare(right.name);
       });
 
-  const mapped = (payload.models ?? [])
-    .map((model) => {
-      const provider = model.key.split('/')[0] ?? 'unknown';
-      const oauthAvailable = Object.values(config.auth?.profiles ?? {}).some(
-        (profile) => profile.provider === provider && profile.mode === 'oauth'
-      );
-
-      return {
-        key: model.key,
-        name: model.name ?? modelNameFromKey(model.key, config),
-        provider,
-        oauthAvailable,
-        available: !!model.available,
-      };
-    })
-    .filter((model) => {
-      if (preferredKeys.has(model.key)) {
-        return true;
-      }
-
-      if (model.provider === 'ollama' && model.available) {
-        return true;
-      }
-
-      if (model.provider !== 'openrouter' && authProviders.has(model.provider) && model.available) {
-        return true;
-      }
-
-      return false;
-    });
-
-  return mapped.length
-    ? finalizeModels(mapped)
-    : finalizeModels(
-        (payload.models ?? []).map((model) => {
-          const provider = model.key.split('/')[0] ?? 'unknown';
-          const oauthAvailable = Object.values(config.auth?.profiles ?? {}).some(
-            (profile) => profile.provider === provider && profile.mode === 'oauth'
-          );
-
-          return {
-            key: model.key,
-            name: model.name ?? modelNameFromKey(model.key, config),
-            provider,
-            oauthAvailable,
-            available: !!model.available,
-          };
-        })
-      );
+  return finalizeModels(mapped);
 }
 
 export function resolveModelSelection(

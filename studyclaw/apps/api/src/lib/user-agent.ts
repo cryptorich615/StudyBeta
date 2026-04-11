@@ -1,12 +1,8 @@
-import { execFile } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { promisify } from 'node:util';
+import { join } from 'node:path';
 import { buildCoreTraitsMarkdown } from './agent-config';
 
-const execFileAsync = promisify(execFile);
-
-const OPENCLAW_HOME = process.env.OPENCLAW_HOME ?? '/home/ubuntu/.openclaw';
+const OPENCLAW_HOME = process.env.OPENCLAW_HOME ?? '/home/martinez_a_richard/.openclaw';
 
 type ListedAgent = {
   id: string;
@@ -67,6 +63,18 @@ async function listAgents(): Promise<AgentListResponse> {
     agentDir: item.agentDir as string | undefined,
   }));
   return { count: agents.length, agents };
+}
+
+async function addAgentToOpenClawConfig(agent: Record<string, unknown>) {
+  const configPath = join(OPENCLAW_HOME, 'openclaw.json');
+  const raw = await readFile(configPath, 'utf8');
+  const config = JSON.parse(raw) as OpenClawConfigFile;
+  const list = config.agents?.list ?? [];
+  if (!list.find((a) => a.id === agent.id)) {
+    list.push(agent);
+    config.agents = { ...config.agents, list };
+    await writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
+  }
 }
 
 async function syncOpenClawAgentModel(agentId: string, modelKey?: string) {
@@ -221,30 +229,27 @@ export async function ensurePersonalAgent(input: {
   const existing = (await listAgents()).agents?.find((agent) => agent.id === agentId);
 
   if (!existing) {
-    try {
-      await execFileAsync(
-        'openclaw',
-        [
-          'agents',
-          'add',
-          agentId,
-          '--workspace',
-          workspacePath,
-          '--agent-dir',
-          agentStateDir,
-          '--model',
-          input.modelKey ?? process.env.OPENCLAW_DEFAULT_MODEL ?? 'openrouter/auto',
-          '--non-interactive',
-          '--json',
+    // Write agent directly to openclaw.json instead of using the hanging CLI
+    await addAgentToOpenClawConfig({
+      id: agentId,
+      name: agentId,
+      workspace: workspacePath,
+      agentDir: agentStateDir,
+      model: input.modelKey ?? 'minimax/MiniMax-M2.7',
+      tools: {
+        alsoAllow: [
+          'browser',
+          'openlibrary_get_book_details',
+          'openlibrary_get_cover_url',
+          'openlibrary_get_subject_books',
+          'openlibrary_search_books',
+          'openlibrary_search_inside_book',
         ],
-        { maxBuffer: 4 * 1024 * 1024 }
-      );
-    } catch (error: any) {
-      const message = error?.stderr ?? error?.message ?? '';
-      if (!String(message).includes('already exists')) {
-        throw error;
-      }
-    }
+      },
+      thinkingDefault: 'off',
+      reasoningDefault: 'off',
+      skills: ['google-workspace'],
+    });
   }
 
   await ensureEmptyAuthStore(agentStateDir);
@@ -272,30 +277,23 @@ export async function ensureAdminAgent(input: {
   const existing = (await listAgents()).agents?.find((agent) => agent.id === agentId);
 
   if (!existing) {
-    try {
-      await execFileAsync(
-        'openclaw',
-        [
-          'agents',
-          'add',
-          agentId,
-          '--workspace',
-          workspacePath,
-          '--agent-dir',
-          agentStateDir,
-          '--model',
-          input.modelKey ?? process.env.OPENCLAW_DEFAULT_MODEL ?? 'openrouter/auto',
-          '--non-interactive',
-          '--json',
+    await addAgentToOpenClawConfig({
+      id: agentId,
+      name: agentId,
+      workspace: workspacePath,
+      agentDir: agentStateDir,
+      model: input.modelKey ?? 'openrouter/auto',
+      tools: {
+        alsoAllow: [
+          'browser',
+          'openlibrary_get_book_details',
+          'openlibrary_get_cover_url',
+          'openlibrary_get_subject_books',
+          'openlibrary_search_books',
+          'openlibrary_search_inside_book',
         ],
-        { maxBuffer: 4 * 1024 * 1024 }
-      );
-    } catch (error: any) {
-      const message = error?.stderr ?? error?.message ?? '';
-      if (!String(message).includes('already exists')) {
-        throw error;
-      }
-    }
+      },
+    });
   }
 
   await mkdir(workspacePath, { recursive: true });
