@@ -73,7 +73,7 @@ export default function OnboardingPage() {
   useEffect(() => {
     const parsed = readStoredSession();
     if (!parsed?.user) { router.push('/auth?mode=login'); return; }
-    if (parsed.user.agent_type) { router.push('/dashboard'); return; }
+    if (parsed.user.onboarding_complete) { router.push('/dashboard'); return; }
   }, []);
 
   const handleTierSelect = (tier: number) => {

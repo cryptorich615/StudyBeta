@@ -3,6 +3,8 @@ export type StoredSession = {
     id: string;
     email: string;
     full_name?: string;
+    agent_type?: string;
+    onboarding_complete?: boolean;
   };
   accessToken: string;
 };
