@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { writeStoredSession } from '../../../lib/session';
 
@@ -21,38 +21,44 @@ function decodeBase64Url(value: string) {
   return window.atob(`${normalized}${padding}`);
 }
 
-export default function AuthCallbackPage() {
+function AuthCallbackInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  useEffect(() => {
-    const payload = searchParams.get('payload');
-    if (!payload) {
-      router.replace('/login');
-      return;
-    }
+  const payload = searchParams.get('payload');
+  if (!payload) {
+    router.replace('/login');
+    return null;
+  }
 
-    try {
-      const parsed = JSON.parse(decodeBase64Url(payload)) as CallbackPayload;
-      writeStoredSession({
-        user: {
-          id: parsed.user.id,
-          email: parsed.user.email,
-          full_name: parsed.user.full_name,
-        },
-        accessToken: parsed.accessToken,
-      });
-      router.replace(parsed.onboardingComplete ? '/dashboard' : '/onboarding');
-    } catch {
-      router.replace('/login');
-    }
-  }, [router, searchParams]);
+  try {
+    const parsed = JSON.parse(decodeBase64Url(payload)) as CallbackPayload;
+    writeStoredSession({
+      user: {
+        id: parsed.user.id,
+        email: parsed.user.email,
+        full_name: parsed.user.full_name,
+      },
+      accessToken: parsed.accessToken,
+    });
+    router.replace(parsed.onboardingComplete ? '/dashboard' : '/onboarding');
+  } catch {
+    router.replace('/login');
+  }
 
+  return null;
+}
+
+export default function AuthCallbackPage() {
   return (
-    <section className="hero-card">
-      <p className="insight-chip">Authentication</p>
-      <h1 className="hero-title">Finishing sign-in…</h1>
-      <p className="hero-description">StudyClaw is moving your Google session into the app.</p>
-    </section>
+    <Suspense fallback={
+      <section className="hero-card">
+        <p className="insight-chip">Authentication</p>
+        <h1 className="hero-title">Finishing sign-in…</h1>
+        <p className="hero-description">StudyClaw is moving your Google session into the app.</p>
+      </section>
+    }>
+      <AuthCallbackInner />
+    </Suspense>
   );
 }
