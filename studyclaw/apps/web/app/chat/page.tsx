@@ -365,14 +365,15 @@ export default function ChatPage() {
     }, 50);
 
     try {
-      const res = await apiFetch('/api/chat/send', {
+      const res = await apiFetch('/api/chat/stream', {
         method: 'POST',
         body: JSON.stringify({ threadId: activeThreadId, message: trimmed }),
       });
-      const data = await res.json();
+
       if (!res.ok) {
         // Remove optimistic message on error
         setMessages((prev: any[]) => prev.filter((m: any) => m.id !== userMsg.id));
+        const data = await res.json();
         if (data.error === 'quota_reached') {
           const minutesLeft = data.minutesLeft ?? 'a few';
           throw new Error(`⚠️ Out of credits — window resets in ~${minutesLeft} min. Need more? Upgrade your tier.`);
@@ -380,7 +381,71 @@ export default function ChatPage() {
         throw new Error(data.message || 'Failed to send message');
       }
 
-      await loadThreads(data.threadId);
+      // Streaming SSE response
+      let assistantMsgId: string | null = null;
+      let assistantText = '';
+      let activeThreadIdFromStream: string | null = null;
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const reader = res.body!.getReader();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (line.startsWith('data:')) {
+            const dataStr = line.slice(5).trim();
+            if (!dataStr || dataStr === '[DONE]') continue;
+
+            // First event: create assistant message
+            if (!assistantMsgId) {
+              assistantMsgId = `stream-${Date.now()}`;
+              setMessages((prev: any[]) => [
+                ...prev,
+                { id: assistantMsgId, role: 'assistant', content: '' },
+              ]);
+            }
+
+            try {
+              const event = JSON.parse(dataStr);
+
+              // Extract threadId from any event
+              if (event.response?.id) {
+                activeThreadIdFromStream = activeThreadId ?? null;
+              }
+
+              // Accumulate text from content_part.added events
+              if (event.type === 'response.content_part.added') {
+                const text = event.item?.content?.[0]?.text ?? '';
+                assistantText += text;
+                if (assistantMsgId) {
+                  setMessages((prev: any[]) =>
+                    prev.map((m: any) => m.id === assistantMsgId ? { ...m, content: assistantText } : m)
+                  );
+                  // Scroll to bottom
+                  setTimeout(() => {
+                    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+                  }, 10);
+                }
+              }
+            } catch { /* ignore parse errors */ }
+          }
+        }
+      }
+
+      // Stream complete — reload threads to pick up saved message
+      if (activeThreadIdFromStream) {
+        await loadThreads(activeThreadIdFromStream);
+      } else if (assistantMsgId) {
+        // Stream saved async — refresh threads to get saved messages
+        await loadThreads(activeThreadId!);
+      }
     } catch (error: any) {
       setFeedback(error.message || 'Failed to send message');
     } finally {

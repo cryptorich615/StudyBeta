@@ -73,4 +73,87 @@ export class OpenClawClient {
       raw: data,
     };
   }
+
+  /**
+   * Returns a ReadableStream of raw SSE data strings from the gateway.
+   * The caller pipes this through TextEncoderStream before sending to the client.
+   */
+  streamMessage(input: OpenClawSendMessageInput): ReadableStream<string> {
+    const baseUrl = this.baseUrl;
+    const token = this.token;
+    const defaultModel = this.defaultModel;
+
+    return new ReadableStream<string>({
+      async start(controller) {
+        try {
+          const response = await fetch(`${baseUrl}/v1/responses`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+              Accept: 'text/event-stream',
+              ...(input.agentId ? { 'X-OpenClaw-Agent-Id': input.agentId } : {}),
+            },
+            body: JSON.stringify({
+              model: input.model ?? defaultModel,
+              instructions: input.instructions,
+              input: input.message,
+              user: input.userId,
+              stream: true,
+              metadata: {
+                ...input.metadata,
+                sessionId: input.sessionId,
+              },
+            }),
+          });
+
+          if (!response.ok) {
+            const err = await response.text();
+            controller.enqueue(`error:OpenClaw error ${response.status}: ${err}\n`);
+            controller.close();
+            return;
+          }
+
+          if (!response.body) {
+            controller.close();
+            return;
+          }
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() ?? '';
+
+            for (const line of lines) {
+              if (line.startsWith('data:')) {
+                const data = line.slice(5).trim();
+                if (data && data !== '[DONE]') {
+                  controller.enqueue(`data:${data}\n`);
+                }
+              }
+            }
+          }
+
+          if (buffer.startsWith('data:')) {
+            const data = buffer.slice(5).trim();
+            if (data && data !== '[DONE]') {
+              controller.enqueue(`data:${data}\n`);
+            }
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Stream error';
+          controller.enqueue(`error:${msg}\n`);
+        } finally {
+          controller.close();
+        }
+      },
+    });
+  }
 }

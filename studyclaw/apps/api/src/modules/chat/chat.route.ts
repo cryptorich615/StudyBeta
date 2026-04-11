@@ -152,6 +152,234 @@ chatRouter.get('/threads/:threadId', async (req: AuthedRequest, res) => {
   res.json({ thread: thread.rows[0], messages: messages.rows });
 });
 
+// ── STREAMING ────────────────────────────────────────────────
+// Streams SSE from OpenClaw gateway directly to client.
+// Vercel-compatible — returns immediately with a ReadableStream.
+chatRouter.post('/stream', async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+
+  const { threadId, message } = req.body as { threadId?: string; message?: string };
+
+  if (!message?.trim()) {
+    return res.status(400).json({ error: 'bad_request', message: 'message is required' });
+  }
+
+  const credentialCheck = await db.query(
+    `select api_key from user_model_credentials where user_id = $1 limit 1`,
+    [req.user!.id]
+  );
+  if (!credentialCheck.rows[0]?.api_key) {
+    return res.status(403).json({ error: 'onboarding_required', message: 'Complete onboarding first.' });
+  }
+
+  const agent = await loadAgentProfile(req.user!.id);
+  const studentAgentResult = await db.query(`select * from agents where user_id = $1`, [req.user!.id]);
+  const studentAgent = studentAgentResult.rows[0];
+  if (!agent || !studentAgent) {
+    return res.status(400).json({ error: 'missing_agent', message: 'Complete onboarding first' });
+  }
+
+  // Credit check
+  const profileResult = await db.query(
+    `select tier, messages_sent, window_start from student_profiles where user_id = $1`,
+    [req.user!.id]
+  );
+  const profile = profileResult.rows[0];
+  const tierLimits: Record<number, number> = {
+    1: Number(process.env.STUDYCLAW_TIER1_LIMIT ?? 1000),
+    2: Number(process.env.STUDYCLAW_TIER2_LIMIT ?? 3000),
+    3: Number(process.env.STUDYCLAW_TIER3_LIMIT ?? 5000),
+  };
+  const limit = tierLimits[profile?.tier ?? 1] ?? 1000;
+  const resetHours = Number(process.env.STUDYCLAW_RESET_INTERVAL_HOURS ?? 5);
+  const windowStart = profile?.window_start ? new Date(profile.window_start) : null;
+  const now = new Date();
+  const windowExpired = !windowStart || (now.getTime() - windowStart.getTime()) > resetHours * 60 * 60 * 1000;
+  const messagesSent = windowExpired ? 0 : (profile?.messages_sent ?? 0);
+
+  if (messagesSent >= limit) {
+    const resetAt = windowStart ? new Date(windowStart.getTime() + resetHours * 60 * 60 * 1000) : null;
+    const minutesLeft = resetAt ? Math.max(0, Math.ceil((resetAt.getTime() - now.getTime()) / 60000)) : resetHours * 60;
+    return res.status(429).json({
+      error: 'quota_reached',
+      message: `Out of credits — window resets in ${minutesLeft} min.`,
+      minutesLeft,
+    });
+  }
+
+  // Increment credit counter
+  if (windowExpired) {
+    await db.query(`update student_profiles set messages_sent = 1, window_start = now() where user_id = $1`, [req.user!.id]);
+  } else {
+    await db.query(`update student_profiles set messages_sent = messages_sent + 1 where user_id = $1`, [req.user!.id]);
+  }
+
+  // Get or create thread
+  let activeThreadId = threadId;
+  let openclawSessionId: string | undefined;
+  if (threadId) {
+    const thread = await db.query(`select * from chat_threads where id = $1 and user_id = $2`, [threadId, req.user!.id]);
+    if (!thread.rows[0]) return res.status(404).json({ error: 'not_found', message: 'Thread not found' });
+    openclawSessionId = thread.rows[0].openclaw_session_id;
+  } else {
+    const created = await db.query(
+      `insert into chat_threads (user_id, openclaw_session_id, title) values ($1, $2, $3) returning *`,
+      [req.user!.id, `resp_${Date.now()}`, message.trim().slice(0, 60)]
+    );
+    activeThreadId = created.rows[0].id;
+    openclawSessionId = created.rows[0].openclaw_session_id;
+  }
+
+  await db.query(`insert into chat_messages (thread_id, role, content) values ($1, 'user', $2)`, [activeThreadId, message]);
+
+  const context = await buildStudyContext(req.user!.id);
+  const modelId = `openclaw/${agent.openclaw_agent_id}`;
+  const instructions = buildStudyInstructions(agent.system_prompt, context);
+  const baseUrl = process.env.OPENCLAW_BASE_URL ?? 'http://localhost:18789';
+  const token = process.env.OPENCLAW_GATEWAY_TOKEN ?? '';
+
+  // Accumulate final text from SSE events (for DB save)
+  let assistantText = '';
+  let saveDone = false;
+
+  const stream = new ReadableStream<string>({
+    async start(controller) {
+      try {
+        const response = await fetch(`${baseUrl}/v1/responses`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream',
+            'X-OpenClaw-Agent-Id': agent.openclaw_agent_id,
+          },
+          body: JSON.stringify({
+            model: modelId,
+            instructions,
+            input: message,
+            user: req.user!.id,
+            stream: true,
+            metadata: { feature: 'chat', threadId: activeThreadId, sessionId: openclawSessionId },
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.text();
+          controller.enqueue(`error:OpenClaw error ${response.status}: ${err}\n`);
+          controller.close();
+          return;
+        }
+
+        if (!response.body) { controller.close(); return; }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            if (line.startsWith('event:')) {
+              controller.enqueue(line + '\n');
+            } else if (line.startsWith('data:')) {
+              const data = line.slice(5).trim();
+              if (data && data !== '[DONE]') {
+                controller.enqueue(`data:${data}\n`);
+                // Extract text from content events for DB save
+                try {
+                  const event = JSON.parse(data);
+                  if (event.type === 'response.content_part.added') {
+                    assistantText += event.item?.content?.[0]?.text ?? '';
+                  }
+                } catch { /* ignore */ }
+              }
+            }
+          }
+        }
+
+        if (buffer) {
+          if (buffer.startsWith('event:')) controller.enqueue(buffer + '\n');
+          else if (buffer.startsWith('data:')) {
+            const data = buffer.slice(5).trim();
+            if (data && data !== '[DONE]') {
+              controller.enqueue(`data:${data}\n`);
+              try {
+                const event = JSON.parse(data);
+                if (event.type === 'response.content_part.added') {
+                  assistantText += event.item?.content?.[0]?.text ?? '';
+                }
+              } catch { /* ignore */ }
+            }
+          }
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Stream error';
+        controller.enqueue(`error:${msg}\n`);
+      } finally {
+        saveDone = true;
+        controller.close();
+        // Save assistant message to DB after stream ends
+        if (assistantText && activeThreadId) {
+          db.query(
+            `insert into chat_messages (thread_id, role, content, metadata_json)
+             values ($1, 'assistant', $2, $3)`,
+            [activeThreadId, assistantText, JSON.stringify({ streamed: true })]
+          ).catch((err) => console.error('Stream save error:', err));
+        }
+      }
+    },
+  });
+
+  // Stream SSE via Express res.write — headers sent immediately on flushHeaders()
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const encoder = new TextEncoder();
+  const reader = stream.getReader();
+
+  // 60s timeout — Vercel free=10s, pro=60s so this is the ceiling
+  const TIMEOUT_MS = 60_000;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try {
+      res.write('event: error\ndata: {"error":"gateway_timeout"}\n\n');
+    } catch { /* client gone */ }
+    res.end();
+  }, TIMEOUT_MS);
+
+  // Clean up on client disconnect
+  req.on('close', () => {
+    clearTimeout(timer);
+    reader.cancel().catch(() => {});
+  });
+
+  try {
+    while (true) {
+      if (timedOut) break;
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = typeof value === 'string' ? encoder.encode(value) : value;
+      if (!res.write(chunk) && !timedOut) {
+        // Backpressure: wait for drain before next read
+        await new Promise<void>((resolve) => res.once('drain', resolve));
+      }
+    }
+  } catch { /* reader cancelled on disconnect */
+  } finally {
+    clearTimeout(timer);
+    if (!res.writableEnded) res.end();
+  }
+});
+
 chatRouter.post('/send', async (req: AuthedRequest, res) => {
   await ensurePlatformSchema();
   const { threadId, message } = req.body as { threadId?: string; message?: string };
