@@ -5,7 +5,8 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import ThemeToggle from './theme-toggle';
 import { Button } from './ui/button';
-import { readStoredSession, clearStoredSession, type StoredSession } from '../../lib/session';
+import { readStoredSession, clearStoredSession, writeStoredSession, type StoredSession } from '../../lib/session';
+import { apiFetch } from '../../lib/api';
 import { cn } from '../../lib/utils';
 import { LayoutDashboard, Brain, MessageSquare, Settings, LogOut } from 'lucide-react';
 
@@ -25,14 +26,60 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [session, setSession] = useState<StoredSession | null>(null);
+  const [accountLoading, setAccountLoading] = useState(false);
   const isPublicRoute =
     pathname === '/' || pathname === '/auth' || pathname === '/login' || pathname === '/signup';
   const isAuthRoute = pathname === '/auth' || pathname === '/login' || pathname === '/signup';
   const primaryLinks = session ? navLinks : [{ href: '/', label: 'Home', shortLabel: 'Home', icon: LayoutDashboard }, ...navLinks];
   const brandHref = session ? '/dashboard' : '/';
 
+  // Replace stale session values with fresh ones from the API, but preserve
+  // the existing session on network errors so we don't blast users to login
+  // on every transient blip.
+  const refreshAccountState = async () => {
+    const stored = readStoredSession();
+    if (!stored?.accessToken) {
+      setSession(stored);
+      return;
+    }
+
+    setAccountLoading(true);
+    try {
+      const response = await apiFetch('/api/auth/me');
+
+      // ONLY clear session on explicit 401 — not on network errors
+      if (response.status === 401) {
+        clearStoredSession();
+        setSession(null);
+        setAccountLoading(false);
+        return;
+      }
+
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.user) {
+        // Keep existing session on non-401 failures (network issues, 500s, etc.)
+        setSession(stored);
+        setAccountLoading(false);
+        return;
+      }
+
+      const nextSession: StoredSession = {
+        ...stored,
+        user: { ...stored.user, ...data.user },
+        onboardingComplete: data.onboardingComplete,
+      };
+      writeStoredSession(nextSession);
+      setSession(nextSession);
+    } catch {
+      // Network error — keep existing session, don't redirect
+      setSession(stored);
+    } finally {
+      setAccountLoading(false);
+    }
+  };
+
   useEffect(() => {
-    setSession(readStoredSession());
+    refreshAccountState();
   }, [pathname]);
 
   useEffect(() => {
@@ -83,8 +130,8 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
                     href={link.href}
                     className={cn(
                       "px-4 py-2 text-sm font-semibold rounded-2xl transition-all duration-200",
-                      isActivePath(pathname, link.href) 
-                        ? "bg-primary/10 text-primary" 
+                      isActivePath(pathname, link.href)
+                        ? "bg-primary/10 text-primary"
                         : "text-muted-foreground hover:bg-secondary hover:text-foreground"
                     )}
                   >
@@ -98,14 +145,20 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
           <div className="flex items-center gap-3">
             {!isPublicRoute ? (
               <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-secondary/50 border border-border/30 text-[11px] font-bold text-muted-foreground">
-                <div
-                  className="w-1.5 h-1.5 rounded-full bg-success animate-pulse"
-                  style={{ boxShadow: '0 0 8px var(--success-soft)' }}
-                />
-                {session ? session.user.full_name || session.user.email : 'Guest Mode'}
+                {accountLoading ? (
+                  <span className="animate-pulse">Checking account…</span>
+                ) : (
+                  <>
+                    <div
+                      className="w-1.5 h-1.5 rounded-full bg-success animate-pulse"
+                      style={{ boxShadow: '0 0 8px var(--success-soft)' }}
+                    />
+                    {session ? session.user.full_name || session.user.email : 'Guest Mode'}
+                  </>
+                )}
               </div>
             ) : null}
-            
+
             {!session && (
               !isAuthRoute ? (
                 <div className="flex items-center gap-2">
@@ -118,13 +171,13 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
                 </div>
               ) : null
             )}
-            
+
             {session && (
               <Button variant="ghost" size="icon" className="rounded-2xl text-muted-foreground hover:text-destructive hover:bg-destructive/10" onClick={handleLogout} title="Log out">
                 <LogOut className="w-5 h-5" />
               </Button>
             )}
-            
+
             <ThemeToggle />
           </div>
         </div>

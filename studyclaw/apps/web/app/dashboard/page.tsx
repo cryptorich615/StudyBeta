@@ -1,5 +1,6 @@
 'use client';
 
+import React from 'react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { apiFetch } from '../../lib/api';
@@ -91,7 +92,45 @@ function buildUpcomingExams(data: DashboardData | null) {
   return items;
 }
 
+class DashboardErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; errorMessage: string }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, errorMessage: '' };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, errorMessage: error.message };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <section className="hero-card">
+          <p className="insight-chip">Dashboard Error</p>
+          <h1 className="hero-title">Something went wrong loading your board.</h1>
+          <p className="hero-description">
+            {this.state.errorMessage || 'An unexpected error occurred. Try refreshing the page.'}
+          </p>
+          <div className="actions">
+            <button className="primary-link-button" onClick={() => window.location.reload()}>Reload</button>
+          </div>
+        </section>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function DashboardPage() {
+  return (
+    <DashboardErrorBoundary>
+      <DashboardPageContent />
+    </DashboardErrorBoundary>
+  );
+}
+
+function DashboardPageContent() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [status, setStatus] = useState('');
   const [hasSession, setHasSession] = useState(false);

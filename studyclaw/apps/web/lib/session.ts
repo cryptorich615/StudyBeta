@@ -7,6 +7,7 @@ export type StoredSession = {
     onboarding_complete?: boolean;
   };
   accessToken: string;
+  onboardingComplete?: boolean;
 };
 
 const SESSION_KEY = 'studyclaw-user';
