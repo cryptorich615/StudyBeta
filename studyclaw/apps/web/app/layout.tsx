@@ -1,6 +1,10 @@
 import './globals.css';
 import AppChrome from './components/app-chrome';
 import { ThemeProvider } from './components/theme-provider';
+import { DashboardLayoutProvider } from './components/dashboard-layout-context';
+
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 export const metadata = {
     title: 'StudyClaw',
@@ -22,7 +26,9 @@ export default function RootLayout({
                     enableSystem
                     disableTransitionOnChange
                 >
-                    <AppChrome>{children}</AppChrome>
+                    <DashboardLayoutProvider>
+                        <AppChrome>{children}</AppChrome>
+                    </DashboardLayoutProvider>
                 </ThemeProvider>
             </body>
         </html>
