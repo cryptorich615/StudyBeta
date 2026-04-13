@@ -42,6 +42,46 @@ function parseOrigin(origin: string) {
   }
 }
 
+function matchesWildcardOrigin(origin: string, pattern: string) {
+  const wildcardIndex = pattern.indexOf('*.');
+  if (wildcardIndex === -1) {
+    return false;
+  }
+
+  const requested = parseOrigin(origin);
+  if (!requested) {
+    return false;
+  }
+
+  const protocolSeparator = pattern.indexOf('://');
+  if (protocolSeparator === -1) {
+    return false;
+  }
+
+  const expectedProtocol = pattern.slice(0, protocolSeparator);
+  const hostPattern = pattern.slice(protocolSeparator + 3);
+  const wildcardHost = hostPattern.replace(/^\*\./, '');
+
+  if (!wildcardHost) {
+    return false;
+  }
+
+  const requestedPort = requested.port || (requested.protocol === 'https:' ? '443' : requested.protocol === 'http:' ? '80' : '');
+  const patternHostSegments = wildcardHost.split(':');
+  const expectedHost = patternHostSegments[0];
+  const expectedPort = patternHostSegments[1] ?? (expectedProtocol === 'https' ? '443' : expectedProtocol === 'http' ? '80' : '');
+
+  if (`${expectedProtocol}:` !== requested.protocol) {
+    return false;
+  }
+
+  if (expectedPort && expectedPort !== requestedPort) {
+    return false;
+  }
+
+  return requested.hostname === expectedHost || requested.hostname.endsWith(`.${expectedHost}`);
+}
+
 function isLoopbackHost(hostname: string) {
   return hostname === 'localhost' || hostname === '127.0.0.1';
 }
@@ -57,6 +97,10 @@ function isAllowedOrigin(origin: string) {
   }
 
   return allowedOrigins.some((allowedOrigin) => {
+    if (allowedOrigin.includes('*.') && matchesWildcardOrigin(origin, allowedOrigin)) {
+      return true;
+    }
+
     const allowed = parseOrigin(allowedOrigin);
     if (!allowed) {
       return false;
