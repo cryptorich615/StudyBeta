@@ -36,6 +36,6 @@ export function clearStoredSession() {
   window.localStorage.removeItem(SESSION_KEY);
 }
 
-export function isOnboardingComplete(session?: { onboarding_complete?: boolean }): boolean {
-  return readStoredSession()?.onboarding_complete ?? false;
+export function isOnboardingComplete(session?: StoredSession | null): boolean {
+  return session?.onboarding_complete ?? readStoredSession()?.onboarding_complete ?? false;
 }
