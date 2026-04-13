@@ -116,6 +116,62 @@ type DashboardData = {
   quickActions: Array<{ label: string; href: string }>;
 };
 
+function normalizeDashboardData(payload: Partial<DashboardData>): DashboardData {
+  return {
+    generatedAt: payload.generatedAt ?? new Date().toISOString(),
+    onboardingComplete: payload.onboardingComplete ?? false,
+    heartbeat: {
+      status: payload.heartbeat?.status ?? 'Needs more inputs',
+      cadenceMinutes: payload.heartbeat?.cadenceMinutes ?? 30,
+      lastEvaluatedAt: payload.heartbeat?.lastEvaluatedAt ?? new Date().toISOString(),
+      nextRunAt: payload.heartbeat?.nextRunAt ?? new Date().toISOString(),
+      source: payload.heartbeat?.source ?? 'reminders-only',
+      summary:
+        payload.heartbeat?.summary ??
+        'Add calendar events, reminders, and study activity to make this board more specific.',
+    },
+    integrations: {
+      calendarConnected: payload.integrations?.calendarConnected ?? false,
+      sourceLabel: payload.integrations?.sourceLabel ?? 'Calendar not connected',
+      googleEmail: payload.integrations?.googleEmail ?? null,
+    },
+    studentAgent: payload.studentAgent ?? null,
+    counts: {
+      flashcardSets: payload.counts?.flashcardSets ?? 0,
+      quizzes: payload.counts?.quizzes ?? 0,
+      conversations: payload.counts?.conversations ?? 0,
+      knowledgeItems: payload.counts?.knowledgeItems ?? 0,
+      gradeItems: payload.counts?.gradeItems ?? 0,
+      scheduleEntries: payload.counts?.scheduleEntries ?? 0,
+    },
+    scheduleSummary: {
+      entriesTracked: payload.scheduleSummary?.entriesTracked ?? 0,
+      currentClass: payload.scheduleSummary?.currentClass ?? null,
+      nextClass: payload.scheduleSummary?.nextClass ?? null,
+      status: payload.scheduleSummary?.status ?? 'unconfigured',
+      todayCount: payload.scheduleSummary?.todayCount ?? 0,
+      message: payload.scheduleSummary?.message ?? 'Add your class blocks to keep this visible.',
+    },
+    gradeSummary: {
+      overallAverage: payload.gradeSummary?.overallAverage ?? null,
+      coursesTracked: payload.gradeSummary?.coursesTracked ?? 0,
+      strongestCourse: payload.gradeSummary?.strongestCourse ?? null,
+      courseNeedingAttention: payload.gradeSummary?.courseNeedingAttention ?? null,
+      topConcepts: payload.gradeSummary?.topConcepts ?? [],
+    },
+    continueReading: payload.continueReading ?? [],
+    workloadTimeline: payload.workloadTimeline ?? [],
+    todayTasks: payload.todayTasks ?? [],
+    dueSoon: payload.dueSoon ?? [],
+    nextExam: payload.nextExam ?? null,
+    recommendations: payload.recommendations ?? [],
+    weeklyStudyPlan: payload.weeklyStudyPlan ?? [],
+    calendarEvents: payload.calendarEvents ?? [],
+    activityFeed: payload.activityFeed ?? [],
+    quickActions: payload.quickActions ?? [],
+  };
+}
+
 function formatDate(value: string) {
   return new Date(value).toLocaleString([], {
     weekday: 'short',
@@ -921,7 +977,7 @@ function DashboardPageContent() {
       return false;
     }
 
-    setData(payload as DashboardData);
+    setData(normalizeDashboardData(payload as Partial<DashboardData>));
     setStatus('');
     if (!options?.silent) {
       setLoading(false);
