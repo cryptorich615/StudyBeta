@@ -8,15 +8,15 @@ function normalizeApiPath(path: string) {
 }
 
 export function getApiBaseUrl() {
-  if (typeof window !== 'undefined') {
-    return window.location.origin;
-  }
-
   const envUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '');
   if (envUrl) return envUrl;
 
   const legacyUrl = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '');
   if (legacyUrl) return legacyUrl;
+
+  if (typeof window !== 'undefined') {
+    return window.location.origin;
+  }
 
   return FALLBACK_API_BASE;
 }

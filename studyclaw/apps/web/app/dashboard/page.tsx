@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { type Dispatch, type SetStateAction, useEffect, useState } from 'react';
-import { apiFetch, beginGoogleConnect } from '../../lib/api';
+import { apiFetch, beginGoogleConnect, readApiPayload } from '../../lib/api';
 import { readStoredSession } from '../../lib/session';
 import { consumePayloadFromUrl } from '../../lib/consumePayload';
 import { cn } from '../../lib/utils';
@@ -911,17 +911,17 @@ function DashboardPageContent() {
     }
 
     const response = await apiFetch('/api/dashboard');
-    const payload = await response.json();
+    const payload = await readApiPayload(response);
 
     if (!response.ok) {
-      setStatus(payload.message || 'Failed to load dashboard');
+      setStatus((typeof payload?.message === 'string' && payload.message) || 'Failed to load dashboard');
       if (!options?.silent) {
         setLoading(false);
       }
       return false;
     }
 
-    setData(payload);
+    setData(payload as DashboardData);
     setStatus('');
     if (!options?.silent) {
       setLoading(false);
