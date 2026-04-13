@@ -42,3 +42,19 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
     headers,
   });
 }
+
+// Stub exports — replace with real implementations
+
+export function readApiPayload(_data: unknown): Record<string, unknown> | null {
+  return null;
+}
+
+export function beginGoogleConnect(): string | null {
+  return null;
+}
+
+// Fixed stub with 2-arg overload
+export function getApiErrorMessage(response: Response, fallback?: string): string {
+  if (fallback) return fallback;
+  return `API error ${response.status}`;
+}
