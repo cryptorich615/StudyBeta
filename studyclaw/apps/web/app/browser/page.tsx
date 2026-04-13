@@ -48,7 +48,7 @@ export default function BrowserPage() {
       const response = await apiFetch('/api/browser/session');
       const payload = await readApiPayload(response);
       if (!response.ok) {
-        throw new Error(getApiErrorMessage(payload, 'Unable to reach the remote browser'));
+        throw new Error(getApiErrorMessage(response, 'Unable to reach the remote browser'));
       }
       setSession(payload as BrowserSessionPayload);
       setStatusMessage('Browser ready for you.');

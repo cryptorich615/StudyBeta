@@ -54,7 +54,15 @@ export function beginGoogleConnect(): string | null {
 }
 
 // Fixed stub with 2-arg overload
-export function getApiErrorMessage(response: Response, fallback?: string): string {
-  if (fallback) return fallback;
-  return `API error ${response.status}`;
+}
+
+// Overload: accepts Response OR already-parsed payload record
+export function getApiErrorMessage(response: Response, fallback?: string): string;
+export function getApiErrorMessage(payload: Record<string, unknown>, fallback?: string): string;
+export function getApiErrorMessage(arg0: Response | Record<string, unknown>, fallback?: string): string {
+  if (arg0 instanceof Response) {
+    return fallback ?? `API error ${arg0.status}`;
+  }
+  const msg = (arg0 as Record<string, unknown>)?.error as string | undefined;
+  return fallback ?? msg ?? 'Unknown error';
 }
