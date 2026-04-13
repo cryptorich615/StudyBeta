@@ -7,15 +7,33 @@ function normalizeApiPath(path: string) {
   return path.startsWith('/') ? path : `/${path}`;
 }
 
+function preferSecureApiBase(url: string) {
+  if (typeof window === 'undefined' || window.location.protocol !== 'https:') {
+    return url;
+  }
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'http:') {
+      parsed.protocol = 'https:';
+      return parsed.toString().replace(/\/$/, '');
+    }
+  } catch {
+    return url;
+  }
+
+  return url;
+}
+
 export function getApiBaseUrl() {
   const envUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '');
-  if (envUrl) return envUrl;
+  if (envUrl) return preferSecureApiBase(envUrl);
 
   const legacyUrl = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '');
-  if (legacyUrl) return legacyUrl;
+  if (legacyUrl) return preferSecureApiBase(legacyUrl);
 
   if (typeof window !== 'undefined') {
-    return window.location.origin;
+    return preferSecureApiBase(window.location.origin);
   }
 
   return FALLBACK_API_BASE;
