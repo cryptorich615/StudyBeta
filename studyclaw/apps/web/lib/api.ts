@@ -16,6 +16,9 @@ function preferSecureApiBase(url: string) {
     const parsed = new URL(url);
     if (parsed.protocol === 'http:') {
       parsed.protocol = 'https:';
+      if (parsed.port === '4000' || parsed.port === '80') {
+        parsed.port = '';
+      }
       return parsed.toString().replace(/\/$/, '');
     }
   } catch {
