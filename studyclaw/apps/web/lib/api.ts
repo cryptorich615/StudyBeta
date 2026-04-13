@@ -1,21 +1,22 @@
-import { readStoredSession } from './session';
+import { clearStoredSession, readStoredSession } from './session';
 
 const FALLBACK_API_BASE = 'http://localhost:4000';
+export const ACCOUNT_REFRESH_EVENT = 'studyclaw:account-refresh';
 
 function normalizeApiPath(path: string) {
   return path.startsWith('/') ? path : `/${path}`;
 }
 
 export function getApiBaseUrl() {
+  if (typeof window !== 'undefined') {
+    return window.location.origin;
+  }
+
   const envUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '');
   if (envUrl) return envUrl;
 
   const legacyUrl = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '');
   if (legacyUrl) return legacyUrl;
-
-  if (typeof window !== 'undefined') {
-    return window.location.origin;
-  }
 
   return FALLBACK_API_BASE;
 }
@@ -37,29 +38,64 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
     headers.set('Authorization', `Bearer ${session.accessToken}`);
   }
 
-  return fetch(resolveApiUrl(path), {
+  const response = await fetch(resolveApiUrl(path), {
     ...init,
     headers,
   });
+
+  if (response.status === 401) {
+    clearStoredSession();
+  }
+
+  if (typeof window !== 'undefined' && String(init.method ?? 'GET').toUpperCase() !== 'GET') {
+    window.dispatchEvent(new Event(ACCOUNT_REFRESH_EVENT));
+  }
+
+  return response;
 }
 
-// Stub exports — replace with real implementations
+export async function readApiPayload(response: Response) {
+  const raw = await response.text();
+  if (!raw) {
+    return {};
+  }
 
-export function readApiPayload(_data: unknown): Record<string, unknown> | null {
-  return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { message: raw };
+  }
 }
 
-export function beginGoogleConnect(): string | null {
-  return null;
+export async function beginGoogleConnect(returnTo: string) {
+  const params = new URLSearchParams({ returnTo });
+  if (typeof window !== 'undefined') {
+    params.set('frontendOrigin', window.location.origin);
+  }
+
+  const response = await apiFetch(`/api/google/connect-url?${params.toString()}`);
+  const payload = await response.json().catch(() => ({} as { url?: string; message?: string }));
+
+  if (!response.ok || !payload?.url) {
+    throw new Error(payload?.message || 'Failed to start Google connection');
+  }
+
+  window.location.assign(payload.url);
 }
 
-// Overload: accepts Response OR already-parsed payload record
 export function getApiErrorMessage(response: Response, fallback?: string): string;
-export function getApiErrorMessage(payload: Record<string, unknown>, fallback?: string): string;
-export function getApiErrorMessage(arg0: Response | Record<string, unknown>, fallback?: string): string {
+export function getApiErrorMessage(payload: unknown, fallback?: string): string;
+export function getApiErrorMessage(arg0: Response | unknown, fallback?: string): string {
   if (arg0 instanceof Response) {
     return fallback ?? `API error ${arg0.status}`;
   }
-  const msg = (arg0 as Record<string, unknown>)?.error as string | undefined;
-  return fallback ?? msg ?? 'Unknown error';
+  if (arg0 && typeof arg0 === 'object') {
+    const payload = arg0 as Record<string, unknown>;
+    const message = typeof payload.message === 'string' ? payload.message : payload.error;
+    if (typeof message === 'string' && message.trim()) {
+      return message;
+    }
+  }
+
+  return fallback ?? 'Unknown error';
 }
