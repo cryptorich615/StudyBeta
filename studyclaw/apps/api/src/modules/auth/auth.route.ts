@@ -1,11 +1,46 @@
 import { Router } from 'express';
-import { hashPassword, issueAccessToken, verifyPassword } from '../../lib/auth';
+import { hashPassword, issueAccessToken, requireAuth, type AuthedRequest, verifyPassword } from '../../lib/auth';
 import { db } from '../../lib/db';
 import { ensurePersonalAgent, ensureAdminAgent } from '../../lib/user-agent';
 import { buildGoogleAuthUrl, exchangeGoogleCode, saveUserGoogleTokens } from '../../lib/google-service';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
 
 export const authRouter = Router();
+
+function resolveOnboardingComplete(user: { role?: string | null }, onboardingComplete?: boolean | null) {
+  if (user.role === 'admin') {
+    return true;
+  }
+
+  return !!onboardingComplete;
+}
+
+async function ensureStudentProfileRecord(userId: string) {
+  await db.query(
+    `insert into student_profiles (user_id)
+     values ($1)
+     on conflict (user_id) do nothing`,
+    [userId]
+  );
+}
+
+authRouter.get('/me', requireAuth, async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+  const [userResult, studentProfileResult] = await Promise.all([
+    db.query(`select id, email, full_name, role from users where id = $1 limit 1`, [req.user!.id]),
+    db.query(`select onboarding_complete from student_profiles where user_id = $1 limit 1`, [req.user!.id]),
+  ]);
+
+  const user = userResult.rows[0];
+  if (!user) {
+    return res.status(404).json({ error: 'not_found', message: 'User not found' });
+  }
+
+  return res.json({
+    user,
+    onboardingComplete: resolveOnboardingComplete(user, studentProfileResult.rows[0]?.onboarding_complete),
+  });
+});
 
 authRouter.get('/google', (req, res) => {
   const url = buildGoogleAuthUrl();
@@ -60,6 +95,7 @@ authRouter.get('/google/callback', async (req, res) => {
     }
 
     if (!isAdmin) {
+      await ensureStudentProfileRecord(user.id);
       ensurePersonalAgent({ userId: user.id, email: user.email }).catch(e => console.error("Background agent setup error:", e));
       await db.query(
         `insert into agents (user_id, openclaw_agent_id, name, agent_type, config)
@@ -106,7 +142,7 @@ authRouter.get('/google/callback', async (req, res) => {
     const session = {
       user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role ?? 'student' },
       accessToken,
-      onboardingComplete: !!user.agent_type
+      onboardingComplete: resolveOnboardingComplete(user, user.agent_type ? true : null),
     };
 
     const frontendUrl = process.env.CLIENT_URL || process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -137,6 +173,7 @@ authRouter.post('/signup', async (req, res) => {
       await db.query(`update users set password_hash = $2 where id = $1`, [user.id, hashPassword(password)]);
     }
 
+    await ensureStudentProfileRecord(user.id);
     ensurePersonalAgent({ userId: user.id, email: user.email }).catch(e => console.error("Background agent setup error:", e));
     await db.query(
       `insert into agents (user_id, openclaw_agent_id, name, agent_type, config)
@@ -148,7 +185,7 @@ authRouter.post('/signup', async (req, res) => {
       user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role ?? 'student' }, 
       accessToken: issueAccessToken(user), 
       existingUser: true,
-      onboardingComplete: !!user.agent_type
+      onboardingComplete: resolveOnboardingComplete(user, user.agent_type ? true : null),
     });
   }
 
@@ -160,6 +197,7 @@ authRouter.post('/signup', async (req, res) => {
   );
 
   const user = created.rows[0];
+  await ensureStudentProfileRecord(user.id);
   ensurePersonalAgent({ userId: user.id, email: user.email }).catch(e => console.error("Background agent setup error:", e));
   await db.query(
     `insert into agents (user_id, openclaw_agent_id, name, agent_type, config)
@@ -191,6 +229,7 @@ authRouter.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'invalid_credentials', message: 'Invalid email or password' });
   }
 
+  await ensureStudentProfileRecord(user.id);
   ensurePersonalAgent({ userId: user.id, email: user.email }).catch(e => console.error("Background agent setup error:", e));
   await db.query(
     `insert into agents (user_id, openclaw_agent_id, name, agent_type, config)
@@ -201,6 +240,6 @@ authRouter.post('/login', async (req, res) => {
   res.json({ 
     user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role ?? 'student' }, 
     accessToken: issueAccessToken(user),
-    onboardingComplete: !!user.agent_type
+    onboardingComplete: resolveOnboardingComplete(user, user.agent_type ? true : null),
   });
 });
