@@ -53,9 +53,6 @@ export function beginGoogleConnect(): string | null {
   return null;
 }
 
-// Fixed stub with 2-arg overload
-}
-
 // Overload: accepts Response OR already-parsed payload record
 export function getApiErrorMessage(response: Response, fallback?: string): string;
 export function getApiErrorMessage(payload: Record<string, unknown>, fallback?: string): string;
