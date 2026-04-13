@@ -1,6 +1,11 @@
 import type { NextConfig } from 'next';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://34.58.17.31:4000';
+const API_URL = (
+  process.env.API_BASE_URL ||
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  'https://34.58.17.31.nip.io'
+).replace(/\/$/, '');
 
 const nextConfig: NextConfig = {
   async rewrites() {
