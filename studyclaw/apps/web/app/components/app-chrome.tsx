@@ -8,19 +8,8 @@ import { Button } from './ui/button';
 import { readStoredSession, clearStoredSession, writeStoredSession, type StoredSession } from '../../lib/session';
 import { apiFetch } from '../../lib/api';
 import { cn } from '../../lib/utils';
-import { LayoutDashboard, Brain, MessageSquare, Settings, LogOut } from 'lucide-react';
-
-const navLinks = [
-  { href: '/dashboard', label: 'Dashboard', shortLabel: 'Board', icon: LayoutDashboard },
-  { href: '/coach', label: 'Backpack', shortLabel: 'Pack', icon: Brain },
-  { href: '/chat', label: 'Chat', shortLabel: 'Chat', icon: MessageSquare },
-  { href: '/settings', label: 'Settings', shortLabel: 'Settings', icon: Settings },
-];
-
-function isActivePath(pathname: string, href: string) {
-  if (href === '/') return pathname === '/';
-  return pathname.startsWith(href);
-}
+import { LayoutDashboard, LogOut } from 'lucide-react';
+import { appNavLinks, isActivePath } from './app-nav';
 
 export default function AppChrome({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -30,7 +19,9 @@ export default function AppChrome({ children }: { children: React.ReactNode }) {
   const isPublicRoute =
     pathname === '/' || pathname === '/auth' || pathname === '/login' || pathname === '/signup';
   const isAuthRoute = pathname === '/auth' || pathname === '/login' || pathname === '/signup';
-  const primaryLinks = session ? navLinks : [{ href: '/', label: 'Home', shortLabel: 'Home', icon: LayoutDashboard }, ...navLinks];
+  const primaryLinks = session
+    ? appNavLinks
+    : [{ href: '/', label: 'Home', shortLabel: 'Home', icon: LayoutDashboard }, ...appNavLinks];
   const brandHref = session ? '/dashboard' : '/';
 
   // Replace stale session values with fresh ones from the API, but preserve

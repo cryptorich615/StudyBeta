@@ -106,25 +106,9 @@ export default function BrowserPage() {
         </p>
       </section>
 
-      <section className="browser-page__construction" aria-label="Under construction notice">
-        <div className="browser-page__construction-stripe" aria-hidden="true">
-          <span>Under construction</span>
-          <span>Under construction</span>
-          <span>Under construction</span>
-          <span>Under construction</span>
-        </div>
-        <div className="browser-page__construction-body">
-          <p className="eyebrow">In Progress</p>
-          <h2 className="section-title">Browser area under construction</h2>
-          <p className="muted-copy">
-            The Browser section is already usable, but this workspace is still being actively built out with more controls, study workflows, and safety features.
-          </p>
-        </div>
-      </section>
-
       <section className="browser-page__library-card">
         <div>
-          <p className="eyebrow">New section</p>
+          <p className="eyebrow">Library</p>
           <h2 className="section-title">StudyClaw eReader</h2>
           <p className="muted-copy">
             Open the combined Library + eReader workspace to browse uploaded documents, resume saved books, and read inside StudyClaw without dropping back to raw file links.
@@ -163,7 +147,7 @@ export default function BrowserPage() {
         </div>
         <div className="browser-page__status-card">
           <p className="browser-page__status-title">Restrictions</p>
-          <p className="browser-page__status-value">{session?.restrictionsEnabled ? 'Enabled (coming soon)' : 'Disabled'}</p>
+          <p className="browser-page__status-value">{session?.restrictionsEnabled ? 'Enabled' : 'Disabled'}</p>
         </div>
       </section>
 

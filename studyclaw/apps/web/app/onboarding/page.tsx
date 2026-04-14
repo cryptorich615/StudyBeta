@@ -714,12 +714,12 @@ function OnboardingPageContent() {
                 <div>
                   <p className="eyebrow">Step 2</p>
                   <h2 className="section-title">Choose your companion</h2>
-                  <p className="onboarding-step-copy">This still sets the default StudyClaw personality tied to your account. Only Dixie and Willow are live today.</p>
+                  <p className="onboarding-step-copy">Choose the default StudyClaw companion tied to your account. You can change this later from settings.</p>
                 </div>
               </div>
 
               <section className="onboarding-agent-section">
-                <div className="onboarding-agent-grid onboarding-agent-grid--triple">
+                <div className="onboarding-agent-grid">
                   {AGENTS.map((agent) => (
                     <button
                       key={agent.key}
@@ -740,27 +740,6 @@ function OnboardingPageContent() {
                       </ul>
                     </button>
                   ))}
-
-                  <button
-                    type="button"
-                    disabled
-                    aria-disabled="true"
-                    className="onboarding-agent-card is-disabled"
-                  >
-                    <span className="onboarding-agent-card__coming-soon">Coming Soon</span>
-                    <div className="onboarding-agent-card__badge-row">
-                      <span className="onboarding-agent-card__emoji">✨</span>
-                      <span className="onboarding-agent-card__tag">Build your own</span>
-                    </div>
-                    <strong>Custom</strong>
-                    <p>Bring your own companion profile and teaching style once custom companions are ready.</p>
-                    <ul>
-                      <li>Personalized tone</li>
-                      <li>Custom reminders</li>
-                      <li>Private teaching style</li>
-                      <li>Workspace-level presets</li>
-                    </ul>
-                  </button>
                 </div>
               </section>
 
