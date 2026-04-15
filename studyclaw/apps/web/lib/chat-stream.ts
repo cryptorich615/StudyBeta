@@ -13,7 +13,7 @@ export async function streamChatRequest(
   body: Record<string, unknown>,
   onEvent: (event: ChatStreamEvent) => void,
 ) {
-  const response = await apiFetch('/api/chat/send-stream', {
+  const response = await apiFetch('/api/chat/stream', {
     method: 'POST',
     body: JSON.stringify(body),
   });
