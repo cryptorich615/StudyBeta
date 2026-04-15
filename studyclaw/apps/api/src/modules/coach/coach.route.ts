@@ -39,6 +39,10 @@ export const coachRouter = Router();
 
 coachRouter.use(requireAuth);
 
+coachRouter.get('/assets', async (_req: AuthedRequest, res) => {
+  res.json({ assets: [] });
+});
+
 coachRouter.get('/knowledge', async (req: AuthedRequest, res) => {
   await ensureCoachKnowledgeTable();
   const result = await db.query(

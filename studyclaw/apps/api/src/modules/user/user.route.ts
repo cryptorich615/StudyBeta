@@ -13,6 +13,7 @@ async function readProfile(userId: string) {
        u.id,
        u.email,
        u.full_name,
+       u.created_at,
        sp.school_name,
        sp.grade_year,
        sp.major,
@@ -38,6 +39,10 @@ userRouter.get('/profile', async (req: AuthedRequest, res) => {
   }
 
   res.json({
+    id: profile.id,
+    email: profile.email,
+    full_name: profile.full_name,
+    created_at: profile.created_at ?? null,
     user: {
       id: profile.id,
       email: profile.email,
@@ -114,6 +119,10 @@ userRouter.post('/profile', async (req: AuthedRequest, res) => {
 
   const profile = await readProfile(req.user!.id);
   res.json({
+    id: profile.id,
+    email: profile.email,
+    full_name: profile.full_name,
+    created_at: profile.created_at ?? null,
     user: {
       id: profile.id,
       email: profile.email,

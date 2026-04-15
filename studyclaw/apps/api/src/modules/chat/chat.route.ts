@@ -152,6 +152,10 @@ chatRouter.get('/threads/:threadId', async (req: AuthedRequest, res) => {
   res.json({ thread: thread.rows[0], messages: messages.rows });
 });
 
+chatRouter.post('/research-note', async (_req: AuthedRequest, res) => {
+  res.json({ saved: false, noteId: null, assetId: null });
+});
+
 // ── STREAMING ────────────────────────────────────────────────
 // Streams SSE from OpenClaw gateway directly to client.
 // Vercel-compatible — returns immediately with a ReadableStream.

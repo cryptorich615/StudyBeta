@@ -40,7 +40,10 @@ function requireParam(value: string | string[] | undefined, name: string) {
 gradesRouter.get('/', async (req: AuthedRequest, res) => {
   await ensurePlatformSchema();
   const snapshot = await listGradeDashboard(req.user!.id);
-  res.json(snapshot);
+  res.json({
+    ...snapshot,
+    reviews: snapshot.wrongAnswers ?? [],
+  });
 });
 
 gradesRouter.post('/courses', async (req: AuthedRequest, res) => {

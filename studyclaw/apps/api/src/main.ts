@@ -128,8 +128,26 @@ app.use(
 );
 app.use(json({ limit: '10mb' }));
 app.use('/api/provider-proxy/minimax', minimaxProxyRouter);
-app.use('/api/health', healthRouter); app.use('/api/auth', authRouter); app.use('/api/onboarding', onboardingRouter); app.use('/api/agent', agentRouter); app.use('/api/chat', chatRouter); app.use('/api/study', studyToolsRouter); app.use('/api/reminders', remindersRouter); app.use('/api/openclaw', openclawRouter); app.use('/api/dashboard', dashboardRouter); app.use('/api/coach', coachRouter); app.use('/api/admin', adminRouter); app.use('/api/user', userRouter); app.use('/api/grades', gradesRouter); app.use('/api/schedule', scheduleRouter);
-app.use('/api/browser', browserRouter); app.use('/api/google', googleRouter); app.use('/api/gmail', gmailRouter); app.use('/api/learn', studyRouter); app.use('/api/exam', examRouter);
+app.use('/api/health', healthRouter);
+app.use('/api/auth', authRouter);
+app.use('/api/onboarding', onboardingRouter);
+app.use('/api/agent', agentRouter);
+app.use('/api/chat', chatRouter);
+app.use('/api/study', studyToolsRouter);
+app.use('/api/study-tools', studyToolsRouter);
+app.use('/api/reminders', remindersRouter);
+app.use('/api/openclaw', openclawRouter);
+app.use('/api/dashboard', dashboardRouter);
+app.use('/api/coach', coachRouter);
+app.use('/api/admin', adminRouter);
+app.use('/api/user', userRouter);
+app.use('/api/grades', gradesRouter);
+app.use('/api/schedule', scheduleRouter);
+app.use('/api/browser', browserRouter);
+app.use('/api/google', googleRouter);
+app.use('/api/gmail', gmailRouter);
+app.use('/api/learn', studyRouter);
+app.use('/api/exam', examRouter);
 
 async function start() {
   await ensurePlatformSchema();

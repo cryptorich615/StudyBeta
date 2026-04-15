@@ -6,6 +6,17 @@ export const openclawRouter = Router();
 
 openclawRouter.use(requireAuth);
 
+const EMPTY_MODEL_SETTINGS = {
+  currentModelKey: null,
+  activeConfigId: null,
+  selectedConfigId: null,
+  configs: [],
+  models: [],
+  activeModel: null,
+  accessProfile: null,
+  managedMiniMaxModelKeys: [],
+};
+
 openclawRouter.get('/settings', async (req: AuthedRequest, res) => {
   try {
     const snapshot = await getOpenClawSettingsSnapshot(req.user!.id);
@@ -16,6 +27,30 @@ openclawRouter.get('/settings', async (req: AuthedRequest, res) => {
       message: error instanceof Error ? error.message : 'Failed to load OpenClaw settings',
     });
   }
+});
+
+openclawRouter.get('/model-settings', async (_req: AuthedRequest, res) => {
+  res.json(EMPTY_MODEL_SETTINGS);
+});
+
+openclawRouter.post('/model-settings', async (_req: AuthedRequest, res) => {
+  res.json(EMPTY_MODEL_SETTINGS);
+});
+
+openclawRouter.post('/model-settings/:configId/activate', async (_req: AuthedRequest, res) => {
+  res.json(EMPTY_MODEL_SETTINGS);
+});
+
+openclawRouter.post('/cron', async (_req: AuthedRequest, res) => {
+  res.json({ triggered: true });
+});
+
+openclawRouter.get('/telegram', async (_req: AuthedRequest, res) => {
+  res.json({ telegramConnected: false, pendingApprovals: [] });
+});
+
+openclawRouter.post('/telegram/approve', async (_req: AuthedRequest, res) => {
+  res.json({ success: true });
 });
 
 openclawRouter.patch('/skills/:skillName', async (req: AuthedRequest, res) => {

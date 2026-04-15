@@ -210,7 +210,7 @@ googleRouter.get('/calendar', async (req: AuthedRequest, res) => {
       userId: req.user!.id,
       days,
     });
-    const events = await listUpcomingCalendarEvents(req.user!.id, days * 10, { windowDays: days }); // rough max per day
+    const events = await listUpcomingCalendarEvents(req.user!.id, days * 10, { windowDays: days });
     console.info('[google] calendar events fetched', {
       userId: req.user!.id,
       count: events.length,

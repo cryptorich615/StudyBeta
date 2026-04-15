@@ -52,6 +52,52 @@ function normalizeQuestionType(value: string | undefined) {
     return normalized.includes('fill') ? 'fill_in_the_blank' : 'multiple_choice';
 }
 
+async function listFlashcardSets(userId: string) {
+    const result = await db.query(
+        `select
+            fs.id,
+            fs.title,
+            fs.created_at,
+            count(f.id)::int as card_count
+         from flashcard_sets fs
+         left join flashcards f on f.set_id = fs.id
+         where fs.user_id = $1
+         group by fs.id
+         order by fs.created_at desc`,
+        [userId]
+    );
+
+    return result.rows;
+}
+
+async function listQuizzes(userId: string) {
+    const result = await db.query(
+        `select
+            q.id,
+            q.title,
+            q.created_at,
+            count(qq.id)::int as question_count
+         from quizzes q
+         left join quiz_questions qq on qq.quiz_id = q.id
+         where q.user_id = $1
+         group by q.id
+         order by q.created_at desc`,
+        [userId]
+    );
+
+    return result.rows;
+}
+
+studyToolsRouter.get('/flashcard-sets', async (req: AuthedRequest, res) => {
+    const sets = await listFlashcardSets(req.user!.id);
+    res.json({ sets });
+});
+
+studyToolsRouter.get('/quizzes', async (req: AuthedRequest, res) => {
+    const quizzes = await listQuizzes(req.user!.id);
+    res.json({ quizzes });
+});
+
 studyToolsRouter.get('/library', async (req: AuthedRequest, res) => {
     const [setsResult, cardsResult, quizzesResult, questionsResult] = await Promise.all([
         db.query(
