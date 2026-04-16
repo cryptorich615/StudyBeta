@@ -29,10 +29,15 @@ function preferSecureApiBase(url: string) {
 }
 
 export function getApiBaseUrl() {
+  // Client-side: use the configured API base URL (Cloudflare tunnel or nip.io)
+  // so requests go directly to the backend, not through Vercel
   if (typeof window !== 'undefined') {
+    const envUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '');
+    if (envUrl) return preferSecureApiBase(envUrl);
     return window.location.origin.replace(/\/$/, '');
   }
 
+  // Server-side: use the configured API base URL
   const envUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '');
   if (envUrl) return preferSecureApiBase(envUrl);
 
