@@ -833,6 +833,7 @@ export default function ChatPage() {
       userMsg: ChatMessage;
       persistedUserMessage: ChatMessage;
       baselineMessageCount: number;
+      pendingHandled?: boolean;
     }
   ) {
     if (event.type === 'status') {
@@ -875,7 +876,12 @@ export default function ChatPage() {
     if (event.type === 'pending') {
       setPendingDocuments([]);
       setLiveAssistant(null);
-      setMessages((prev) => [...prev.filter((m) => m.id !== context.userMsg.id), context.persistedUserMessage]);
+      // Only add persistedUserMessage if it's not already in the array (prevents duplicates on retried events)
+      setMessages((prev) => {
+        const alreadyPresent = prev.some((m) => m.id === context.persistedUserMessage.id);
+        const filtered = prev.filter((m) => m.id !== context.userMsg.id);
+        return alreadyPresent ? filtered : [...filtered, context.persistedUserMessage];
+      });
       setFeedback(event.message?.trim() ? event.message : 'Still working on that response. It should appear in the chat shortly.');
       if (event.threadId) {
         setActiveThreadId(event.threadId);
@@ -905,11 +911,16 @@ export default function ChatPage() {
       setPendingDocuments([]);
       setLiveAssistant(null);
       setLiveProgress([]);
-      setMessages((prev) => [
-        ...prev.filter((m) => m.id !== context.userMsg.id),
-        context.persistedUserMessage,
-        normalizedAssistantEntry,
-      ]);
+      setMessages((prev) => {
+        const alreadyHasAssistant = prev.some(
+          (m) => m.role === 'assistant' && m.id === normalizedAssistantEntry.id
+        );
+        const alreadyHasPersisted = prev.some((m) => m.id === context.persistedUserMessage.id);
+        let next = prev.filter((m) => m.id !== context.userMsg.id && m.id !== normalizedAssistantEntry.id);
+        if (!alreadyHasPersisted) next = [...next, context.persistedUserMessage];
+        if (!alreadyHasAssistant) next = [...next, normalizedAssistantEntry];
+        return next;
+      });
       setFeedback('');
       void loadThreads(nextThreadId ?? undefined).catch(() => undefined);
       return;
@@ -1226,14 +1237,19 @@ export default function ChatPage() {
           })),
         },
         (event) => {
+          let pendingHandled = false;
           if (event.type === 'pending') {
+            pendingHandled = true;
             receivedPending = true;
             pendingThreadId = typeof event.threadId === 'string' ? event.threadId : activeThreadId;
+            // Dismiss the typing bubble — WORKING LIVE takes over from here
+            setIsTyping(false);
           }
           handleChatStreamEvent(event, {
             userMsg,
             persistedUserMessage,
             baselineMessageCount,
+            pendingHandled,
           });
         }
       );
