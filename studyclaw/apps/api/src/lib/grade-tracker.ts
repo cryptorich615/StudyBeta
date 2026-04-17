@@ -98,6 +98,29 @@ type GradeItemRow = {
   created_at: string;
 };
 
+function isMissingRelationError(error: unknown, relationName: string) {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const candidate = error as { code?: string; message?: string };
+  return candidate.code === '42P01' && typeof candidate.message === 'string' && candidate.message.includes(relationName);
+}
+
+async function listGradeCourseSettings(userId: string, courseId?: string) {
+  try {
+    if (courseId) {
+      return await db.query(`select * from grade_course_settings where user_id = $1 and course_id = $2 limit 1`, [userId, courseId]);
+    }
+    return await db.query(`select * from grade_course_settings where user_id = $1`, [userId]);
+  } catch (error) {
+    if (isMissingRelationError(error, 'grade_course_settings')) {
+      return { rows: [] as any[] };
+    }
+    throw error;
+  }
+}
+
 function normalizeName(value: string) {
   return value.trim().replace(/\s+/g, ' ');
 }
@@ -453,29 +476,36 @@ export async function upsertGradeCourseSettings(input: {
     gradingScale: input.gradingScale ?? undefined,
   });
 
-  const result = await db.query(
-    `insert into grade_course_settings (
-       user_id, course_id, calculation_mode, category_weights_json, final_exam_weight, grading_scale_json
-     )
-     values ($1, $2, $3, $4, $5, $6)
-     on conflict (user_id, course_id) do update set
-       calculation_mode = excluded.calculation_mode,
-       category_weights_json = excluded.category_weights_json,
-       final_exam_weight = excluded.final_exam_weight,
-       grading_scale_json = excluded.grading_scale_json,
-       updated_at = now()
-     returning *`,
-    [
-      input.userId,
-      course.id,
-      settings.calculationMode,
-      JSON.stringify(settings.categoryWeights),
-      settings.finalExamWeight,
-      JSON.stringify(settings.gradingScale),
-    ]
-  );
+  try {
+    const result = await db.query(
+      `insert into grade_course_settings (
+         user_id, course_id, calculation_mode, category_weights_json, final_exam_weight, grading_scale_json
+       )
+       values ($1, $2, $3, $4, $5, $6)
+       on conflict (user_id, course_id) do update set
+         calculation_mode = excluded.calculation_mode,
+         category_weights_json = excluded.category_weights_json,
+         final_exam_weight = excluded.final_exam_weight,
+         grading_scale_json = excluded.grading_scale_json,
+         updated_at = now()
+       returning *`,
+      [
+        input.userId,
+        course.id,
+        settings.calculationMode,
+        JSON.stringify(settings.categoryWeights),
+        settings.finalExamWeight,
+        JSON.stringify(settings.gradingScale),
+      ]
+    );
 
-  return { course, settings: result.rows[0] };
+    return { course, settings: result.rows[0] };
+  } catch (error) {
+    if (isMissingRelationError(error, 'grade_course_settings')) {
+      return { course, settings: null };
+    }
+    throw error;
+  }
 }
 
 export async function createGradeItem(userId: string, input: GradeItemInput) {
@@ -641,7 +671,7 @@ export async function getCourseGradeSummary(userId: string, courseId: string): P
   const [courseResult, itemsResult, settingsResult] = await Promise.all([
     db.query(`select id, name from subjects where id = $1 and user_id = $2 limit 1`, [courseId, userId]),
     db.query(`select * from grade_items where user_id = $1 and course_id = $2 order by occurred_on desc nulls last, created_at desc`, [userId, courseId]),
-    db.query(`select * from grade_course_settings where user_id = $1 and course_id = $2 limit 1`, [userId, courseId]),
+    listGradeCourseSettings(userId, courseId),
   ]);
 
   const course = courseResult.rows[0];
@@ -662,7 +692,7 @@ export async function listGradeDashboard(userId: string) {
   const [coursesResult, itemsResult, settingsResult, reviewsResult] = await Promise.all([
     db.query(`select id, name from subjects where user_id = $1 order by created_at asc`, [userId]),
     db.query(`select * from grade_items where user_id = $1 order by occurred_on desc nulls last, created_at desc`, [userId]),
-    db.query(`select * from grade_course_settings where user_id = $1`, [userId]),
+    listGradeCourseSettings(userId),
     db.query(
       `select war.*, s.name as course_name
        from wrong_answer_reviews war

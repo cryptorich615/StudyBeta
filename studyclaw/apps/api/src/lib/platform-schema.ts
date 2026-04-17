@@ -72,6 +72,20 @@ const statements = [
     )
   `,
   `
+    create table if not exists grade_course_settings (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid not null references users(id) on delete cascade,
+      course_id uuid not null references subjects(id) on delete cascade,
+      calculation_mode text not null default 'points' check (calculation_mode in ('points', 'weighted')),
+      category_weights_json jsonb not null default '{}'::jsonb,
+      final_exam_weight numeric,
+      grading_scale_json jsonb not null default '[]'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      unique (user_id, course_id)
+    )
+  `,
+  `
     create index if not exists idx_agents_user_id on agents(user_id)
   `,
   `
@@ -87,6 +101,12 @@ const statements = [
     create index if not exists idx_agent_actions_created_at on agent_actions(created_at desc)
   `,
   `
+    create index if not exists idx_grade_course_settings_user_id on grade_course_settings(user_id)
+  `,
+  `
+    create index if not exists idx_grade_course_settings_course_id on grade_course_settings(course_id)
+  `,
+  `
     do $$
     begin
       if not exists (select 1 from pg_trigger where tgname = 'trg_agents_updated_at') then
@@ -97,6 +117,9 @@ const statements = [
       end if;
       if not exists (select 1 from pg_trigger where tgname = 'trg_admin_agents_updated_at') then
         create trigger trg_admin_agents_updated_at before update on admin_agents for each row execute function set_updated_at();
+      end if;
+      if not exists (select 1 from pg_trigger where tgname = 'trg_grade_course_settings_updated_at') then
+        create trigger trg_grade_course_settings_updated_at before update on grade_course_settings for each row execute function set_updated_at();
       end if;
     end $$;
   `,
