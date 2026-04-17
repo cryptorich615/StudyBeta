@@ -29,6 +29,26 @@ function normalizeAssistantIdentity(replyText: string, personaName: string) {
     .replace(/\bStudyClaw\b/g, trimmedPersona);
 }
 
+function extractStreamText(event: any) {
+  if (typeof event?.delta === 'string' && event.delta) {
+    return event.delta;
+  }
+
+  if (typeof event?.text === 'string' && event.text) {
+    return event.text;
+  }
+
+  if (typeof event?.part?.text === 'string' && event.part.text) {
+    return event.part.text;
+  }
+
+  if (typeof event?.item?.content?.[0]?.text === 'string' && event.item.content[0].text) {
+    return event.item.content[0].text;
+  }
+
+  return '';
+}
+
 async function syncBootstrapProfile(userId: string, threadId: string, modelKey?: string) {
   const userResult = await db.query(`select email from users where id = $1`, [userId]);
   const userEmail = userResult.rows[0]?.email ?? `${userId}@local.invalid`;
@@ -249,6 +269,14 @@ chatRouter.post('/stream', async (req: AuthedRequest, res) => {
   const stream = new ReadableStream<string>({
     async start(controller) {
       try {
+        controller.enqueue(
+          `event: pending\ndata:${JSON.stringify({
+            type: 'pending',
+            threadId: activeThreadId,
+            message: 'Routing your message to Willow now.',
+          })}\n\n`
+        );
+
         const response = await fetch(`${baseUrl}/v1/responses`, {
           method: 'POST',
           headers: {
@@ -298,8 +326,12 @@ chatRouter.post('/stream', async (req: AuthedRequest, res) => {
                 // Extract text from content events for DB save
                 try {
                   const event = JSON.parse(data);
-                  if (event.type === 'response.content_part.added') {
-                    assistantText += event.item?.content?.[0]?.text ?? '';
+                  if (
+                    event.type === 'response.content_part.added' ||
+                    event.type === 'response.output_text.delta' ||
+                    event.type === 'response.output_text.done'
+                  ) {
+                    assistantText += extractStreamText(event);
                   }
                 } catch { /* ignore */ }
               }
@@ -315,8 +347,12 @@ chatRouter.post('/stream', async (req: AuthedRequest, res) => {
               controller.enqueue(`data:${data}\n`);
               try {
                 const event = JSON.parse(data);
-                if (event.type === 'response.content_part.added') {
-                  assistantText += event.item?.content?.[0]?.text ?? '';
+                if (
+                  event.type === 'response.content_part.added' ||
+                  event.type === 'response.output_text.delta' ||
+                  event.type === 'response.output_text.done'
+                ) {
+                  assistantText += extractStreamText(event);
                 }
               } catch { /* ignore */ }
             }
