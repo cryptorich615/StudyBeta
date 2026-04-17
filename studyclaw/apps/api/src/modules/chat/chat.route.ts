@@ -20,13 +20,19 @@ const openclaw = new OpenClawClient();
 function normalizeAssistantIdentity(replyText: string, personaName: string) {
   const trimmedPersona = personaName.trim();
   if (!trimmedPersona || trimmedPersona === 'StudyClaw') {
-    return replyText;
+    return stripSyntheticOpenClawSuffix(replyText);
   }
 
-  return replyText
+  return stripSyntheticOpenClawSuffix(
+    replyText
     .replace(/\b(My name is|I(?:'| a)m)\s+StudyClaw\b/gi, (match, prefix: string) => `${prefix} ${trimmedPersona}`)
     .replace(/\bcall me\s+StudyClaw\b/gi, `call me ${trimmedPersona}`)
-    .replace(/\bStudyClaw\b/g, trimmedPersona);
+    .replace(/\bStudyClaw\b/g, trimmedPersona)
+  );
+}
+
+function stripSyntheticOpenClawSuffix(text: string) {
+  return text.replace(/\s*No response from OpenClaw\.\s*$/i, '').trimEnd();
 }
 
 function extractStreamText(event: any) {
@@ -369,7 +375,7 @@ chatRouter.post('/stream', async (req: AuthedRequest, res) => {
           db.query(
             `insert into chat_messages (thread_id, role, content, metadata_json)
              values ($1, 'assistant', $2, $3)`,
-            [activeThreadId, assistantText, JSON.stringify({ streamed: true })]
+            [activeThreadId, stripSyntheticOpenClawSuffix(normalizeAssistantIdentity(assistantText, agent.persona_name)), JSON.stringify({ streamed: true })]
           ).catch((err) => console.error('Stream save error:', err));
         }
       }

@@ -70,6 +70,10 @@ function extractFinalText(parsed: any, accumulatedText: string) {
   return texts.join('');
 }
 
+function stripSyntheticOpenClawSuffix(text: string) {
+  return text.replace(/\s*No response from OpenClaw\.\s*$/i, '').trimEnd();
+}
+
 export async function streamChatRequest(
   body: Record<string, unknown>,
   onEvent: (event: ChatStreamEvent) => void,
@@ -166,7 +170,7 @@ export async function streamChatRequest(
           onEvent({ type: 'assistant_start', createdAt: new Date().toISOString() });
 
         } else if (parsed.type === 'response.completed') {
-          const finalText = extractFinalText(parsed, accumulatedText);
+          const finalText = stripSyntheticOpenClawSuffix(extractFinalText(parsed, accumulatedText));
           // Build the final payload from accumulated text + threadId
           const payload: Record<string, unknown> = {
             assistantMessage: finalText,
@@ -212,13 +216,14 @@ export async function streamChatRequest(
   }
 
   if (accumulatedText.trim()) {
+    const finalText = stripSyntheticOpenClawSuffix(accumulatedText);
     debugChatStream('stream closed without explicit completion event, finalizing from accumulated text', {
-      length: accumulatedText.length,
+      length: finalText.length,
     });
     onEvent({
       type: 'assistant_final',
       payload: {
-        assistantMessage: accumulatedText,
+        assistantMessage: finalText,
         threadId: pendingThreadId,
       },
     });
