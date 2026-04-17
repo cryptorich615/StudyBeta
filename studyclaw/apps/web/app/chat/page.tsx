@@ -1225,6 +1225,7 @@ export default function ChatPage() {
     try {
       let pendingThreadId: string | null = null;
       let receivedPending = false;
+      let receivedAssistantReply = false;
       await streamChatRequest(
         {
           threadId: activeThreadId,
@@ -1244,6 +1245,8 @@ export default function ChatPage() {
             pendingThreadId = typeof event.threadId === 'string' ? event.threadId : activeThreadId;
             // Dismiss the typing bubble — WORKING LIVE takes over from here
             setIsTyping(false);
+          } else if (event.type === 'assistant_delta' || event.type === 'assistant_final') {
+            receivedAssistantReply = true;
           }
           handleChatStreamEvent(event, {
             userMsg,
@@ -1254,7 +1257,7 @@ export default function ChatPage() {
         }
       );
 
-      if (receivedPending && pendingThreadId) {
+      if (receivedPending && pendingThreadId && !receivedAssistantReply) {
         const resolved = await waitForAssistantReply(pendingThreadId, baselineMessageCount);
         if (resolved) {
           setFeedback('');
