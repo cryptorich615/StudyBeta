@@ -140,6 +140,14 @@ type NativeFileReaderDocument = {
   format: 'text' | 'word' | 'spreadsheet';
   content: string;
   summary: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+type DocumentBlockType = 'heading' | 'subheading' | 'paragraph' | 'bullet' | 'checklist' | 'quote';
+type DocumentBlock = {
+  type: DocumentBlockType;
+  text: string;
+  checked?: boolean;
 };
 
 type Props = {
@@ -158,6 +166,16 @@ type WorkspaceItem =
 
 const CHAT_DRAFT_KEY = 'studyclaw-chat-draft';
 const EREADER_LIBRARY_KEY = 'ereader_books';
+
+function getColumnLabel(index: number) {
+  let current = index;
+  let label = '';
+  while (current >= 0) {
+    label = String.fromCharCode(65 + (current % 26)) + label;
+    current = Math.floor(current / 26) - 1;
+  }
+  return label;
+}
 
 function inferFormat(asset: ReaderAsset) {
   const attachment = Array.isArray(asset.metadata?.attachments) ? asset.metadata.attachments[0] : null;
@@ -247,6 +265,125 @@ function formatBytes(value?: number | null) {
 function formatTimestamp(value?: string | null) {
   if (!value) return '—';
   return new Date(value).toLocaleString();
+}
+
+function getNativeDocumentBlocks(file: NativeFileReaderDocument) {
+  const stored = Array.isArray(file.metadata?.documentBlocks) ? file.metadata.documentBlocks : [];
+  if (stored.length) {
+    return stored
+      .filter((block) => block && typeof block === 'object')
+      .map((block) => {
+        const entry = block as Record<string, unknown>;
+        return {
+          type: String(entry.type ?? 'paragraph') as DocumentBlockType,
+          text: String(entry.text ?? '').trim(),
+          checked: Boolean(entry.checked),
+        };
+      })
+      .filter((block) => block.text) as DocumentBlock[];
+  }
+
+  return String(file.content ?? '')
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return null;
+      if (trimmed.startsWith('# ')) return { type: 'heading' as const, text: trimmed.slice(2).trim() };
+      if (trimmed.startsWith('## ')) return { type: 'subheading' as const, text: trimmed.slice(3).trim() };
+      if (trimmed.startsWith('- [ ] ')) return { type: 'checklist' as const, text: trimmed.slice(6).trim(), checked: false };
+      if (trimmed.startsWith('- [x] ') || trimmed.startsWith('- [X] ')) return { type: 'checklist' as const, text: trimmed.slice(6).trim(), checked: true };
+      if (trimmed.startsWith('- ')) return { type: 'bullet' as const, text: trimmed.slice(2).trim() };
+      if (trimmed.startsWith('> ')) return { type: 'quote' as const, text: trimmed.slice(2).trim() };
+      return { type: 'paragraph' as const, text: trimmed };
+    })
+    .filter((block) => Boolean(block && block.text)) as DocumentBlock[];
+}
+
+function getNativeSheetColumns(file: NativeFileReaderDocument, colCount = 0) {
+  const stored = Array.isArray(file.metadata?.sheetColumns) ? file.metadata.sheetColumns : [];
+  return Array.from({ length: colCount }, (_, index) => {
+    const candidate = stored[index];
+    return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : `Column ${index + 1}`;
+  });
+}
+
+function parseNativeSheetGrid(file: NativeFileReaderDocument) {
+  try {
+    const parsed = JSON.parse(file.content || '[]');
+    if (Array.isArray(parsed) && parsed.every((row) => Array.isArray(row))) {
+      return parsed.map((row) => (row as unknown[]).map((cell) => String(cell ?? '')));
+    }
+  } catch {
+    // fall back below
+  }
+  return String(file.content ?? '')
+    .split('\n')
+    .filter(Boolean)
+    .map((row) => row.split('\t').map((cell) => cell.trim()));
+}
+
+function parseCellReference(ref: string) {
+  const match = ref.match(/^([A-Z]+)(\d+)$/);
+  if (!match) return null;
+  const [, letters, rowPart] = match;
+  let colIndex = 0;
+  for (const letter of letters) {
+    colIndex = colIndex * 26 + (letter.charCodeAt(0) - 64);
+  }
+  return { rowIndex: Number(rowPart) - 1, colIndex: colIndex - 1 };
+}
+
+function getNumericCellValue(grid: string[][], ref: string, seen = new Set<string>()) {
+  if (seen.has(ref)) return 0;
+  seen.add(ref);
+  const parsed = parseCellReference(ref);
+  if (!parsed) return 0;
+  const raw = String(grid[parsed.rowIndex]?.[parsed.colIndex] ?? '').trim();
+  if (!raw) return 0;
+  if (raw.startsWith('=')) {
+    const evaluated = evaluateFormula(raw, grid, seen);
+    return typeof evaluated === 'number' && Number.isFinite(evaluated) ? evaluated : 0;
+  }
+  const numeric = Number(raw.replace(/,/g, ''));
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function evaluateRangeFormula(fn: string, startRef: string, endRef: string, grid: string[][], seen = new Set<string>()) {
+  const start = parseCellReference(startRef);
+  const end = parseCellReference(endRef);
+  if (!start || !end) return 0;
+  const values: number[] = [];
+  for (let rowIndex = Math.min(start.rowIndex, end.rowIndex); rowIndex <= Math.max(start.rowIndex, end.rowIndex); rowIndex += 1) {
+    for (let colIndex = Math.min(start.colIndex, end.colIndex); colIndex <= Math.max(start.colIndex, end.colIndex); colIndex += 1) {
+      values.push(getNumericCellValue(grid, `${getColumnLabel(colIndex)}${rowIndex + 1}`, new Set(seen)));
+    }
+  }
+  if (!values.length) return 0;
+  if (fn === 'AVG') return values.reduce((sum, value) => sum + value, 0) / values.length;
+  if (fn === 'MIN') return Math.min(...values);
+  if (fn === 'MAX') return Math.max(...values);
+  return values.reduce((sum, value) => sum + value, 0);
+}
+
+function evaluateFormula(value: string, grid: string[][], seen = new Set<string>()) {
+  if (!value.startsWith('=')) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : value;
+  }
+
+  try {
+    let expression = value.slice(1).toUpperCase();
+    expression = expression.replace(/(SUM|AVG|MIN|MAX)\(([A-Z]+\d+):([A-Z]+\d+)\)/g, (_, fn: string, startRef: string, endRef: string) => {
+      const result = evaluateRangeFormula(fn, startRef, endRef, grid, new Set(seen));
+      return String(result);
+    });
+    expression = expression.replace(/\b([A-Z]+\d+)\b/g, (_whole: string, ref: string) => String(getNumericCellValue(grid, ref, new Set(seen))));
+    if (/[^0-9+\-*/().\s]/.test(expression)) return '#ERR';
+    const result = Function(`return (${expression});`)();
+    return Number.isFinite(result) ? result : '#ERR';
+  } catch {
+    return '#ERR';
+  }
 }
 
 function labelForGoogleMimeType(mimeType?: string) {
@@ -512,6 +649,18 @@ export default function DocumentReaderWorkspace({
 
   const activePages = useMemo(() => splitPages(activeAsset?.content ?? ''), [activeAsset?.content]);
   const activePage = activePages[pageIndex] ?? '';
+  const activeNativeBlocks = useMemo(
+    () => (activeNativeFile && activeNativeFile.fileType !== 'spreadsheet' ? getNativeDocumentBlocks(activeNativeFile) : []),
+    [activeNativeFile]
+  );
+  const activeNativeSheetGrid = useMemo(
+    () => (activeNativeFile?.fileType === 'spreadsheet' ? parseNativeSheetGrid(activeNativeFile) : []),
+    [activeNativeFile]
+  );
+  const activeNativeSheetColumns = useMemo(
+    () => (activeNativeFile?.fileType === 'spreadsheet' ? getNativeSheetColumns(activeNativeFile, activeNativeSheetGrid[0]?.length ?? 0) : []),
+    [activeNativeFile, activeNativeSheetGrid]
+  );
   const activeDocumentModifiedAt =
     activeAsset?.readerState.lastOpenedAt ||
     activeAsset?.updatedAt ||
@@ -769,6 +918,7 @@ export default function DocumentReaderWorkspace({
         format: file.fileType === 'spreadsheet' ? 'spreadsheet' : file.fileType === 'doc' ? 'word' : 'text',
         content: file.content || '',
         summary: null,
+        metadata: file.metadata ?? {},
       });
       setMobileExplorerOpen(false);
     } catch (nextError) {
@@ -1380,6 +1530,14 @@ export default function DocumentReaderWorkspace({
                   <span>Support</span>
                   <strong>{activeNativeFile.supported ? 'Ready to read' : 'Preview only'}</strong>
                 </article>
+                <article>
+                  <span>Structure</span>
+                  <strong>
+                    {activeNativeFile.fileType === 'spreadsheet'
+                      ? `${activeNativeSheetGrid.length} rows · ${activeNativeSheetColumns.length} columns`
+                      : `${activeNativeBlocks.length || splitPages(activeNativeFile.content).length || 1} content blocks`}
+                  </strong>
+                </article>
               </div>
 
               <div
@@ -1391,14 +1549,73 @@ export default function DocumentReaderWorkspace({
                   maxWidth: '880px',
                 }}
               >
-                {splitPages(activeNativeFile.content).map((page, index) => (
-                  <article key={`${activeNativeFile.id}-page-${index}`} className="reader-workspace__page">
-                    <header><span>Page {index + 1}</span></header>
-                    {page.split('\n').filter(Boolean).map((paragraph, paragraphIndex) => (
-                      <p key={`${index}-${paragraphIndex}`}>{paragraph}</p>
+                {activeNativeFile.fileType === 'spreadsheet' ? (
+                  <section className="space-y-4">
+                    <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--panel-2)] p-4">
+                      <p className="eyebrow">Study sheet preview</p>
+                      <h3 className="section-title">Structured sheet data</h3>
+                      <p className="muted-copy">Column headers and formulas from Drive are preserved here so you can read the sheet without losing its structure.</p>
+                    </div>
+                    <div className="overflow-auto rounded-2xl border border-[color:var(--line)] bg-white">
+                      <table className="min-w-full border-collapse text-sm">
+                        <thead>
+                          <tr className="bg-[color:var(--panel-2)]">
+                            <th className="border-b border-r border-[color:var(--line)] px-3 py-2 text-left text-xs uppercase tracking-[0.14em] text-[color:var(--muted)]">#</th>
+                            {activeNativeSheetColumns.map((columnName, colIndex) => (
+                              <th key={columnName + colIndex} className="border-b border-r border-[color:var(--line)] px-3 py-2 text-left">
+                                <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--muted)]">{getColumnLabel(colIndex)}</div>
+                                <div className="text-sm font-semibold">{columnName}</div>
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {activeNativeSheetGrid.map((row, rowIndex) => (
+                            <tr key={`${activeNativeFile.id}-row-${rowIndex}`}>
+                              <td className="border-b border-r border-[color:var(--line)] bg-[color:var(--panel-2)] px-3 py-2 text-xs text-[color:var(--muted)]">{rowIndex + 1}</td>
+                              {row.map((cell, colIndex) => (
+                                <td key={`${rowIndex}-${colIndex}`} className="border-b border-r border-[color:var(--line)] px-3 py-2 align-top">
+                                  <div>{cell || '—'}</div>
+                                  {cell.trim().startsWith('=') ? (
+                                    <div className="mt-1 text-xs text-[color:var(--muted)]">
+                                      Result: {String(evaluateFormula(cell.trim(), activeNativeSheetGrid))}
+                                    </div>
+                                  ) : null}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                ) : (
+                  <section className="space-y-4">
+                    {activeNativeBlocks.length ? activeNativeBlocks.map((block, index) => (
+                      <article key={`${activeNativeFile.id}-block-${index}`} className="reader-workspace__page">
+                        {block.type === 'heading' ? <h2 className="text-2xl font-semibold">{block.text}</h2> : null}
+                        {block.type === 'subheading' ? <h3 className="text-xl font-semibold">{block.text}</h3> : null}
+                        {block.type === 'paragraph' ? <p>{block.text}</p> : null}
+                        {block.type === 'bullet' ? (
+                          <p className="flex items-start gap-2"><span>•</span><span>{block.text}</span></p>
+                        ) : null}
+                        {block.type === 'checklist' ? (
+                          <p className="flex items-start gap-2"><span>{block.checked ? '☑' : '☐'}</span><span>{block.text}</span></p>
+                        ) : null}
+                        {block.type === 'quote' ? (
+                          <blockquote className="border-l-4 border-[color:var(--line)] pl-4 italic text-[color:var(--muted)]">{block.text}</blockquote>
+                        ) : null}
+                      </article>
+                    )) : splitPages(activeNativeFile.content).map((page, index) => (
+                      <article key={`${activeNativeFile.id}-page-${index}`} className="reader-workspace__page">
+                        <header><span>Page {index + 1}</span></header>
+                        {page.split('\n').filter(Boolean).map((paragraph, paragraphIndex) => (
+                          <p key={`${index}-${paragraphIndex}`}>{paragraph}</p>
+                        ))}
+                      </article>
                     ))}
-                  </article>
-                ))}
+                  </section>
+                )}
               </div>
             </section>
 
