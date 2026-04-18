@@ -47,6 +47,12 @@ type DashboardData = {
       connected: boolean;
       eventCount: number;
     }>;
+    documentSources?: Array<{
+      key: string;
+      label: string;
+      connected: boolean;
+      itemCount: number;
+    }>;
   };
   studentAgent?: {
     name: string;
@@ -148,6 +154,7 @@ function normalizeDashboardData(payload: Partial<DashboardData>): DashboardData 
       googleEmail: payload.integrations?.googleEmail ?? null,
       nativeCalendarReady: payload.integrations?.nativeCalendarReady ?? true,
       sources: payload.integrations?.sources ?? [],
+      documentSources: payload.integrations?.documentSources ?? [],
     },
     studentAgent: payload.studentAgent ?? null,
     counts: {
@@ -690,6 +697,15 @@ function ContinueReadingPanel({ data }: Pick<DashboardRenderProps, 'data'>) {
           <h2 className="section-title">Continue where you left off</h2>
         </div>
       </div>
+      {(data?.integrations.documentSources ?? []).length ? (
+        <div className="mb-3 flex flex-wrap gap-2">
+          {data?.integrations.documentSources?.map((source) => (
+            <span key={source.key} className={`insight-chip ${source.connected ? '' : 'is-muted'}`}>
+              {source.label} · {source.itemCount}
+            </span>
+          ))}
+        </div>
+      ) : null}
       {(data?.continueReading ?? []).length ? (
         <div className="stack-list">
           {data?.continueReading.map((item) => (

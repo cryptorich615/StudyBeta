@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { db } from '../../lib/db';
 import { requireAuth, type AuthedRequest } from '../../lib/auth';
-import { getGoogleConnectionStatus, listUpcomingCalendarEvents } from '../../lib/google-service';
+import { getGoogleConnectionStatus, listRecentDriveFiles, listUpcomingCalendarEvents } from '../../lib/google-service';
 import { ensurePlatformSchema } from '../../lib/platform-schema';
 
 type ReminderRow = {
@@ -123,6 +123,7 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
     googleStatus,
     nativeCalendarResult,
     nativeFilesResult,
+    googleDriveFiles,
   ] = await Promise.all([
     db.query(
       `select id, title, type, status, reminder_at, metadata_json
@@ -170,6 +171,9 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
        limit 6`,
       [userId]
     ).catch(() => ({ rows: [] })),
+    getGoogleConnectionStatus(userId)
+      .then((status) => (status.connected ? listRecentDriveFiles(userId, 5).catch(() => []) : []))
+      .catch(() => []),
   ]);
 
   const reminders = (remindersResult.rows as ReminderRow[])
@@ -260,6 +264,20 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
           label: 'Google Calendar',
           connected: googleStatus.connected,
           eventCount: googleCalendarEvents.length,
+        },
+      ],
+      documentSources: [
+        {
+          key: 'studyclaw',
+          label: 'StudyClaw Drive',
+          connected: true,
+          itemCount: nativeFilesResult.rows.length,
+        },
+        {
+          key: 'google',
+          label: 'Google Drive',
+          connected: googleStatus.connected,
+          itemCount: googleDriveFiles.length,
         },
       ],
     },

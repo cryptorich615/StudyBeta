@@ -1,11 +1,40 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { ExternalLink, FileSpreadsheet, FileText, NotebookPen, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import {
+  CheckSquare,
+  Columns3,
+  ExternalLink,
+  FileSpreadsheet,
+  FileText,
+  Heading1,
+  List,
+  NotebookPen,
+  PanelTop,
+  Plus,
+  Quote,
+  RefreshCw,
+  Rows3,
+  Save,
+  Trash2,
+} from 'lucide-react';
 import { apiFetch, beginGoogleConnect, readApiPayload } from '../../lib/api';
 
 type FileType = 'doc' | 'spreadsheet' | 'note';
+type EditorMode = 'write' | 'preview' | 'split';
+type SheetCellGrid = string[][];
+type DraftMetadata = {
+  editorMode?: EditorMode;
+  rowCount?: number;
+  colCount?: number;
+} & Record<string, unknown>;
+type FileDraft = {
+  name: string;
+  fileType: FileType;
+  content: string;
+  metadata: DraftMetadata;
+};
 
 type NativeFile = {
   id: string;
@@ -35,18 +64,14 @@ type GoogleDriveFile = {
   webViewLink?: string;
 };
 
-const FILE_TYPE_META: Record<FileType, { label: string; icon: typeof FileText }> = {
-  doc: { label: 'Doc', icon: FileText },
-  spreadsheet: { label: 'Spreadsheet', icon: FileSpreadsheet },
-  note: { label: 'Note', icon: NotebookPen },
+const FILE_TYPE_META: Record<FileType, { label: string; icon: typeof FileText; emptyName: string }> = {
+  doc: { label: 'Doc', icon: FileText, emptyName: 'Untitled study doc' },
+  spreadsheet: { label: 'Spreadsheet', icon: FileSpreadsheet, emptyName: 'Untitled study sheet' },
+  note: { label: 'Note', icon: NotebookPen, emptyName: 'Untitled note' },
 };
 
-function emptyDraft(fileType: FileType = 'note') {
-  return {
-    name: fileType === 'spreadsheet' ? 'Untitled study sheet' : fileType === 'doc' ? 'Untitled study doc' : 'Untitled note',
-    fileType,
-    content: '',
-  };
+function createEmptySheet(rows = 8, cols = 5): SheetCellGrid {
+  return Array.from({ length: rows }, () => Array.from({ length: cols }, () => ''));
 }
 
 function formatDate(value?: string | null) {
@@ -54,17 +79,129 @@ function formatDate(value?: string | null) {
   return new Date(value).toLocaleString();
 }
 
+function getSheetShape(metadata?: Record<string, unknown>) {
+  const rowCount = typeof metadata?.rowCount === 'number' && metadata.rowCount > 0 ? metadata.rowCount : 8;
+  const colCount = typeof metadata?.colCount === 'number' && metadata.colCount > 0 ? metadata.colCount : 5;
+  return {
+    rowCount: Math.min(rowCount, 30),
+    colCount: Math.min(colCount, 12),
+  };
+}
+
+function parseSheetContent(content: string, metadata?: Record<string, unknown>) {
+  const { rowCount, colCount } = getSheetShape(metadata);
+  if (!content.trim()) {
+    return createEmptySheet(rowCount, colCount);
+  }
+
+  try {
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed) && parsed.every((row) => Array.isArray(row))) {
+      return parsed.map((row) => row.map((cell) => String(cell ?? '')));
+    }
+  } catch {
+    // Fall back to tabular text parsing.
+  }
+
+  const rows = content.split('\n').map((row) => row.split('\t').map((cell) => cell.trim()));
+  return rows.length ? rows : createEmptySheet(rowCount, colCount);
+}
+
+function stringifySheetContent(grid: SheetCellGrid) {
+  return JSON.stringify(grid);
+}
+
+function normalizeGrid(grid: SheetCellGrid, rowCount: number, colCount: number) {
+  const rows = Array.from({ length: rowCount }, (_, rowIndex) =>
+    Array.from({ length: colCount }, (_, colIndex) => grid[rowIndex]?.[colIndex] ?? '')
+  );
+  return rows;
+}
+
+function emptyDraft(fileType: FileType = 'note'): FileDraft {
+  const metadata: DraftMetadata =
+    fileType === 'spreadsheet'
+      ? { rowCount: 8, colCount: 5, editorMode: 'write' }
+      : { editorMode: 'write' };
+  return {
+    name: FILE_TYPE_META[fileType].emptyName,
+    fileType,
+    content: fileType === 'spreadsheet' ? stringifySheetContent(createEmptySheet()) : '',
+    metadata,
+  };
+}
+
+function draftFromFile(file: NativeFile): FileDraft {
+  const metadata: DraftMetadata = { ...(file.metadata ?? {}) };
+  if (!metadata.editorMode) {
+    metadata.editorMode = 'write';
+  }
+
+  return {
+    name: file.name,
+    fileType: file.fileType,
+    content: file.content,
+    metadata,
+  };
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderRichPreview(content: string) {
+  const html = content
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        return '<div class="h-3"></div>';
+      }
+      if (trimmed.startsWith('# ')) {
+        return `<h2 class="text-2xl font-semibold mt-4">${escapeHtml(trimmed.slice(2))}</h2>`;
+      }
+      if (trimmed.startsWith('## ')) {
+        return `<h3 class="text-xl font-semibold mt-4">${escapeHtml(trimmed.slice(3))}</h3>`;
+      }
+      if (trimmed.startsWith('- [ ] ')) {
+        return `<p class="flex items-start gap-2"><span>☐</span><span>${escapeHtml(trimmed.slice(6))}</span></p>`;
+      }
+      if (trimmed.startsWith('- ')) {
+        return `<p class="flex items-start gap-2"><span>•</span><span>${escapeHtml(trimmed.slice(2))}</span></p>`;
+      }
+      if (trimmed.startsWith('> ')) {
+        return `<blockquote class="border-l-4 border-[color:var(--line)] pl-4 italic text-[color:var(--muted)]">${escapeHtml(trimmed.slice(2))}</blockquote>`;
+      }
+      return `<p>${escapeHtml(trimmed)}</p>`;
+    })
+    .join('');
+
+  return { __html: html };
+}
+
 export default function DrivePage() {
   const [files, setFiles] = useState<NativeFile[]>([]);
   const [googleStatus, setGoogleStatus] = useState<GoogleStatus | null>(null);
   const [googleFiles, setGoogleFiles] = useState<GoogleDriveFile[]>([]);
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
-  const [draft, setDraft] = useState(emptyDraft());
+  const [draft, setDraft] = useState<FileDraft>(emptyDraft());
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState('');
+  const [editorMode, setEditorMode] = useState<EditorMode>('write');
 
   const selectedFile = files.find((file) => file.id === selectedFileId) ?? null;
+  const sheetShape = getSheetShape(draft.metadata);
+  const sheetGrid = useMemo(() => (
+    draft.fileType === 'spreadsheet'
+      ? normalizeGrid(parseSheetContent(draft.content, draft.metadata), sheetShape.rowCount, sheetShape.colCount)
+      : []
+  ), [draft.content, draft.fileType, draft.metadata, sheetShape.colCount, sheetShape.rowCount]);
 
   async function loadWorkspace() {
     setLoading(true);
@@ -88,22 +225,15 @@ export default function DrivePage() {
       setFiles(nextFiles);
       setGoogleStatus(googleStatusResponse.ok ? googlePayload : null);
 
-      if (!selectedFileId && nextFiles[0]) {
-        setSelectedFileId(nextFiles[0].id);
-        setDraft({
-          name: nextFiles[0].name,
-          fileType: nextFiles[0].fileType,
-          content: nextFiles[0].content,
-        });
-      } else if (selectedFileId) {
-        const active = nextFiles.find((file) => file.id === selectedFileId);
-        if (active) {
-          setDraft({
-            name: active.name,
-            fileType: active.fileType,
-            content: active.content,
-          });
-        }
+      const nextSelected = selectedFileId ? nextFiles.find((file) => file.id === selectedFileId) : nextFiles[0];
+      if (nextSelected) {
+        setSelectedFileId(nextSelected.id);
+        const nextDraft = draftFromFile(nextSelected);
+        setDraft(nextDraft);
+        setEditorMode((nextDraft.metadata?.editorMode as EditorMode) || 'write');
+      } else {
+        setSelectedFileId(null);
+        setDraft(emptyDraft());
       }
 
       if (googleStatusResponse.ok && googlePayload.connected && googlePayload.canReadDrive) {
@@ -126,11 +256,9 @@ export default function DrivePage() {
 
   function selectFile(file: NativeFile) {
     setSelectedFileId(file.id);
-    setDraft({
-      name: file.name,
-      fileType: file.fileType,
-      content: file.content,
-    });
+    const nextDraft = draftFromFile(file);
+    setDraft(nextDraft);
+    setEditorMode((nextDraft.metadata?.editorMode as EditorMode) || 'write');
     setStatus('');
   }
 
@@ -150,11 +278,9 @@ export default function DrivePage() {
       await loadWorkspace();
       const created = payload as NativeFile;
       setSelectedFileId(created.id);
-      setDraft({
-        name: created.name,
-        fileType: created.fileType,
-        content: created.content,
-      });
+      const nextDraft = draftFromFile(created);
+      setDraft(nextDraft);
+      setEditorMode((nextDraft.metadata?.editorMode as EditorMode) || 'write');
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Failed to create file');
     } finally {
@@ -180,7 +306,13 @@ export default function DrivePage() {
         body: JSON.stringify({
           name: draft.name.trim(),
           fileType: draft.fileType,
-          content: draft.content,
+          content: draft.fileType === 'spreadsheet' ? stringifySheetContent(sheetGrid) : draft.content,
+          metadata: {
+            ...(draft.metadata ?? {}),
+            editorMode,
+            rowCount: draft.fileType === 'spreadsheet' ? sheetGrid.length : undefined,
+            colCount: draft.fileType === 'spreadsheet' ? Math.max(...sheetGrid.map((row) => row.length), 0) : undefined,
+          },
         }),
       });
       const payload = await readApiPayload(response);
@@ -212,6 +344,7 @@ export default function DrivePage() {
       }
       setSelectedFileId(null);
       setDraft(emptyDraft());
+      setEditorMode('write');
       await loadWorkspace();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Failed to delete file');
@@ -228,6 +361,60 @@ export default function DrivePage() {
     }
   }
 
+  function updateSheetCell(rowIndex: number, colIndex: number, value: string) {
+    const nextGrid = sheetGrid.map((row, currentRow) =>
+      currentRow === rowIndex
+        ? row.map((cell, currentCol) => (currentCol === colIndex ? value : cell))
+        : row
+    );
+    setDraft((current) => ({
+      ...current,
+      content: stringifySheetContent(nextGrid),
+      metadata: {
+        ...(current.metadata ?? {}),
+        rowCount: nextGrid.length,
+        colCount: nextGrid[0]?.length ?? 0,
+      },
+    }));
+  }
+
+  function addSheetRow() {
+    const nextGrid = [...sheetGrid, Array.from({ length: sheetShape.colCount }, () => '')];
+    setDraft((current) => ({
+      ...current,
+      content: stringifySheetContent(nextGrid),
+      metadata: {
+        ...(current.metadata ?? {}),
+        rowCount: nextGrid.length,
+        colCount: nextGrid[0]?.length ?? sheetShape.colCount,
+      },
+    }));
+  }
+
+  function addSheetColumn() {
+    const nextGrid = sheetGrid.map((row) => [...row, '']);
+    setDraft((current) => ({
+      ...current,
+      content: stringifySheetContent(nextGrid),
+      metadata: {
+        ...(current.metadata ?? {}),
+        rowCount: nextGrid.length,
+        colCount: nextGrid[0]?.length ?? sheetShape.colCount + 1,
+      },
+    }));
+  }
+
+  function insertTemplate(prefix: string) {
+    setDraft((current) => ({
+      ...current,
+      content: current.content ? `${current.content}\n${prefix}` : prefix,
+    }));
+  }
+
+  const nativePreview = draft.fileType === 'spreadsheet'
+    ? null
+    : renderRichPreview(draft.content);
+
   return (
     <section className="space-y-6">
       {status ? (
@@ -240,9 +427,9 @@ export default function DrivePage() {
         <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-3">
             <p className="insight-chip">Drive</p>
-            <h1 className="hero-title">StudyClaw files for every account, with Google Drive layered on when connected.</h1>
+            <h1 className="hero-title">StudyClaw files for every account, with a richer native editor and sheets workspace.</h1>
             <p className="hero-description">
-              Use native notes, docs, and lightweight study sheets by default. Google users keep recent Drive files visible here too.
+              Native notes, docs, and spreadsheets are first-class now. Google users still see their recent Drive files as an optional external layer.
             </p>
           </div>
           <div className="grid min-w-[280px] gap-3 sm:grid-cols-3 lg:w-[360px]">
@@ -260,8 +447,10 @@ export default function DrivePage() {
             </div>
             <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--panel)] p-4">
               <span className="text-xs uppercase tracking-[0.24em] text-[color:var(--muted)]">Editor</span>
-              <div className="mt-2 text-2xl font-semibold">{selectedFile ? FILE_TYPE_META[selectedFile.fileType].label : 'Ready'}</div>
-              <p className="mt-2 text-sm text-[color:var(--muted)]">Simple editing in-app for native StudyClaw files.</p>
+              <div className="mt-2 text-2xl font-semibold">
+                {selectedFile ? `${FILE_TYPE_META[selectedFile.fileType].label} · ${editorMode}` : 'Ready'}
+              </div>
+              <p className="mt-2 text-sm text-[color:var(--muted)]">Write, preview, split, and grid-edit in app.</p>
             </div>
           </div>
         </div>
@@ -327,13 +516,29 @@ export default function DrivePage() {
         </aside>
 
         <main className="rounded-[28px] border border-[color:var(--line)] bg-[color:var(--panel)] p-5 shadow-sm">
-          <div className="flex items-start justify-between gap-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="eyebrow">Editor</p>
               <h2 className="section-title">{selectedFile ? selectedFile.name : 'Select or create a file'}</h2>
             </div>
             {selectedFile ? (
-              <span className="settings-badge is-live">{FILE_TYPE_META[selectedFile.fileType].label}</span>
+              <div className="flex flex-wrap gap-2">
+                <span className="settings-badge is-live">{FILE_TYPE_META[selectedFile.fileType].label}</span>
+                {selectedFile.fileType !== 'spreadsheet' ? (
+                  <div className="rounded-full border border-[color:var(--line)] bg-[color:var(--panel-2)] p-1">
+                    {(['write', 'preview', 'split'] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setEditorMode(mode)}
+                        className={`rounded-full px-3 py-1.5 text-sm ${editorMode === mode ? 'bg-[color:var(--accent)] text-white' : 'text-[color:var(--muted)]'}`}
+                      >
+                        {mode}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </div>
 
@@ -354,15 +559,111 @@ export default function DrivePage() {
                 </label>
               </div>
 
-              <label className="form-field">
-                <span>Content</span>
-                <textarea
-                  rows={22}
-                  value={draft.content}
-                  onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
-                  placeholder="Write study notes, reading summaries, formulas, prompt scaffolds, or planning notes here."
-                />
-              </label>
+              {draft.fileType === 'spreadsheet' ? (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" className="ghost-button" onClick={addSheetRow}>
+                      <Rows3 className="mr-2 inline h-4 w-4" />
+                      Add row
+                    </button>
+                    <button type="button" className="ghost-button" onClick={addSheetColumn}>
+                      <Columns3 className="mr-2 inline h-4 w-4" />
+                      Add column
+                    </button>
+                  </div>
+                  <div className="overflow-auto rounded-2xl border border-[color:var(--line)]">
+                    <table className="min-w-full border-collapse text-sm">
+                      <thead>
+                        <tr className="bg-[color:var(--panel-2)]">
+                          <th className="border-b border-r border-[color:var(--line)] px-3 py-2 text-left text-xs uppercase tracking-[0.14em] text-[color:var(--muted)]">#</th>
+                          {sheetGrid[0]?.map((_, colIndex) => (
+                            <th key={colIndex} className="border-b border-r border-[color:var(--line)] px-3 py-2 text-left text-xs uppercase tracking-[0.14em] text-[color:var(--muted)]">
+                              {String.fromCharCode(65 + colIndex)}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sheetGrid.map((row, rowIndex) => (
+                          <tr key={rowIndex}>
+                            <td className="border-b border-r border-[color:var(--line)] bg-[color:var(--panel-2)] px-3 py-2 text-xs text-[color:var(--muted)]">{rowIndex + 1}</td>
+                            {row.map((cell, colIndex) => (
+                              <td key={`${rowIndex}-${colIndex}`} className="border-b border-r border-[color:var(--line)] p-0">
+                                <input
+                                  value={cell}
+                                  onChange={(event) => updateSheetCell(rowIndex, colIndex, event.target.value)}
+                                  className="w-full border-0 bg-transparent px-3 py-2 outline-none"
+                                  placeholder="—"
+                                />
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" className="ghost-button" onClick={() => insertTemplate('# Heading')}>
+                      <Heading1 className="mr-2 inline h-4 w-4" />
+                      Heading
+                    </button>
+                    <button type="button" className="ghost-button" onClick={() => insertTemplate('- Bullet')}>
+                      <List className="mr-2 inline h-4 w-4" />
+                      Bullet list
+                    </button>
+                    <button type="button" className="ghost-button" onClick={() => insertTemplate('- [ ] Checklist item')}>
+                      <CheckSquare className="mr-2 inline h-4 w-4" />
+                      Checklist
+                    </button>
+                    <button type="button" className="ghost-button" onClick={() => insertTemplate('> Key quote or takeaway')}>
+                      <Quote className="mr-2 inline h-4 w-4" />
+                      Quote block
+                    </button>
+                  </div>
+
+                  {editorMode === 'write' ? (
+                    <label className="form-field">
+                      <span>Content</span>
+                      <textarea
+                        rows={22}
+                        value={draft.content}
+                        onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
+                        placeholder="Write study notes, reading summaries, formulas, prompt scaffolds, or planning notes here."
+                      />
+                    </label>
+                  ) : editorMode === 'preview' ? (
+                    <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--panel-2)] px-5 py-4">
+                      <div className="mb-3 flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-[color:var(--muted)]">
+                        <PanelTop className="h-4 w-4" />
+                        Preview
+                      </div>
+                      <div className="prose max-w-none space-y-3" dangerouslySetInnerHTML={nativePreview} />
+                    </section>
+                  ) : (
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <label className="form-field">
+                        <span>Content</span>
+                        <textarea
+                          rows={22}
+                          value={draft.content}
+                          onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
+                          placeholder="Write study notes, reading summaries, formulas, prompt scaffolds, or planning notes here."
+                        />
+                      </label>
+                      <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--panel-2)] px-5 py-4">
+                        <div className="mb-3 flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-[color:var(--muted)]">
+                          <PanelTop className="h-4 w-4" />
+                          Preview
+                        </div>
+                        <div className="prose max-w-none space-y-3" dangerouslySetInnerHTML={nativePreview} />
+                      </section>
+                    </div>
+                  )}
+                </>
+              )}
 
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="text-sm text-[color:var(--muted)]">
@@ -374,6 +675,7 @@ export default function DrivePage() {
                     Delete
                   </button>
                   <button type="button" onClick={() => void saveFile()} disabled={saving}>
+                    <Save className="mr-2 inline h-4 w-4" />
                     {saving ? 'Saving…' : 'Save file'}
                   </button>
                 </div>
@@ -390,6 +692,30 @@ export default function DrivePage() {
         </main>
 
         <aside className="space-y-4">
+          <section className="rounded-[28px] border border-[color:var(--line)] bg-[color:var(--panel)] p-5 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="eyebrow">Document sources</p>
+                <h2 className="section-title">Native and Google layers</h2>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <article className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--panel-2)] p-4">
+                <strong>StudyClaw Drive</strong>
+                <p className="mt-2 text-sm text-[color:var(--muted)]">{files.length} native files available now.</p>
+              </article>
+              <article className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--panel-2)] p-4">
+                <strong>Google Drive</strong>
+                <p className="mt-2 text-sm text-[color:var(--muted)]">
+                  {googleStatus?.connected
+                    ? `${googleFiles.length} recent Google files visible for ${googleStatus.googleEmail || googleStatus.account || 'this account'}.`
+                    : 'Optional external workspace layer. Native Drive already works without it.'}
+                </p>
+              </article>
+            </div>
+          </section>
+
           <section className="rounded-[28px] border border-[color:var(--line)] bg-[color:var(--panel)] p-5 shadow-sm">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -441,7 +767,7 @@ export default function DrivePage() {
             <p className="eyebrow">How this works</p>
             <h2 className="section-title">Workspace routing</h2>
             <div className="mt-4 space-y-3 text-sm text-[color:var(--muted)]">
-              <p>StudyClaw-native files are always available for notes, docs, and lightweight study sheets.</p>
+              <p>StudyClaw-native files are always available for notes, docs, and spreadsheets.</p>
               <p>When Google is connected, the agent can reference Google Workspace too, but it should not pretend Google exists for email/password users.</p>
               <p>
                 Use <Link href="/calendar" className="font-medium text-[color:var(--accent)]">Calendar</Link> and <Link href="/reader" className="font-medium text-[color:var(--accent)]">eReader</Link> alongside this page to keep planning and reading tied to the same workspace.
