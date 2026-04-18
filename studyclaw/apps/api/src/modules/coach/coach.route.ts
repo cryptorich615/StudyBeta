@@ -136,6 +136,11 @@ ${text}
         feature: 'coach-process',
         sourceType,
         attachmentCount: attachments.length,
+        googleConnected: context.workspace.googleConnected,
+        workspaceCalendarBackend: context.workspace.calendarBackend,
+        workspaceDocumentBackend: context.workspace.documentBackend,
+        nativeCalendarEvents: context.workspace.nativeCalendarEvents,
+        nativeFiles: context.workspace.nativeFiles,
       },
       userId: req.user!.id,
     });

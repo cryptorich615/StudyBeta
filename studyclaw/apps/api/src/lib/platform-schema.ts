@@ -100,6 +100,18 @@ const statements = [
     )
   `,
   `
+    create table if not exists studyclaw_files (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid not null references users(id) on delete cascade,
+      name text not null,
+      file_type text not null default 'note' check (file_type in ('doc', 'spreadsheet', 'note')),
+      content text not null default '',
+      metadata_json jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    )
+  `,
+  `
     create index if not exists idx_agents_user_id on agents(user_id)
   `,
   `
@@ -127,6 +139,12 @@ const statements = [
     create index if not exists idx_studyclaw_events_start_time on studyclaw_events(start_time)
   `,
   `
+    create index if not exists idx_studyclaw_files_user_id on studyclaw_files(user_id)
+  `,
+  `
+    create index if not exists idx_studyclaw_files_type on studyclaw_files(file_type)
+  `,
+  `
     do $$
     begin
       if not exists (select 1 from pg_trigger where tgname = 'trg_agents_updated_at') then
@@ -143,6 +161,9 @@ const statements = [
       end if;
       if not exists (select 1 from pg_trigger where tgname = 'trg_studyclaw_events_updated_at') then
         create trigger trg_studyclaw_events_updated_at before update on studyclaw_events for each row execute function set_updated_at();
+      end if;
+      if not exists (select 1 from pg_trigger where tgname = 'trg_studyclaw_files_updated_at') then
+        create trigger trg_studyclaw_files_updated_at before update on studyclaw_files for each row execute function set_updated_at();
       end if;
     end $$;
   `,

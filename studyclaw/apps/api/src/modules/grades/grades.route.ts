@@ -186,6 +186,11 @@ gradesRouter.post('/reviews/:reviewId/explain', async (req: AuthedRequest, res) 
       metadata: {
         feature: 'wrong-answer-explain',
         reviewId: review.id,
+        googleConnected: context.workspace.googleConnected,
+        workspaceCalendarBackend: context.workspace.calendarBackend,
+        workspaceDocumentBackend: context.workspace.documentBackend,
+        nativeCalendarEvents: context.workspace.nativeCalendarEvents,
+        nativeFiles: context.workspace.nativeFiles,
       },
       userId: req.user!.id,
       timeoutMs: 30_000,

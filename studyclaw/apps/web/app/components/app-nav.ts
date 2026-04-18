@@ -1,7 +1,7 @@
 'use client';
 
 import type { LucideIcon } from 'lucide-react';
-import { LayoutDashboard, Brain, MessageSquare, Calendar, Settings, GraduationCap, Clock3, Globe, BookOpen } from 'lucide-react';
+import { LayoutDashboard, Brain, MessageSquare, Calendar, Settings, GraduationCap, Clock3, Globe, BookOpen, FolderOpen } from 'lucide-react';
 
 export type AppNavLink = {
   href: string;
@@ -16,6 +16,7 @@ export const appNavLinks: AppNavLink[] = [
   { href: '/chat', label: 'Chat', shortLabel: 'Chat', icon: MessageSquare },
   { href: '/browser', label: 'Browser', shortLabel: 'Browser', icon: Globe },
   { href: '/reader', label: 'eReader', shortLabel: 'Read', icon: BookOpen },
+  { href: '/drive', label: 'Drive', shortLabel: 'Drive', icon: FolderOpen },
   { href: '/grades', label: 'Grades', shortLabel: 'Grades', icon: GraduationCap },
   { href: '/schedule', label: 'Schedule', shortLabel: 'Schedule', icon: Clock3 },
   { href: '/calendar', label: 'Calendar', shortLabel: 'Calendar', icon: Calendar },

@@ -297,7 +297,16 @@ chatRouter.post('/stream', async (req: AuthedRequest, res) => {
             input: message,
             user: req.user!.id,
             stream: true,
-            metadata: { feature: 'chat', threadId: activeThreadId, sessionId: openclawSessionId },
+            metadata: {
+              feature: 'chat',
+              threadId: activeThreadId,
+              sessionId: openclawSessionId,
+              googleConnected: context.workspace.googleConnected,
+              workspaceCalendarBackend: context.workspace.calendarBackend,
+              workspaceDocumentBackend: context.workspace.documentBackend,
+              nativeCalendarEvents: context.workspace.nativeCalendarEvents,
+              nativeFiles: context.workspace.nativeFiles,
+            },
           }),
         });
 
@@ -542,6 +551,11 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
       metadata: {
         feature: 'chat',
         threadId: activeThreadId,
+        googleConnected: context.workspace.googleConnected,
+        workspaceCalendarBackend: context.workspace.calendarBackend,
+        workspaceDocumentBackend: context.workspace.documentBackend,
+        nativeCalendarEvents: context.workspace.nativeCalendarEvents,
+        nativeFiles: context.workspace.nativeFiles,
       },
       userId: req.user!.id,
     });

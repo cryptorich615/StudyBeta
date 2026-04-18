@@ -597,11 +597,14 @@ export default function StudyPage() {
 
               {!googleStatus?.connected ? (
                 <div className="study-library-empty">
-                  <strong>Connect Google to open your workspace files here.</strong>
+                  <strong>StudyClaw Drive is ready even without Google.</strong>
                   <p>
-                    Once connected, recent Docs, Sheets, Slides, and Drive files will appear here for quick access while you study.
+                    Use StudyClaw Drive for native notes, docs, and sheets right now. If you later connect Google, recent Docs, Sheets, Slides, and Drive files will also appear here.
                   </p>
-                  <Link href="/calendar" className="primary-link-button">Connect Google Calendar</Link>
+                  <div className="actions" style={{ justifyContent: 'center' }}>
+                    <Link href="/drive" className="primary-link-button">Open StudyClaw Drive</Link>
+                    <Link href="/calendar" className="ghost-button">Connect Google Calendar</Link>
+                  </div>
                 </div>
               ) : !googleStatus.canReadDrive ? (
                 <div className="study-library-empty">

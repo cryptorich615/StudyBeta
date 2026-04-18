@@ -215,6 +215,11 @@ ${text}
             feature: 'flashcards',
             sourceAssetId,
             subjectId,
+            googleConnected: context.workspace.googleConnected,
+            workspaceCalendarBackend: context.workspace.calendarBackend,
+            workspaceDocumentBackend: context.workspace.documentBackend,
+            nativeCalendarEvents: context.workspace.nativeCalendarEvents,
+            nativeFiles: context.workspace.nativeFiles,
         },
         userId: req.user!.id,
     });
@@ -331,6 +336,11 @@ ${text}
             subjectId,
             questionCount,
             mode,
+            googleConnected: context.workspace.googleConnected,
+            workspaceCalendarBackend: context.workspace.calendarBackend,
+            workspaceDocumentBackend: context.workspace.documentBackend,
+            nativeCalendarEvents: context.workspace.nativeCalendarEvents,
+            nativeFiles: context.workspace.nativeFiles,
         },
         userId: req.user!.id,
     });
