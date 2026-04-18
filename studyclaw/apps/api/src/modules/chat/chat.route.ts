@@ -207,7 +207,77 @@ chatRouter.get('/threads/:threadId', async (req: AuthedRequest, res) => {
 });
 
 chatRouter.post('/research-note', async (_req: AuthedRequest, res) => {
-  res.json({ saved: false, noteId: null, assetId: null });
+  await ensurePlatformSchema();
+  const req = _req;
+  const threadId = String(req.body?.threadId ?? '').trim();
+  const messageId = String(req.body?.messageId ?? '').trim();
+
+  if (!threadId || !messageId) {
+    return res.status(400).json({ error: 'bad_request', message: 'threadId and messageId are required' });
+  }
+
+  const messageResult = await db.query(
+    `select m.id, m.metadata_json
+     from chat_messages m
+     join chat_threads t on t.id = m.thread_id
+     where m.id = $1
+       and m.thread_id = $2
+       and t.user_id = $3
+     limit 1`,
+    [messageId, threadId, req.user!.id]
+  );
+
+  const message = messageResult.rows[0];
+  const research = message?.metadata_json?.researchResult as
+    | {
+        title?: string;
+        summary?: string;
+        sources?: Array<{ label?: string; url?: string; hostname?: string }>;
+        pageTitle?: string | null;
+        checkedAt?: string;
+      }
+    | undefined;
+
+  if (!message || !research?.summary?.trim()) {
+    return res.status(404).json({ error: 'not_found', message: 'Research result not found for this message' });
+  }
+
+  const title = String(research.title ?? research.pageTitle ?? 'Research note').trim() || 'Research note';
+  const detail = [
+    research.summary?.trim(),
+    Array.isArray(research.sources) && research.sources.length
+      ? `Sources:\n${research.sources.map((source) => `- ${source.label || source.hostname || source.url || 'Source'}${source.url ? ` (${source.url})` : ''}`).join('\n')}`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  const insertResult = await db.query(
+    `insert into study_assets (user_id, title, original_text, processed_text, asset_type, metadata_json)
+     values ($1, $2, $3, $4, $5, $6)
+     returning id`,
+    [
+      req.user!.id,
+      title,
+      detail,
+      detail,
+      'research_note',
+      JSON.stringify({
+        source: 'chat_research',
+        threadId,
+        messageId,
+        checkedAt: research.checkedAt ?? null,
+        sources: research.sources ?? [],
+      }),
+    ]
+  );
+
+  res.json({
+    saved: true,
+    noteId: insertResult.rows[0]?.id ?? null,
+    assetId: insertResult.rows[0]?.id ?? null,
+    message: 'Saved to Backpack.',
+  });
 });
 
 // ── STREAMING ────────────────────────────────────────────────

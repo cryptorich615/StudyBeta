@@ -6,6 +6,7 @@ import { ensurePlatformSchema } from '../../lib/platform-schema';
 import {
   adjustManagedUsageCredits,
   changeManagedUsageTier,
+  getContentOpsSnapshot,
   getAdminUserDetail,
   getProviderOpsSnapshot,
   listAdminAuditEvents,
@@ -177,7 +178,8 @@ adminRouter.get('/audit', async (req: AuthedRequest, res) => {
 });
 
 adminRouter.get('/content', async (_req: AuthedRequest, res) => {
-  res.json({ content: [] });
+  const content = await getContentOpsSnapshot();
+  res.json(content);
 });
 
 adminRouter.get('/managed-usage', async (_req: AuthedRequest, res) => {
