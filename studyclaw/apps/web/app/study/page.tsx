@@ -106,6 +106,8 @@ export default function StudyPage() {
   });
   const [googleWorkspaceLoading, setGoogleWorkspaceLoading] = useState(false);
   const [googleWorkspaceError, setGoogleWorkspaceError] = useState('');
+  const [sourceFileId, setSourceFileId] = useState('');
+  const [sourceKind, setSourceKind] = useState<'native-file' | 'asset' | 'google' | 'book' | ''>('');
 
   useEffect(() => {
     setHasSession(!!readStoredSession()?.user?.id);
@@ -249,7 +251,7 @@ export default function StudyPage() {
     try {
       const response = await apiFetch('/api/study/flashcards', {
         method: 'POST',
-        body: JSON.stringify({ title, text: notes, audienceLevel }),
+        body: JSON.stringify({ title, text: notes, audienceLevel, sourceFileId: sourceFileId || undefined, sourceKind: sourceKind || undefined }),
       });
       const data = await readApiPayload(response);
 
@@ -288,7 +290,14 @@ export default function StudyPage() {
     try {
       const response = await apiFetch('/api/study/quiz', {
         method: 'POST',
-        body: JSON.stringify({ title: `${title} Quiz`, text: notes, questionCount: 6, audienceLevel }),
+        body: JSON.stringify({
+          title: `${title} Quiz`,
+          text: notes,
+          questionCount: 6,
+          audienceLevel,
+          sourceFileId: sourceFileId || undefined,
+          sourceKind: sourceKind || undefined,
+        }),
       });
       const data = await readApiPayload(response);
 
@@ -435,20 +444,24 @@ export default function StudyPage() {
             <DocumentReaderWorkspace
               initialAssetId={searchParams.get('doc')}
               initialBookId={searchParams.get('book')}
-              onUseForFlashcards={({ title: nextTitle, text }) => {
+              onUseForFlashcards={({ title: nextTitle, text, sourceFileId: nextSourceFileId, sourceKind: nextSourceKind }) => {
                 setTitle(nextTitle);
                 setNotes(text);
+                setSourceFileId(nextSourceFileId || '');
+                setSourceKind(nextSourceKind || '');
                 setLibraryType('flashcards');
-                setStatus('Loaded this document into the flashcard generator.');
+                setStatus(nextSourceFileId ? 'Loaded this StudyClaw file into the flashcard generator.' : 'Loaded this document into the flashcard generator.');
                 window.requestAnimationFrame(() => {
                   document.getElementById('study-title')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 });
               }}
-              onUseForQuiz={({ title: nextTitle, text }) => {
+              onUseForQuiz={({ title: nextTitle, text, sourceFileId: nextSourceFileId, sourceKind: nextSourceKind }) => {
                 setTitle(`${nextTitle} Quiz`);
                 setNotes(text);
+                setSourceFileId(nextSourceFileId || '');
+                setSourceKind(nextSourceKind || '');
                 setLibraryType('quizzes');
-                setStatus('Loaded this document into the quiz generator.');
+                setStatus(nextSourceFileId ? 'Loaded this StudyClaw file into the quiz generator.' : 'Loaded this document into the quiz generator.');
                 window.requestAnimationFrame(() => {
                   document.getElementById('study-title')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 });
@@ -468,6 +481,11 @@ export default function StudyPage() {
             </div>
 
             <div className="study-generator-panel__body">
+              {sourceFileId ? (
+                <div className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--panel-2)] px-4 py-3 text-sm text-[color:var(--muted)]">
+                  Linked source: <strong>{sourceKind === 'native-file' ? 'StudyClaw Drive file' : 'workspace document'}</strong>. Generated assets will stay tied to this source while you edit the notes.
+                </div>
+              ) : null}
               <div className="form-field">
                 <label htmlFor="study-title">Set title</label>
                 <input id="study-title" value={title} onChange={(event) => setTitle(event.target.value)} />

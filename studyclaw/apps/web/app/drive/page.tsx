@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
   CheckSquare,
   Columns3,
@@ -17,6 +18,7 @@ import {
   RefreshCw,
   Rows3,
   Save,
+  Sparkles,
   Trash2,
 } from 'lucide-react';
 import { apiFetch, beginGoogleConnect, readApiPayload } from '../../lib/api';
@@ -24,10 +26,18 @@ import { apiFetch, beginGoogleConnect, readApiPayload } from '../../lib/api';
 type FileType = 'doc' | 'spreadsheet' | 'note';
 type EditorMode = 'write' | 'preview' | 'split';
 type SheetCellGrid = string[][];
+type DocumentBlockType = 'heading' | 'subheading' | 'paragraph' | 'bullet' | 'checklist' | 'quote';
+type DocumentBlock = {
+  type: DocumentBlockType;
+  text: string;
+  checked?: boolean;
+};
 type DraftMetadata = {
   editorMode?: EditorMode;
   rowCount?: number;
   colCount?: number;
+  documentBlocks?: DocumentBlock[];
+  sheetColumns?: string[];
 } & Record<string, unknown>;
 type FileDraft = {
   name: string;
@@ -70,6 +80,23 @@ const FILE_TYPE_META: Record<FileType, { label: string; icon: typeof FileText; e
   note: { label: 'Note', icon: NotebookPen, emptyName: 'Untitled note' },
 };
 
+const BLOCK_TEMPLATES: Array<{ type: DocumentBlockType; label: string; icon: typeof FileText; prefix: string }> = [
+  { type: 'heading', label: 'Heading', icon: Heading1, prefix: '# Heading' },
+  { type: 'bullet', label: 'Bullet list', icon: List, prefix: '- Bullet' },
+  { type: 'checklist', label: 'Checklist', icon: CheckSquare, prefix: '- [ ] Checklist item' },
+  { type: 'quote', label: 'Quote block', icon: Quote, prefix: '> Key quote or takeaway' },
+];
+
+function getColumnLabel(index: number) {
+  let current = index;
+  let label = '';
+  while (current >= 0) {
+    label = String.fromCharCode(65 + (current % 26)) + label;
+    current = Math.floor(current / 26) - 1;
+  }
+  return label;
+}
+
 function createEmptySheet(rows = 8, cols = 5): SheetCellGrid {
   return Array.from({ length: rows }, () => Array.from({ length: cols }, () => ''));
 }
@@ -107,6 +134,13 @@ function parseSheetContent(content: string, metadata?: Record<string, unknown>) 
   return rows.length ? rows : createEmptySheet(rowCount, colCount);
 }
 
+function getSheetColumns(metadata?: Record<string, unknown>, colCount = 0) {
+  const stored = Array.isArray(metadata?.sheetColumns)
+    ? metadata.sheetColumns.map((value, index) => (typeof value === 'string' && value.trim() ? value.trim() : `Column ${index + 1}`))
+    : [];
+  return Array.from({ length: colCount }, (_, index) => stored[index] || `Column ${index + 1}`);
+}
+
 function stringifySheetContent(grid: SheetCellGrid) {
   return JSON.stringify(grid);
 }
@@ -121,8 +155,8 @@ function normalizeGrid(grid: SheetCellGrid, rowCount: number, colCount: number) 
 function emptyDraft(fileType: FileType = 'note'): FileDraft {
   const metadata: DraftMetadata =
     fileType === 'spreadsheet'
-      ? { rowCount: 8, colCount: 5, editorMode: 'write' }
-      : { editorMode: 'write' };
+      ? { rowCount: 8, colCount: 5, editorMode: 'write', sheetColumns: Array.from({ length: 5 }, (_, index) => `Column ${index + 1}`) }
+      : { editorMode: 'write', documentBlocks: [] };
   return {
     name: FILE_TYPE_META[fileType].emptyName,
     fileType,
@@ -136,12 +170,182 @@ function draftFromFile(file: NativeFile): FileDraft {
   if (!metadata.editorMode) {
     metadata.editorMode = 'write';
   }
+  if (file.fileType === 'spreadsheet' && !Array.isArray(metadata.sheetColumns)) {
+    metadata.sheetColumns = getSheetColumns(metadata, getSheetShape(metadata).colCount);
+  }
+  if (file.fileType !== 'spreadsheet' && !Array.isArray(metadata.documentBlocks)) {
+    metadata.documentBlocks = buildDocumentBlocksFromText(file.content || '');
+  }
 
   return {
     name: file.name,
     fileType: file.fileType,
     content: file.content,
     metadata,
+  };
+}
+
+function buildDocumentBlocksFromText(content: string): DocumentBlock[] {
+  return content
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        return null;
+      }
+      if (trimmed.startsWith('# ')) return { type: 'heading' as const, text: trimmed.slice(2).trim() };
+      if (trimmed.startsWith('## ')) return { type: 'subheading' as const, text: trimmed.slice(3).trim() };
+      if (trimmed.startsWith('- [ ] ')) return { type: 'checklist' as const, text: trimmed.slice(6).trim(), checked: false };
+      if (trimmed.startsWith('- [x] ') || trimmed.startsWith('- [X] ')) return { type: 'checklist' as const, text: trimmed.slice(6).trim(), checked: true };
+      if (trimmed.startsWith('- ')) return { type: 'bullet' as const, text: trimmed.slice(2).trim() };
+      if (trimmed.startsWith('> ')) return { type: 'quote' as const, text: trimmed.slice(2).trim() };
+      return { type: 'paragraph' as const, text: trimmed };
+    })
+    .filter((block) => Boolean(block && block.text)) as DocumentBlock[];
+}
+
+function renderDocumentBlocksAsHtml(blocks: DocumentBlock[]) {
+  const html = blocks
+    .map((block) => {
+      const text = escapeHtml(block.text);
+      if (block.type === 'heading') return `<h2 class="text-2xl font-semibold mt-4">${text}</h2>`;
+      if (block.type === 'subheading') return `<h3 class="text-xl font-semibold mt-4">${text}</h3>`;
+      if (block.type === 'checklist') return `<p class="flex items-start gap-2"><span>${block.checked ? '☑' : '☐'}</span><span>${text}</span></p>`;
+      if (block.type === 'bullet') return `<p class="flex items-start gap-2"><span>•</span><span>${text}</span></p>`;
+      if (block.type === 'quote') return `<blockquote class="border-l-4 border-[color:var(--line)] pl-4 italic text-[color:var(--muted)]">${text}</blockquote>`;
+      return `<p>${text}</p>`;
+    })
+    .join('');
+
+  return { __html: html || '<p>No content yet.</p>' };
+}
+
+function parseCellReference(ref: string) {
+  const match = ref.match(/^([A-Z]+)(\d+)$/);
+  if (!match) {
+    return null;
+  }
+  const [, letters, rowPart] = match;
+  let colIndex = 0;
+  for (const letter of letters) {
+    colIndex = colIndex * 26 + (letter.charCodeAt(0) - 64);
+  }
+  return { rowIndex: Number(rowPart) - 1, colIndex: colIndex - 1 };
+}
+
+function getNumericCellValue(grid: SheetCellGrid, ref: string, seen = new Set<string>()): number {
+  if (seen.has(ref)) {
+    return 0;
+  }
+  seen.add(ref);
+  const parsed = parseCellReference(ref);
+  if (!parsed) {
+    return 0;
+  }
+  const raw = String(grid[parsed.rowIndex]?.[parsed.colIndex] ?? '').trim();
+  if (!raw) {
+    return 0;
+  }
+  if (raw.startsWith('=')) {
+    const evaluated = evaluateFormula(raw, grid, seen);
+    return typeof evaluated === 'number' && Number.isFinite(evaluated) ? evaluated : 0;
+  }
+  const numeric = Number(raw.replace(/,/g, ''));
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function evaluateRangeFormula(fn: string, startRef: string, endRef: string, grid: SheetCellGrid, seen = new Set<string>()) {
+  const start = parseCellReference(startRef);
+  const end = parseCellReference(endRef);
+  if (!start || !end) {
+    return 0;
+  }
+  const values: number[] = [];
+  for (let rowIndex = Math.min(start.rowIndex, end.rowIndex); rowIndex <= Math.max(start.rowIndex, end.rowIndex); rowIndex += 1) {
+    for (let colIndex = Math.min(start.colIndex, end.colIndex); colIndex <= Math.max(start.colIndex, end.colIndex); colIndex += 1) {
+      values.push(getNumericCellValue(grid, `${getColumnLabel(colIndex)}${rowIndex + 1}`, new Set(seen)));
+    }
+  }
+  if (!values.length) {
+    return 0;
+  }
+  if (fn === 'AVG') {
+    return values.reduce((sum, value) => sum + value, 0) / values.length;
+  }
+  if (fn === 'MIN') {
+    return Math.min(...values);
+  }
+  if (fn === 'MAX') {
+    return Math.max(...values);
+  }
+  return values.reduce((sum, value) => sum + value, 0);
+}
+
+function evaluateFormula(value: string, grid: SheetCellGrid, seen = new Set<string>()) {
+  if (!value.startsWith('=')) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : value;
+  }
+
+  try {
+    let expression = value.slice(1).toUpperCase();
+    expression = expression.replace(/(SUM|AVG|MIN|MAX)\(([A-Z]+\d+):([A-Z]+\d+)\)/g, (_, fn: string, startRef: string, endRef: string) => {
+      const result = evaluateRangeFormula(fn, startRef, endRef, grid, new Set(seen));
+      return String(result);
+    });
+    expression = expression.replace(/\b([A-Z]+\d+)\b/g, (_whole: string, ref: string) => String(getNumericCellValue(grid, ref, new Set(seen))));
+    if (/[^0-9+\-*/().\s]/.test(expression)) {
+      return '#ERR';
+    }
+    const result = Function(`return (${expression});`)();
+    return Number.isFinite(result) ? result : '#ERR';
+  } catch {
+    return '#ERR';
+  }
+}
+
+function buildStudyTextFromDraft(draft: FileDraft, grid: SheetCellGrid) {
+  if (draft.fileType === 'spreadsheet') {
+    const columns = getSheetColumns(draft.metadata, grid[0]?.length ?? 0);
+    const lines = [columns.join('\t')];
+    for (const row of grid) {
+      const values = row.map((cell) => {
+        const trimmed = cell.trim();
+        if (!trimmed) {
+          return '';
+        }
+        if (trimmed.startsWith('=')) {
+          return String(evaluateFormula(trimmed, grid));
+        }
+        return trimmed;
+      });
+      if (values.some(Boolean)) {
+        lines.push(values.join('\t'));
+      }
+    }
+    return lines.join('\n').trim();
+  }
+
+  const blocks = buildDocumentBlocksFromText(draft.content);
+  return blocks.map((block) => block.text).join('\n').trim() || draft.content.trim();
+}
+
+function convertDraftForFileType(current: FileDraft, nextFileType: FileType): FileDraft {
+  if (current.fileType === nextFileType) {
+    return current;
+  }
+
+  const next = emptyDraft(nextFileType);
+  return {
+    ...next,
+    name: current.name,
+    content: nextFileType === 'spreadsheet' ? next.content : current.content,
+    metadata: nextFileType === 'spreadsheet'
+      ? next.metadata
+      : {
+          ...next.metadata,
+          documentBlocks: buildDocumentBlocksFromText(current.content),
+        },
   };
 }
 
@@ -185,6 +389,7 @@ function renderRichPreview(content: string) {
 }
 
 export default function DrivePage() {
+  const router = useRouter();
   const [files, setFiles] = useState<NativeFile[]>([]);
   const [googleStatus, setGoogleStatus] = useState<GoogleStatus | null>(null);
   const [googleFiles, setGoogleFiles] = useState<GoogleDriveFile[]>([]);
@@ -194,6 +399,7 @@ export default function DrivePage() {
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState('');
   const [editorMode, setEditorMode] = useState<EditorMode>('write');
+  const [generatingKind, setGeneratingKind] = useState<'flashcards' | 'quiz' | null>(null);
 
   const selectedFile = files.find((file) => file.id === selectedFileId) ?? null;
   const sheetShape = getSheetShape(draft.metadata);
@@ -202,6 +408,25 @@ export default function DrivePage() {
       ? normalizeGrid(parseSheetContent(draft.content, draft.metadata), sheetShape.rowCount, sheetShape.colCount)
       : []
   ), [draft.content, draft.fileType, draft.metadata, sheetShape.colCount, sheetShape.rowCount]);
+  const documentBlocks = useMemo(
+    () => (draft.fileType === 'spreadsheet'
+      ? []
+      : (Array.isArray(draft.metadata?.documentBlocks) && draft.metadata.documentBlocks.length
+        ? draft.metadata.documentBlocks as DocumentBlock[]
+        : buildDocumentBlocksFromText(draft.content))),
+    [draft.content, draft.fileType, draft.metadata]
+  );
+  const sheetColumns = useMemo(
+    () => getSheetColumns(draft.metadata, sheetGrid[0]?.length ?? sheetShape.colCount),
+    [draft.metadata, sheetGrid, sheetShape.colCount]
+  );
+  const formulaCells = useMemo(
+    () => sheetGrid.flatMap((row, rowIndex) =>
+      row.flatMap((cell, colIndex) => cell.trim().startsWith('=')
+        ? [{ ref: `${getColumnLabel(colIndex)}${rowIndex + 1}`, formula: cell.trim(), value: String(evaluateFormula(cell.trim(), sheetGrid)) }]
+        : [])),
+    [sheetGrid]
+  );
 
   async function loadWorkspace() {
     setLoading(true);
@@ -312,6 +537,8 @@ export default function DrivePage() {
             editorMode,
             rowCount: draft.fileType === 'spreadsheet' ? sheetGrid.length : undefined,
             colCount: draft.fileType === 'spreadsheet' ? Math.max(...sheetGrid.map((row) => row.length), 0) : undefined,
+            sheetColumns: draft.fileType === 'spreadsheet' ? sheetColumns : undefined,
+            documentBlocks: draft.fileType === 'spreadsheet' ? undefined : documentBlocks,
           },
         }),
       });
@@ -378,6 +605,18 @@ export default function DrivePage() {
     }));
   }
 
+  function updateSheetColumnName(colIndex: number, value: string) {
+    const nextColumns = Array.from({ length: Math.max(sheetColumns.length, colIndex + 1) }, (_, index) =>
+      index === colIndex ? value : (sheetColumns[index] || `Column ${index + 1}`));
+    setDraft((current) => ({
+      ...current,
+      metadata: {
+        ...(current.metadata ?? {}),
+        sheetColumns: nextColumns,
+      },
+    }));
+  }
+
   function addSheetRow() {
     const nextGrid = [...sheetGrid, Array.from({ length: sheetShape.colCount }, () => '')];
     setDraft((current) => ({
@@ -408,12 +647,65 @@ export default function DrivePage() {
     setDraft((current) => ({
       ...current,
       content: current.content ? `${current.content}\n${prefix}` : prefix,
+      metadata: {
+        ...(current.metadata ?? {}),
+        documentBlocks: buildDocumentBlocksFromText(current.content ? `${current.content}\n${prefix}` : prefix),
+      },
     }));
+  }
+
+  function updateDocumentContent(nextContent: string) {
+    setDraft((current) => ({
+      ...current,
+      content: nextContent,
+      metadata: {
+        ...(current.metadata ?? {}),
+        documentBlocks: buildDocumentBlocksFromText(nextContent),
+      },
+    }));
+  }
+
+  async function generateStudyAsset(kind: 'flashcards' | 'quiz') {
+    if (!selectedFileId || generatingKind) {
+      return;
+    }
+
+    const studyText = buildStudyTextFromDraft(draft, sheetGrid);
+    if (studyText.length < 24) {
+      setStatus(`Add a little more detail before generating ${kind === 'flashcards' ? 'flashcards' : 'a quiz'}.`);
+      return;
+    }
+
+    setGeneratingKind(kind);
+    setStatus('');
+    try {
+      const response = await apiFetch(kind === 'flashcards' ? '/api/study/flashcards' : '/api/study/quiz', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: kind === 'flashcards' ? draft.name.trim() : `${draft.name.trim()} Quiz`,
+          text: studyText,
+          sourceFileId: selectedFileId,
+          sourceKind: 'native-file',
+          questionCount: kind === 'quiz' ? 6 : undefined,
+        }),
+      });
+      const payload = await readApiPayload(response);
+      if (!response.ok) {
+        throw new Error(typeof payload.message === 'string' ? payload.message : `Failed to create ${kind}`);
+      }
+      router.push(kind === 'flashcards'
+        ? `/study?set=${encodeURIComponent(String(payload.flashcardSetId ?? ''))}`
+        : `/study?quiz=${encodeURIComponent(String(payload.quizId ?? ''))}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : `Failed to create ${kind}`);
+    } finally {
+      setGeneratingKind(null);
+    }
   }
 
   const nativePreview = draft.fileType === 'spreadsheet'
     ? null
-    : renderRichPreview(draft.content);
+    : renderDocumentBlocksAsHtml(documentBlocks);
 
   return (
     <section className="space-y-6">
@@ -551,7 +843,10 @@ export default function DrivePage() {
                 </label>
                 <label className="form-field">
                   <span>Type</span>
-                  <select value={draft.fileType} onChange={(event) => setDraft((current) => ({ ...current, fileType: event.target.value as FileType }))}>
+                  <select
+                    value={draft.fileType}
+                    onChange={(event) => setDraft((current) => convertDraftForFileType(current, event.target.value as FileType))}
+                  >
                     {(['note', 'doc', 'spreadsheet'] as const).map((fileType) => (
                       <option key={fileType} value={fileType}>{FILE_TYPE_META[fileType].label}</option>
                     ))}
@@ -576,9 +871,16 @@ export default function DrivePage() {
                       <thead>
                         <tr className="bg-[color:var(--panel-2)]">
                           <th className="border-b border-r border-[color:var(--line)] px-3 py-2 text-left text-xs uppercase tracking-[0.14em] text-[color:var(--muted)]">#</th>
-                          {sheetGrid[0]?.map((_, colIndex) => (
+                          {sheetColumns.map((columnName, colIndex) => (
                             <th key={colIndex} className="border-b border-r border-[color:var(--line)] px-3 py-2 text-left text-xs uppercase tracking-[0.14em] text-[color:var(--muted)]">
-                              {String.fromCharCode(65 + colIndex)}
+                              <div className="space-y-1">
+                                <span>{getColumnLabel(colIndex)}</span>
+                                <input
+                                  value={columnName}
+                                  onChange={(event) => updateSheetColumnName(colIndex, event.target.value)}
+                                  className="w-full rounded-lg border border-[color:var(--line)] bg-[color:var(--panel)] px-2 py-1 text-[11px] font-medium normal-case tracking-normal text-[color:var(--copy)] outline-none"
+                                />
+                              </div>
                             </th>
                           ))}
                         </tr>
@@ -589,12 +891,19 @@ export default function DrivePage() {
                             <td className="border-b border-r border-[color:var(--line)] bg-[color:var(--panel-2)] px-3 py-2 text-xs text-[color:var(--muted)]">{rowIndex + 1}</td>
                             {row.map((cell, colIndex) => (
                               <td key={`${rowIndex}-${colIndex}`} className="border-b border-r border-[color:var(--line)] p-0">
-                                <input
-                                  value={cell}
-                                  onChange={(event) => updateSheetCell(rowIndex, colIndex, event.target.value)}
-                                  className="w-full border-0 bg-transparent px-3 py-2 outline-none"
-                                  placeholder="—"
-                                />
+                                <div className="space-y-1 px-2 py-2">
+                                  <input
+                                    value={cell}
+                                    onChange={(event) => updateSheetCell(rowIndex, colIndex, event.target.value)}
+                                    className="w-full border-0 bg-transparent px-1 py-1 outline-none"
+                                    placeholder="—"
+                                  />
+                                  {cell.trim().startsWith('=') ? (
+                                    <div className="text-[11px] text-[color:var(--muted)]">
+                                      {String(evaluateFormula(cell.trim(), sheetGrid))}
+                                    </div>
+                                  ) : null}
+                                </div>
                               </td>
                             ))}
                           </tr>
@@ -602,26 +911,67 @@ export default function DrivePage() {
                       </tbody>
                     </table>
                   </div>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--panel-2)] p-4">
+                      <p className="eyebrow">Structured sheet</p>
+                      <h3 className="section-title">Headers and formulas</h3>
+                      <p className="mt-2 text-sm text-[color:var(--muted)]">
+                        Use column names for cleaner exports and formulas like <code>=A2+B2</code>, <code>=SUM(B2:B6)</code>, or <code>=AVG(C2:C5)</code>.
+                      </p>
+                    </section>
+                    <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--panel-2)] p-4">
+                      <p className="eyebrow">Live sheet stats</p>
+                      <h3 className="section-title">{sheetGrid.length} rows · {sheetColumns.length} columns</h3>
+                      <p className="mt-2 text-sm text-[color:var(--muted)]">
+                        {formulaCells.length ? `${formulaCells.length} formula cells will export with their evaluated values for study tools.` : 'Add formulas to turn this from a plain grid into a working study sheet.'}
+                      </p>
+                    </section>
+                  </div>
+                  {formulaCells.length ? (
+                    <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--panel-2)] p-4">
+                      <p className="eyebrow">Formula outputs</p>
+                      <div className="mt-3 grid gap-2 md:grid-cols-2">
+                        {formulaCells.slice(0, 8).map((entry) => (
+                          <article key={entry.ref} className="rounded-xl border border-[color:var(--line)] bg-[color:var(--panel)] px-3 py-2 text-sm">
+                            <strong>{entry.ref}</strong>
+                            <p className="mt-1 text-[color:var(--muted)]">{entry.formula}</p>
+                            <p className="mt-1 font-medium">{entry.value}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  ) : null}
                 </div>
               ) : (
                 <>
                   <div className="flex flex-wrap gap-2">
-                    <button type="button" className="ghost-button" onClick={() => insertTemplate('# Heading')}>
-                      <Heading1 className="mr-2 inline h-4 w-4" />
-                      Heading
-                    </button>
-                    <button type="button" className="ghost-button" onClick={() => insertTemplate('- Bullet')}>
-                      <List className="mr-2 inline h-4 w-4" />
-                      Bullet list
-                    </button>
-                    <button type="button" className="ghost-button" onClick={() => insertTemplate('- [ ] Checklist item')}>
-                      <CheckSquare className="mr-2 inline h-4 w-4" />
-                      Checklist
-                    </button>
-                    <button type="button" className="ghost-button" onClick={() => insertTemplate('> Key quote or takeaway')}>
-                      <Quote className="mr-2 inline h-4 w-4" />
-                      Quote block
-                    </button>
+                    {BLOCK_TEMPLATES.map(({ type, label, icon: Icon, prefix }) => (
+                      <button key={type} type="button" className="ghost-button" onClick={() => insertTemplate(prefix)}>
+                        <Icon className="mr-2 inline h-4 w-4" />
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-[1.2fr_0.8fr]">
+                    <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--panel-2)] p-4">
+                      <p className="eyebrow">Structured doc model</p>
+                      <h3 className="section-title">{documentBlocks.length} formatting blocks tracked</h3>
+                      <p className="mt-2 text-sm text-[color:var(--muted)]">
+                        StudyClaw stores headings, lists, checklists, and quotes as structured metadata so previews and study generation stay stable.
+                      </p>
+                    </section>
+                    <section className="rounded-2xl border border-[color:var(--line)] bg-[color:var(--panel-2)] p-4">
+                      <p className="eyebrow">Outline</p>
+                      <div className="mt-3 space-y-2 text-sm">
+                        {documentBlocks.slice(0, 8).map((block, index) => (
+                          <div key={`${block.type}-${index}`} className="rounded-xl border border-[color:var(--line)] bg-[color:var(--panel)] px-3 py-2">
+                            <strong className="capitalize">{block.type.replace('_', ' ')}</strong>
+                            <p className="mt-1 text-[color:var(--muted)]">{block.text}</p>
+                          </div>
+                        ))}
+                        {!documentBlocks.length ? <p className="text-[color:var(--muted)]">Start writing to build an outline.</p> : null}
+                      </div>
+                    </section>
                   </div>
 
                   {editorMode === 'write' ? (
@@ -630,7 +980,7 @@ export default function DrivePage() {
                       <textarea
                         rows={22}
                         value={draft.content}
-                        onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
+                        onChange={(event) => updateDocumentContent(event.target.value)}
                         placeholder="Write study notes, reading summaries, formulas, prompt scaffolds, or planning notes here."
                       />
                     </label>
@@ -649,7 +999,7 @@ export default function DrivePage() {
                         <textarea
                           rows={22}
                           value={draft.content}
-                          onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
+                          onChange={(event) => updateDocumentContent(event.target.value)}
                           placeholder="Write study notes, reading summaries, formulas, prompt scaffolds, or planning notes here."
                         />
                       </label>
@@ -670,6 +1020,14 @@ export default function DrivePage() {
                   Created {formatDate(selectedFile.createdAt)} · Updated {formatDate(selectedFile.updatedAt)}
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  <button type="button" className="ghost-button" onClick={() => void generateStudyAsset('flashcards')} disabled={saving || generatingKind !== null}>
+                    <Sparkles className="mr-2 inline h-4 w-4" />
+                    {generatingKind === 'flashcards' ? 'Creating flashcards…' : 'Make flashcards'}
+                  </button>
+                  <button type="button" className="ghost-button" onClick={() => void generateStudyAsset('quiz')} disabled={saving || generatingKind !== null}>
+                    <Sparkles className="mr-2 inline h-4 w-4" />
+                    {generatingKind === 'quiz' ? 'Creating quiz…' : 'Make quiz'}
+                  </button>
                   <button type="button" className="ghost-button" onClick={() => void deleteFile()} disabled={saving}>
                     <Trash2 className="mr-2 inline h-4 w-4" />
                     Delete

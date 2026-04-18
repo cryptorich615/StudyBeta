@@ -14,6 +14,110 @@ studyToolsRouter.use(requireAuth);
 
 const openclaw = new OpenClawClient();
 
+type NativeStudyFileRow = {
+    id: string;
+    name: string;
+    file_type: 'doc' | 'spreadsheet' | 'note';
+    content: string;
+    metadata_json?: Record<string, unknown> | null;
+};
+
+function normalizeLine(value: unknown) {
+    return String(value ?? '').trim();
+}
+
+function buildTextFromDocumentBlocks(metadata: Record<string, unknown>) {
+    const blocks = Array.isArray(metadata.documentBlocks) ? metadata.documentBlocks : [];
+    if (!blocks.length) {
+        return '';
+    }
+
+    return blocks
+        .map((block) => {
+            if (!block || typeof block !== 'object') {
+                return '';
+            }
+
+            const entry = block as Record<string, unknown>;
+            const type = String(entry.type ?? 'paragraph');
+            const text = normalizeLine(entry.text);
+            if (!text) {
+                return '';
+            }
+
+            if (type === 'heading') return `# ${text}`;
+            if (type === 'subheading') return `## ${text}`;
+            if (type === 'checklist') return `- [${entry.checked ? 'x' : ' '}] ${text}`;
+            if (type === 'bullet') return `- ${text}`;
+            if (type === 'quote') return `> ${text}`;
+            return text;
+        })
+        .filter(Boolean)
+        .join('\n');
+}
+
+function buildTextFromSpreadsheet(file: NativeStudyFileRow) {
+    const metadata = (file.metadata_json && typeof file.metadata_json === 'object' && !Array.isArray(file.metadata_json))
+        ? file.metadata_json
+        : {};
+    const headers = Array.isArray((metadata as any).sheetColumns)
+        ? (metadata as any).sheetColumns.map((value: unknown, index: number) => normalizeLine(value) || `Column ${index + 1}`)
+        : [];
+
+    try {
+        const parsed = JSON.parse(file.content || '[]');
+        if (!Array.isArray(parsed)) {
+            return file.content || '';
+        }
+
+        const rows = parsed
+            .filter((row) => Array.isArray(row))
+            .map((row) => (row as unknown[]).map((cell) => String(cell ?? '').trim()));
+
+        const lines: string[] = [];
+        if (headers.length) {
+            lines.push(headers.join('\t'));
+        }
+        for (const row of rows) {
+            if (row.some(Boolean)) {
+                lines.push(row.join('\t'));
+            }
+        }
+        return lines.join('\n');
+    } catch {
+        return file.content || '';
+    }
+}
+
+function buildStudyTextFromNativeFile(file: NativeStudyFileRow) {
+    const metadata = (file.metadata_json && typeof file.metadata_json === 'object' && !Array.isArray(file.metadata_json))
+        ? file.metadata_json
+        : {};
+
+    if (file.file_type === 'spreadsheet') {
+        return buildTextFromSpreadsheet(file);
+    }
+
+    const structured = buildTextFromDocumentBlocks(metadata);
+    return structured || file.content || '';
+}
+
+async function resolveNativeStudySource(userId: string, sourceFileId: unknown) {
+    if (typeof sourceFileId !== 'string' || !sourceFileId.trim()) {
+        return null;
+    }
+
+    const result = await db.query(
+        `select id, name, file_type, content, metadata_json
+         from studyclaw_files
+         where id = $1 and user_id = $2
+         limit 1`,
+        [sourceFileId.trim(), userId]
+    );
+
+    return (result.rows[0] as NativeStudyFileRow | undefined) ?? null;
+}
+
 async function getStudentAgentRecord(userId: string) {
     const result = await db.query(`select id, name from agents where user_id = $1`, [userId]);
     return result.rows[0] ?? null;
@@ -162,12 +266,15 @@ studyToolsRouter.get('/library', async (req: AuthedRequest, res) => {
 
 studyToolsRouter.post('/flashcards', async (req: AuthedRequest, res) => {
     await ensurePlatformSchema();
-    const { title, text, sourceAssetId, subjectId, audienceLevel } = req.body as any;
+    const { sourceAssetId, subjectId, audienceLevel, sourceFileId, sourceKind } = req.body as any;
+    const nativeSource = await resolveNativeStudySource(req.user!.id, sourceFileId);
+    const title = String(req.body?.title ?? nativeSource?.name ?? '').trim();
+    const text = String(req.body?.text ?? '').trim() || (nativeSource ? buildStudyTextFromNativeFile(nativeSource) : '');
 
     if (!title || !text) {
         return res.status(400).json({
             error: 'bad_request',
-            message: 'title and text are required',
+            message: 'title and text are required, or provide a valid sourceFileId',
         });
     }
 
@@ -214,6 +321,9 @@ ${text}
         metadata: {
             feature: 'flashcards',
             sourceAssetId,
+            sourceFileId: nativeSource?.id ?? null,
+            sourceFileType: nativeSource?.file_type ?? null,
+            sourceKind: sourceKind ?? (nativeSource ? 'native-file' : null),
             subjectId,
             googleConnected: context.workspace.googleConnected,
             workspaceCalendarBackend: context.workspace.calendarBackend,
@@ -265,18 +375,22 @@ ${text}
 
     res.json({
         flashcardSetId: set.rows[0].id,
+        sourceFileId: nativeSource?.id ?? null,
         cards,
     });
 });
 
 studyToolsRouter.post('/quiz', async (req: AuthedRequest, res) => {
     await ensurePlatformSchema();
-    const { title, text, sourceAssetId, subjectId, questionCount = 10, mode = 'practice', audienceLevel } = req.body as any;
+    const { sourceAssetId, subjectId, questionCount = 10, mode = 'practice', audienceLevel, sourceFileId, sourceKind } = req.body as any;
+    const nativeSource = await resolveNativeStudySource(req.user!.id, sourceFileId);
+    const title = String(req.body?.title ?? nativeSource?.name ?? '').trim();
+    const text = String(req.body?.text ?? '').trim() || (nativeSource ? buildStudyTextFromNativeFile(nativeSource) : '');
 
     if (!title || !text) {
         return res.status(400).json({
             error: 'bad_request',
-            message: 'title and text are required',
+            message: 'title and text are required, or provide a valid sourceFileId',
         });
     }
 
@@ -333,6 +447,9 @@ ${text}
         metadata: {
             feature: 'quiz',
             sourceAssetId,
+            sourceFileId: nativeSource?.id ?? null,
+            sourceFileType: nativeSource?.file_type ?? null,
+            sourceKind: sourceKind ?? (nativeSource ? 'native-file' : null),
             subjectId,
             questionCount,
             mode,
@@ -411,6 +528,7 @@ ${text}
 
     res.json({
         quizId: quiz.rows[0].id,
+        sourceFileId: nativeSource?.id ?? null,
         questions,
     });
 });

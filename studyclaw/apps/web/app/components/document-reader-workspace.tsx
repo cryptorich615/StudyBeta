@@ -146,8 +146,8 @@ type Props = {
   initialAssetId?: string | null;
   initialBookId?: string | null;
   mode?: 'embedded' | 'full';
-  onUseForFlashcards?: (input: { title: string; text: string }) => void;
-  onUseForQuiz?: (input: { title: string; text: string }) => void;
+  onUseForFlashcards?: (input: { title: string; text: string; sourceFileId?: string; sourceKind?: 'native-file' | 'asset' | 'google' | 'book' }) => void;
+  onUseForQuiz?: (input: { title: string; text: string; sourceFileId?: string; sourceKind?: 'native-file' | 'asset' | 'google' | 'book' }) => void;
 };
 
 type WorkspaceItem =
@@ -1292,13 +1292,13 @@ export default function DocumentReaderWorkspace({
               </div>
               <div className="reader-workspace__ai-actions">
                 {onUseForFlashcards ? (
-                  <button type="button" onClick={() => onUseForFlashcards({ title: activeAsset.title, text: activeAsset.content || activeAsset.summary || '' })}>
+                  <button type="button" onClick={() => onUseForFlashcards({ title: activeAsset.title, text: activeAsset.content || activeAsset.summary || '', sourceKind: 'asset' })}>
                     <Sparkles className="w-4 h-4" />
                     Use for flashcards
                   </button>
                 ) : null}
                 {onUseForQuiz ? (
-                  <button type="button" onClick={() => onUseForQuiz({ title: activeAsset.title, text: activeAsset.content || activeAsset.summary || '' })}>
+                  <button type="button" onClick={() => onUseForQuiz({ title: activeAsset.title, text: activeAsset.content || activeAsset.summary || '', sourceKind: 'asset' })}>
                     <Sparkles className="w-4 h-4" />
                     Use for quiz
                   </button>
@@ -1409,13 +1409,13 @@ export default function DocumentReaderWorkspace({
               </div>
               <div className="reader-workspace__ai-actions">
                 {onUseForFlashcards ? (
-                  <button type="button" onClick={() => onUseForFlashcards({ title: activeNativeFile.title, text: activeNativeFile.content || activeNativeFile.summary || '' })}>
+                  <button type="button" onClick={() => onUseForFlashcards({ title: activeNativeFile.title, text: activeNativeFile.content || activeNativeFile.summary || '', sourceFileId: activeNativeFile.id, sourceKind: 'native-file' })}>
                     <Sparkles className="w-4 h-4" />
                     Use for flashcards
                   </button>
                 ) : null}
                 {onUseForQuiz ? (
-                  <button type="button" onClick={() => onUseForQuiz({ title: activeNativeFile.title, text: activeNativeFile.content || activeNativeFile.summary || '' })}>
+                  <button type="button" onClick={() => onUseForQuiz({ title: activeNativeFile.title, text: activeNativeFile.content || activeNativeFile.summary || '', sourceFileId: activeNativeFile.id, sourceKind: 'native-file' })}>
                     <Sparkles className="w-4 h-4" />
                     Use for quiz
                   </button>
@@ -1504,13 +1504,13 @@ export default function DocumentReaderWorkspace({
               </div>
               <div className="reader-workspace__ai-actions">
                 {onUseForFlashcards ? (
-                  <button type="button" onClick={() => onUseForFlashcards({ title: activeGoogleFile.title, text: activeGoogleFile.content || activeGoogleFile.summary || '' })}>
+                  <button type="button" onClick={() => onUseForFlashcards({ title: activeGoogleFile.title, text: activeGoogleFile.content || activeGoogleFile.summary || '', sourceKind: 'google' })}>
                     <Sparkles className="w-4 h-4" />
                     Use for flashcards
                   </button>
                 ) : null}
                 {onUseForQuiz ? (
-                  <button type="button" onClick={() => onUseForQuiz({ title: activeGoogleFile.title, text: activeGoogleFile.content || activeGoogleFile.summary || '' })}>
+                  <button type="button" onClick={() => onUseForQuiz({ title: activeGoogleFile.title, text: activeGoogleFile.content || activeGoogleFile.summary || '', sourceKind: 'google' })}>
                     <Sparkles className="w-4 h-4" />
                     Use for quiz
                   </button>
