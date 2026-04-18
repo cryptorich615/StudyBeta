@@ -86,6 +86,20 @@ const statements = [
     )
   `,
   `
+    create table if not exists studyclaw_events (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid not null references users(id) on delete cascade,
+      title text not null,
+      description text,
+      start_time timestamptz not null,
+      end_time timestamptz,
+      event_type text not null default 'personal' check (event_type in ('class', 'assignment', 'exam', 'personal')),
+      metadata_json jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    )
+  `,
+  `
     create index if not exists idx_agents_user_id on agents(user_id)
   `,
   `
@@ -107,6 +121,12 @@ const statements = [
     create index if not exists idx_grade_course_settings_course_id on grade_course_settings(course_id)
   `,
   `
+    create index if not exists idx_studyclaw_events_user_id on studyclaw_events(user_id)
+  `,
+  `
+    create index if not exists idx_studyclaw_events_start_time on studyclaw_events(start_time)
+  `,
+  `
     do $$
     begin
       if not exists (select 1 from pg_trigger where tgname = 'trg_agents_updated_at') then
@@ -120,6 +140,9 @@ const statements = [
       end if;
       if not exists (select 1 from pg_trigger where tgname = 'trg_grade_course_settings_updated_at') then
         create trigger trg_grade_course_settings_updated_at before update on grade_course_settings for each row execute function set_updated_at();
+      end if;
+      if not exists (select 1 from pg_trigger where tgname = 'trg_studyclaw_events_updated_at') then
+        create trigger trg_studyclaw_events_updated_at before update on studyclaw_events for each row execute function set_updated_at();
       end if;
     end $$;
   `,

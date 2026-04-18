@@ -13,6 +13,31 @@ type ReminderRow = {
   metadata_json?: Record<string, unknown> | null;
 };
 
+type NativeCalendarEventRow = {
+  id: string;
+  title: string;
+  description: string | null;
+  start_time: string;
+  end_time: string | null;
+  event_type: string;
+  metadata_json?: Record<string, unknown> | null;
+};
+
+function mapNativeCalendarEvent(row: NativeCalendarEventRow) {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description ?? null,
+    startsAt: row.start_time,
+    endsAt: row.end_time ?? null,
+    htmlLink: null,
+    source: 'studyclaw' as const,
+    sourceLabel: 'StudyClaw Calendar',
+    eventType: row.event_type,
+    metadata: row.metadata_json ?? {},
+  };
+}
+
 function hoursUntil(value: string) {
   return (new Date(value).getTime() - Date.now()) / (1000 * 60 * 60);
 }
@@ -88,6 +113,7 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
     studentAgentResult,
     activityResult,
     googleStatus,
+    nativeCalendarResult,
   ] = await Promise.all([
     db.query(
       `select id, title, type, status, reminder_at, metadata_json
@@ -118,6 +144,15 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
       [userId]
     ),
     getGoogleConnectionStatus(userId),
+    db.query(
+      `select id, title, description, start_time, end_time, event_type, metadata_json
+       from studyclaw_events
+       where user_id = $1
+         and coalesce(end_time, start_time) >= now() - interval '12 hours'
+       order by start_time asc
+       limit 12`,
+      [userId]
+    ).catch(() => ({ rows: [] })),
   ]);
 
   const reminders = (remindersResult.rows as ReminderRow[])
@@ -127,10 +162,6 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
   const todayTasks = reminders.filter((reminder) => hoursUntil(reminder.reminder_at) < 24).slice(0, 4);
   const dueSoon = reminders.slice(0, 5);
   const nextExam = reminders.find((reminder) => /exam|quiz|test|midterm|final/i.test(reminder.type)) ?? null;
-  const calendarConnected = googleStatus.connected || reminders.some((reminder) => {
-    const metadata = reminder.metadata_json ?? {};
-    return Boolean((metadata as Record<string, unknown>).calendarSource);
-  });
 
   const counts = {
     flashcardSets: flashcardSetsResult.rows[0]?.count ?? 0,
@@ -139,7 +170,38 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
     knowledgeItems: knowledgeItemsResult.rows[0]?.count ?? 0,
   };
 
-  const calendarEvents = googleStatus.connected ? await listUpcomingCalendarEvents(userId, 5).catch(() => []) : [];
+  const nativeCalendarEvents = (nativeCalendarResult.rows as NativeCalendarEventRow[]).map(mapNativeCalendarEvent);
+  const googleCalendarEvents = googleStatus.connected
+    ? await listUpcomingCalendarEvents(userId, 5)
+        .then((events) => events.map((event) => ({
+          ...event,
+          source: 'google' as const,
+          sourceLabel: 'Google Calendar',
+          eventType: 'calendar',
+          description: null,
+          metadata: {},
+        })))
+        .catch(() => [])
+    : [];
+  const calendarEvents = [...nativeCalendarEvents, ...googleCalendarEvents]
+    .sort((left, right) => {
+      const leftTime = left.startsAt ? new Date(left.startsAt).getTime() : Number.MAX_SAFE_INTEGER;
+      const rightTime = right.startsAt ? new Date(right.startsAt).getTime() : Number.MAX_SAFE_INTEGER;
+      return leftTime - rightTime;
+    })
+    .slice(0, 8);
+  const calendarConnected = googleStatus.connected || nativeCalendarEvents.length > 0 || reminders.some((reminder) => {
+    const metadata = reminder.metadata_json ?? {};
+    return Boolean((metadata as Record<string, unknown>).calendarSource);
+  });
+  const sourceLabel =
+    googleStatus.connected && nativeCalendarEvents.length
+      ? 'Google + StudyClaw calendar'
+      : googleStatus.connected
+        ? 'Google Calendar connected'
+        : nativeCalendarEvents.length
+          ? 'StudyClaw Calendar active'
+          : 'Calendar not connected';
 
   res.json({
     generatedAt: new Date().toISOString(),
@@ -151,13 +213,28 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
       nextRunAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
       source: calendarConnected ? 'calendar-and-reminders' : 'reminders-only',
       summary: calendarConnected
-        ? 'Priority swaps consider connected schedule data and upcoming reminders.'
-        : 'Priority swaps currently use StudyClaw reminders. Connect calendar data next for class-aware ordering.',
+        ? 'Priority swaps consider your connected calendar sources and upcoming reminders.'
+        : 'Priority swaps currently use StudyClaw reminders. Add calendar events next for time-aware ordering.',
     },
     integrations: {
       calendarConnected,
-      sourceLabel: calendarConnected ? 'Calendar connected' : 'Calendar not connected',
+      sourceLabel,
       googleEmail: googleStatus.googleEmail,
+      nativeCalendarReady: true,
+      sources: [
+        {
+          key: 'studyclaw',
+          label: 'StudyClaw Calendar',
+          connected: true,
+          eventCount: nativeCalendarEvents.length,
+        },
+        {
+          key: 'google',
+          label: 'Google Calendar',
+          connected: googleStatus.connected,
+          eventCount: googleCalendarEvents.length,
+        },
+      ],
     },
     studentAgent: studentAgentResult.rows[0] ?? null,
     counts,

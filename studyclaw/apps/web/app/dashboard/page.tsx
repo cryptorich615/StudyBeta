@@ -40,6 +40,13 @@ type DashboardData = {
     calendarConnected: boolean;
     sourceLabel: string;
     googleEmail?: string | null;
+    nativeCalendarReady?: boolean;
+    sources?: Array<{
+      key: string;
+      label: string;
+      connected: boolean;
+      eventCount: number;
+    }>;
   };
   studentAgent?: {
     name: string;
@@ -104,9 +111,13 @@ type DashboardData = {
   calendarEvents: Array<{
     id: string;
     title: string;
+    description?: string | null;
     startsAt: string | null;
     endsAt: string | null;
     htmlLink: string | null;
+    source?: 'studyclaw' | 'google';
+    sourceLabel?: string;
+    eventType?: string | null;
   }>;
   activityFeed: Array<{
     action_type: string;
@@ -134,6 +145,8 @@ function normalizeDashboardData(payload: Partial<DashboardData>): DashboardData 
       calendarConnected: payload.integrations?.calendarConnected ?? false,
       sourceLabel: payload.integrations?.sourceLabel ?? 'Calendar not connected',
       googleEmail: payload.integrations?.googleEmail ?? null,
+      nativeCalendarReady: payload.integrations?.nativeCalendarReady ?? true,
+      sources: payload.integrations?.sources ?? [],
     },
     studentAgent: payload.studentAgent ?? null,
     counts: {
@@ -236,7 +249,7 @@ type DashboardRenderProps = {
   setTaskDraft: Dispatch<SetStateAction<TaskDraft | null>>;
 };
 
-function DashboardStatusNotices({ data, loading, status, handleGoogleConnect }: Pick<DashboardRenderProps, 'data' | 'loading' | 'status' | 'handleGoogleConnect'>) {
+function DashboardStatusNotices({ data, loading, status }: Pick<DashboardRenderProps, 'data' | 'loading' | 'status'>) {
   return (
     <>
       {loading && !data ? <StatusBanner tone="neutral">Loading your dashboard...</StatusBanner> : null}
@@ -248,10 +261,7 @@ function DashboardStatusNotices({ data, loading, status, handleGoogleConnect }: 
       ) : null}
       {data && !data.integrations.calendarConnected ? (
         <StatusBanner tone="warning">
-          <button type="button" className="inline-edit-button" onClick={() => void handleGoogleConnect('/dashboard')}>
-            Connect Google Calendar
-          </button>{' '}
-          to layer classes, exams, and deadlines onto your board.
+          Add your first event in <Link href="/calendar" className="inline-edit-button">StudyClaw Calendar</Link> or connect Google Calendar to layer classes, exams, and deadlines onto your board.
         </StatusBanner>
       ) : null}
     </>
@@ -617,35 +627,53 @@ function CalendarPanel({ data, handleGoogleConnect }: Pick<DashboardRenderProps,
           <h2 className="section-title">Upcoming events</h2>
         </div>
       </div>
-      {data?.integrations.googleEmail ? (
-        data.calendarEvents.length ? (
-          <div className="stack-list">
-            {data.calendarEvents.slice(0, 4).map((event) => (
-              <article key={event.id} className="stack-item">
-                <div>
-                  <strong>{event.title}</strong>
+      {(data?.integrations.sources ?? []).length ? (
+        <div className="mb-3 flex flex-wrap gap-2">
+          {data?.integrations.sources?.map((source) => (
+            <span key={source.key} className={`insight-chip ${source.connected ? '' : 'is-muted'}`}>
+              {source.label} · {source.eventCount}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {data?.calendarEvents.length ? (
+        <div className="stack-list">
+          {data.calendarEvents.slice(0, 4).map((event) => (
+            <article key={event.id} className="stack-item">
+              <div>
+                <strong>{event.title}</strong>
+                <p className="muted-copy" style={{ margin: '4px 0 0' }}>
+                  {event.startsAt ? formatDate(event.startsAt) : 'Date unavailable'}
+                </p>
+                {event.sourceLabel ? (
                   <p className="muted-copy" style={{ margin: '4px 0 0' }}>
-                    {event.startsAt ? formatDate(event.startsAt) : 'Date unavailable'}
+                    {event.sourceLabel}
                   </p>
-                </div>
-                {event.htmlLink ? (
-                  <Link href={event.htmlLink} target="_blank" rel="noreferrer" className="ghost-button">
-                    Open
-                  </Link>
                 ) : null}
-              </article>
-            ))}
-            <Link href="/calendar" className="ghost-button">
-              View calendar
-            </Link>
-          </div>
-        ) : (
-          <p className="muted-copy">No upcoming Google Calendar events are available yet.</p>
-        )
+              </div>
+              {event.htmlLink ? (
+                <Link href={event.htmlLink} target="_blank" rel="noreferrer" className="ghost-button">
+                  Open
+                </Link>
+              ) : null}
+            </article>
+          ))}
+          <Link href="/calendar" className="ghost-button">
+            View calendar
+          </Link>
+        </div>
       ) : (
-        <button type="button" className="ghost-button" onClick={() => void handleGoogleConnect('/dashboard')}>
-          Connect Google Calendar
-        </button>
+        <div className="stack-list">
+          <p className="muted-copy">StudyClaw Calendar is ready. Add your first event or connect Google Calendar for a second source.</p>
+          <div className="actions">
+            <Link href="/calendar" className="ghost-button">
+              Open StudyClaw Calendar
+            </Link>
+            <button type="button" className="ghost-button" onClick={() => void handleGoogleConnect('/dashboard')}>
+              Connect Google Calendar
+            </button>
+          </div>
+        </div>
       )}
     </section>
   );
@@ -785,7 +813,6 @@ function DefaultDashboardLayout(props: DashboardRenderProps) {
         data={props.data}
         loading={props.loading}
         status={props.status}
-        handleGoogleConnect={props.handleGoogleConnect}
       />
       <DashboardRibbon data={data} upcomingExams={upcomingExams} weeklyGoalProgress={weeklyGoalProgress} />
 
@@ -913,7 +940,6 @@ function AlternateDashboardLayout(props: DashboardRenderProps) {
           data={props.data}
           loading={props.loading}
           status={props.status}
-          handleGoogleConnect={props.handleGoogleConnect}
         />
 
         <DashboardRibbon data={data} upcomingExams={upcomingExams} weeklyGoalProgress={weeklyGoalProgress} />
