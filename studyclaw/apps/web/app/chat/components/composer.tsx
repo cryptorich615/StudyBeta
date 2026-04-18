@@ -6,6 +6,12 @@ type PendingDocument = {
   type: string;
 };
 
+type NativeDocument = {
+  id: string;
+  name: string;
+  type: string;
+};
+
 type ComposerCommand = {
   name: string;
   description: string;
@@ -17,6 +23,8 @@ type ComposerProps = {
   studyMode: string;
   studyModes: Array<{ key: string; label: string }>;
   pendingDocuments: PendingDocument[];
+  nativeDocuments: NativeDocument[];
+  nativePickerOpen: boolean;
   commandOpen: boolean;
   matchingCommands: ComposerCommand[];
   defaultCommands: ComposerCommand[];
@@ -24,6 +32,8 @@ type ComposerProps = {
   onChangeMessage: (value: string) => void;
   onSelectMode: (mode: string) => void;
   onToggleCommands: () => void;
+  onToggleNativePicker: () => void;
+  onSelectNativeDocument: (documentId: string) => void;
   onSelectCommand: (command: string) => void;
   onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
   onSend: () => void;
@@ -49,10 +59,34 @@ export default function Composer(props: ComposerProps) {
           onChange={props.onFileChange}
         />
 
+        <button type="button" className="study-chat-composer__toolbar-button is-secondary" onClick={props.onToggleNativePicker}>
+          Use Drive file
+        </button>
         <button type="button" className="study-chat-composer__toolbar-button is-secondary" onClick={props.onToggleCommands}>
           /
         </button>
       </div>
+
+      {props.nativePickerOpen ? (
+        <div className="study-chat-composer__menu">
+          {props.nativeDocuments.length ? props.nativeDocuments.map((document) => (
+            <button
+              key={document.id}
+              type="button"
+              className="study-chat-composer__menu-item"
+              onClick={() => props.onSelectNativeDocument(document.id)}
+            >
+              <strong>{document.name}</strong>
+              <span>{document.type}</span>
+            </button>
+          )) : (
+            <div className="study-chat-composer__menu-item">
+              <strong>No StudyClaw files yet</strong>
+              <span>Create a note, doc, or sheet in Drive first.</span>
+            </div>
+          )}
+        </div>
+      ) : null}
 
       <div className="study-chat-composer__modes" role="tablist" aria-label="Study mode">
         {props.studyModes.map((mode) => (

@@ -39,8 +39,85 @@ export const coachRouter = Router();
 
 coachRouter.use(requireAuth);
 
-coachRouter.get('/assets', async (_req: AuthedRequest, res) => {
-  res.json({ assets: [] });
+coachRouter.get('/assets', async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+
+  const [assetResult, nativeFilesResult] = await Promise.all([
+    db.query(
+      `select
+         sa.id,
+         sa.title,
+         sa.original_text,
+         sa.processed_text,
+         sa.asset_type,
+         sa.metadata_json,
+         sa.created_at,
+         sa.updated_at,
+         sa.subject_id,
+         coalesce(s.name, sa.section_name, 'Unsorted') as section_name
+       from study_assets sa
+       left join subjects s on s.id = sa.subject_id
+       where sa.user_id = $1
+       order by sa.updated_at desc, sa.created_at desc`,
+      [req.user!.id]
+    ).catch(async () => {
+      // Older databases may not have every newer column. Fall back to a narrower shape.
+      return db.query(
+        `select
+           sa.id,
+           sa.title,
+           sa.original_text,
+           sa.processed_text,
+           sa.asset_type,
+           sa.metadata_json,
+           sa.created_at,
+           sa.updated_at,
+           sa.subject_id,
+           'Unsorted'::text as section_name
+         from study_assets sa
+         where sa.user_id = $1
+         order by sa.updated_at desc nulls last, sa.created_at desc`,
+        [req.user!.id]
+      );
+    }),
+    db.query(
+      `select id, name, file_type, content, metadata_json, created_at, updated_at
+       from studyclaw_files
+       where user_id = $1
+       order by updated_at desc, created_at desc`,
+      [req.user!.id]
+    ),
+  ]);
+
+  res.json({
+    assets: assetResult.rows.map((row) => ({
+      id: String(row.id),
+      title: String(row.title ?? 'Untitled note'),
+      originalText: String(row.original_text ?? ''),
+      processedText: String(row.processed_text ?? ''),
+      assetType: String(row.asset_type ?? 'typed_note'),
+      metadata: (row.metadata_json ?? {}) as Record<string, unknown>,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      subjectId: row.subject_id ?? null,
+      sectionName: String(row.section_name ?? 'Unsorted'),
+      source: 'backpack' as const,
+    })),
+    nativeFiles: nativeFilesResult.rows.map((row) => ({
+      id: String(row.id),
+      title: String(row.name ?? 'Untitled file'),
+      originalText: String(row.content ?? ''),
+      processedText: String(row.content ?? ''),
+      assetType: `studyclaw_${String(row.file_type ?? 'note')}`,
+      metadata: (row.metadata_json ?? {}) as Record<string, unknown>,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      subjectId: null,
+      sectionName: 'StudyClaw Drive',
+      source: 'native-file' as const,
+      fileType: String(row.file_type ?? 'note'),
+    })),
+  });
 });
 
 coachRouter.get('/knowledge', async (req: AuthedRequest, res) => {

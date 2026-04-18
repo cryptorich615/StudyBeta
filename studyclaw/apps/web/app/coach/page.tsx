@@ -41,6 +41,8 @@ type SavedNote = {
   updatedAt: string;
   subjectId: string | null;
   sectionName: string;
+  source?: 'backpack' | 'native-file';
+  fileType?: 'doc' | 'spreadsheet' | 'note' | null;
 };
 
 type FlashcardSet = {
@@ -125,6 +127,7 @@ export default function CoachPage() {
   const [knowledgeDrafts, setKnowledgeDrafts] = useState<Array<{ title: string; detail: string; kind: string }>>([]);
   const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeItem[]>([]);
   const [savedNotes, setSavedNotes] = useState<SavedNote[]>([]);
+  const [nativeFiles, setNativeFiles] = useState<SavedNote[]>([]);
   const [studyLibrary, setStudyLibrary] = useState<StudyLibrary>({ flashcardSets: [], quizzes: [] });
   const [generatingAsset, setGeneratingAsset] = useState<'flashcards' | 'quiz' | null>(null);
   const [noteActionStatus, setNoteActionStatus] = useState<{ tone: 'neutral' | 'warning'; message: string } | null>(null);
@@ -203,12 +206,16 @@ export default function CoachPage() {
       return;
     }
 
-    setSavedNotes(data);
+    const nextSavedNotes = Array.isArray(data.assets) ? data.assets : [];
+    const nextNativeFiles = Array.isArray(data.nativeFiles) ? data.nativeFiles : [];
+    setSavedNotes(nextSavedNotes);
+    setNativeFiles(nextNativeFiles);
     const nextSelectedId =
       preferredDocumentId ??
       queryPreferredAssetId ??
       selectedDocumentId ??
-      data[0]?.id ??
+      nextSavedNotes[0]?.id ??
+      nextNativeFiles[0]?.id ??
       null;
     setSelectedDocumentId(nextSelectedId);
   }
@@ -337,7 +344,11 @@ export default function CoachPage() {
     setKnowledgeItems((current) => [data, ...current]);
   }
 
-  const selectedDocument = savedNotes.find((asset) => asset.id === selectedDocumentId) ?? savedNotes[0] ?? null;
+  const coachDocuments = useMemo(
+    () => [...savedNotes, ...nativeFiles].sort((left, right) => String(right.updatedAt ?? right.createdAt ?? '').localeCompare(String(left.updatedAt ?? left.createdAt ?? ''))),
+    [nativeFiles, savedNotes]
+  );
+  const selectedDocument = coachDocuments.find((asset) => asset.id === selectedDocumentId) ?? coachDocuments[0] ?? null;
   const selectedDocumentText = selectedDocument?.processedText || selectedDocument?.originalText || coachTranscript;
   const selectedActionItems = Array.isArray(selectedDocument?.metadata?.actionItems)
     ? selectedDocument!.metadata.actionItems.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
@@ -361,14 +372,14 @@ export default function CoachPage() {
   const recentFlashcardSets = studyLibrary.flashcardSets.slice(0, 4);
   const recentQuizzes = studyLibrary.quizzes.slice(0, 4);
   const noteSections = useMemo(
-    () => Array.from(new Set(savedNotes.map((note) => note.sectionName || 'Unsorted'))).sort((left, right) => left.localeCompare(right)),
-    [savedNotes]
+    () => Array.from(new Set(coachDocuments.map((note) => note.sectionName || 'Unsorted'))).sort((left, right) => left.localeCompare(right)),
+    [coachDocuments]
   );
   const filteredSavedNotes = useMemo(() => {
     const normalizedSearch = historySearch.trim().toLowerCase();
     const now = Date.now();
 
-    return savedNotes.filter((note) => {
+    return coachDocuments.filter((note) => {
       if (historySectionFilter !== 'all' && note.sectionName !== historySectionFilter) {
         return false;
       }
@@ -400,7 +411,7 @@ export default function CoachPage() {
 
       return searchSurface.includes(normalizedSearch);
     });
-  }, [historyDateFilter, historySearch, historySectionFilter, savedNotes]);
+  }, [coachDocuments, historyDateFilter, historySearch, historySectionFilter]);
   const activePersonality = coachPersonalities.find((personality) => personality.key === activeAgentType) ?? coachPersonalities[0];
 
   function buildActionItemKey(assetId: string, actionItem: string) {
@@ -490,7 +501,9 @@ export default function CoachPage() {
         body: JSON.stringify({
           title: kind === 'flashcards' ? selectedDocument?.title ?? coachTitle : `${selectedDocument?.title ?? coachTitle} Quiz`,
           text: selectedDocumentText,
-          sourceAssetId: selectedDocument?.id,
+          sourceAssetId: selectedDocument?.source === 'backpack' ? selectedDocument?.id : undefined,
+          sourceFileId: selectedDocument?.source === 'native-file' ? selectedDocument?.id : undefined,
+          sourceKind: selectedDocument?.source === 'native-file' ? 'native-file' : 'asset',
           audienceLevel: 'Use onboarding profile',
           ...(kind === 'quiz' ? { questionCount: 6 } : {}),
         }),
@@ -915,7 +928,7 @@ export default function CoachPage() {
                 <p className="eyebrow">Backpack history</p>
                 <h2 className="section-title">Search your saved notes</h2>
                 <p className="muted-copy" style={{ margin: '6px 0 0' }}>
-                  Reopen any note by class or date, then pick one to turn into a task, flashcards, or a quiz.
+                  Reopen any Backpack note or StudyClaw Drive file, then pick one to turn into a task, flashcards, or a quiz.
                 </p>
               </div>
             </div>
@@ -970,7 +983,7 @@ export default function CoachPage() {
                       className={asset.id === selectedDocument?.id ? 'backpack-history-card is-active' : 'backpack-history-card'}
                     >
                       <div className="backpack-history-card__meta">
-                        <span className="settings-badge">{asset.sectionName}</span>
+                        <span className="settings-badge">{asset.source === 'native-file' ? `Drive · ${asset.fileType ?? 'file'}` : asset.sectionName}</span>
                         <span className="muted-copy">{formatSavedDate(asset.createdAt)}</span>
                       </div>
                       <strong>{asset.title}</strong>
@@ -989,9 +1002,11 @@ export default function CoachPage() {
                 {selectedDocument ? (
                   <div className="summary-card backpack-note-detail">
                     <p className="eyebrow">Open note</p>
-                    <strong>{selectedDocument.title}</strong>
+                      <strong>{selectedDocument.title}</strong>
                     <p className="muted-copy" style={{ margin: '6px 0 0' }}>
-                      {selectedDocument.sectionName} · Saved {formatSavedDate(selectedDocument.createdAt)}
+                      {selectedDocument.source === 'native-file'
+                        ? `StudyClaw Drive · Saved ${formatSavedDate(selectedDocument.createdAt)}`
+                        : `${selectedDocument.sectionName} · Saved ${formatSavedDate(selectedDocument.createdAt)}`}
                     </p>
                     <div className="actions">
                       <button type="button" onClick={() => void generateStudyAsset('flashcards')} disabled={generatingAsset !== null}>
@@ -1003,7 +1018,7 @@ export default function CoachPage() {
                       <Link href="/study" className="ghost-button">Open study library</Link>
                     </div>
                     {noteActionStatus ? <StatusBanner tone={noteActionStatus.tone}>{noteActionStatus.message}</StatusBanner> : null}
-                    {selectedActionItems.length ? (
+                    {selectedDocument.source !== 'native-file' && selectedActionItems.length ? (
                       <div className="backpack-note-actions">
                         <p className="eyebrow">Task handoff</p>
                         <div className="backpack-action-list">
@@ -1050,7 +1065,7 @@ export default function CoachPage() {
                         </div>
                       </div>
                     ) : null}
-                    {selectedDocument.metadata.summary ? (
+                    {selectedDocument.source !== 'native-file' && selectedDocument.metadata.summary ? (
                       <p className="muted-copy" style={{ marginTop: '1rem' }}>
                         {selectedDocument.metadata.summary}
                       </p>

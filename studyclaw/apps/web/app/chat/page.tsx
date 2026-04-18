@@ -37,6 +37,14 @@ type PendingDocument = {
   extractedText: string;
 };
 
+type NativeWorkspaceFile = {
+  id: string;
+  name: string;
+  fileType: 'doc' | 'spreadsheet' | 'note';
+  content: string;
+  metadata?: Record<string, unknown>;
+};
+
 type ChatThread = {
   id: string;
   title?: string | null;
@@ -430,6 +438,8 @@ export default function ChatPage() {
   const [agentName, setAgentName] = useState('StudyClaw');
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [pendingDocuments, setPendingDocuments] = useState<PendingDocument[]>([]);
+  const [nativeFiles, setNativeFiles] = useState<NativeWorkspaceFile[]>([]);
+  const [nativePickerOpen, setNativePickerOpen] = useState(false);
   const [studyMode, setStudyMode] = useState<StudyMode>('general');
   const [savingResearchId, setSavingResearchId] = useState<string | null>(null);
   const [activeResearchActionKey, setActiveResearchActionKey] = useState<string | null>(null);
@@ -485,6 +495,7 @@ export default function ChatPage() {
 
     void ensureModelsLoaded();
     void loadUserProfile();
+    void loadNativeFiles();
   }, [hasSession, isIntroFlow]);
 
   useEffect(() => {
@@ -674,6 +685,17 @@ export default function ChatPage() {
     setUserProfile(data.profile ?? null);
   }
 
+  async function loadNativeFiles() {
+    const response = await apiFetch('/api/files');
+    const data = await readApiPayload(response);
+
+    if (!response.ok) {
+      return;
+    }
+
+    setNativeFiles(Array.isArray((data as { files?: unknown[] }).files) ? ((data as { files: NativeWorkspaceFile[] }).files) : []);
+  }
+
   async function handleDocumentInput(event: ChangeEvent<HTMLInputElement>) {
     const selectedFiles = Array.from(event.target.files ?? []);
     if (!selectedFiles.length) {
@@ -704,6 +726,31 @@ export default function ChatPage() {
     }
 
     event.target.value = '';
+  }
+
+  function attachNativeFile(documentId: string) {
+    const file = nativeFiles.find((entry) => entry.id === documentId);
+    if (!file) {
+      setFeedback('That StudyClaw file could not be loaded.');
+      return;
+    }
+
+    const extractedText = String(file.content ?? '').trim();
+    if (!extractedText) {
+      setFeedback('That StudyClaw file does not have enough text yet. Add more content in Drive first.');
+      return;
+    }
+
+    const nextDocument: PendingDocument = {
+      id: `native-${file.id}`,
+      name: file.name,
+      type: `StudyClaw ${file.fileType}`,
+      extractedText,
+    };
+
+    setPendingDocuments((current) => current.some((entry) => entry.id === nextDocument.id) ? current : [...current, nextDocument]);
+    setNativePickerOpen(false);
+    setFeedback(`Attached ${file.name} from StudyClaw Drive.`);
   }
 
   async function switchModel(modelKey: string) {
@@ -1419,6 +1466,12 @@ export default function ChatPage() {
               name: document.name,
               type: document.type,
             }))}
+            nativeDocuments={nativeFiles.map((file) => ({
+              id: file.id,
+              name: file.name,
+              type: `StudyClaw ${file.fileType}`,
+            }))}
+            nativePickerOpen={nativePickerOpen}
             commandOpen={commandOpen}
             matchingCommands={matchingCommands}
             defaultCommands={[...slashCommands, ...modelCommandItems]}
@@ -1430,13 +1483,20 @@ export default function ChatPage() {
             onSelectMode={(mode) => setStudyMode(mode as StudyMode)}
             onToggleCommands={() => {
               setCommandOpen((current) => !current);
+              setNativePickerOpen(false);
               if (!message.trim()) {
                 setMessage('/');
               }
             }}
+            onToggleNativePicker={() => {
+              setNativePickerOpen((current) => !current);
+              setCommandOpen(false);
+            }}
+            onSelectNativeDocument={attachNativeFile}
             onSelectCommand={(command) => {
               setMessage(command);
               setCommandOpen(false);
+              setNativePickerOpen(false);
             }}
             onFileChange={handleDocumentInput}
             onSend={() => void send()}
