@@ -81,6 +81,13 @@ function formatChatTimestamp(value?: string) {
     .replace(' PM', ' pm');
 }
 
+function getAttachmentLabel(attachment: NonNullable<ChatEntry['metadata']>['attachments'][number]) {
+  if (attachment.sourceKind === 'native-file') {
+    return 'Drive context';
+  }
+  return 'Attachment';
+}
+
 export default function MessageBubble({
   entry,
   agentName,
@@ -125,12 +132,15 @@ export default function MessageBubble({
       </div>
       <div className="study-chat-bubble__content">{entry.content}</div>
       {!isAssistant && attachments.length ? (
-        <div className="study-chat-bubble__capabilities">
-          {attachments.map((attachment, index) => (
-            <span key={`${entry.id}-attachment-${index}`} className="study-chat-bubble__capability">
-              {attachment.sourceKind === 'native-file' ? 'Drive' : 'Attachment'}: {attachment.name}
-            </span>
-          ))}
+        <div className="study-chat-bubble__attachment-group">
+          <p className="study-chat-bubble__attachment-label">Context attached</p>
+          <div className="study-chat-bubble__capabilities">
+            {attachments.map((attachment, index) => (
+              <span key={`${entry.id}-attachment-${index}`} className="study-chat-bubble__capability">
+                {getAttachmentLabel(attachment)}: {attachment.name}
+              </span>
+            ))}
+          </div>
         </div>
       ) : null}
       {isAssistant && researchResult ? (

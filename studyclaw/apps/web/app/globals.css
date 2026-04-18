@@ -5234,6 +5234,29 @@ a {
   margin-bottom: 18px;
 }
 
+.study-set-card__header-copy,
+.study-set-card__source {
+  display: grid;
+  gap: 6px;
+}
+
+.study-set-card__source {
+  justify-items: end;
+  text-align: right;
+}
+
+.study-set-card__source-copy {
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  max-width: 260px;
+}
+
+.study-set-card__source-link {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--accent-primary);
+}
+
 .study-item-card {
   padding: 18px;
   border-radius: 22px;
@@ -5799,6 +5822,11 @@ a {
   .study-calendar-ribbon,
   .settings-page-header__meta {
     grid-template-columns: 1fr;
+  }
+
+  .study-set-card__source {
+    justify-items: start;
+    text-align: left;
   }
 
   .backpack-intake-panel__upload .upload-zone {
@@ -7104,6 +7132,19 @@ a {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 14px;
+}
+
+.study-chat-bubble__attachment-group {
+  margin-top: 14px;
+}
+
+.study-chat-bubble__attachment-label {
+  margin: 0 0 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(216, 245, 255, 0.72);
 }
 
 .study-chat-bubble__capability {

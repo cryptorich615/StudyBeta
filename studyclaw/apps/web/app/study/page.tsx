@@ -14,11 +14,20 @@ type Flashcard = {
   back: string;
 };
 
+type StudySourceMetadata = {
+  sourceKind?: 'native-file' | 'asset' | 'google' | 'book' | 'manual' | string | null;
+  sourceFileId?: string | null;
+  sourceFileType?: string | null;
+  sourceAssetId?: string | null;
+  sourceTitle?: string | null;
+};
+
 type FlashcardSet = {
   id: string;
   title: string;
   created_at: string;
   cards: Flashcard[];
+  metadata?: StudySourceMetadata;
 };
 
 type QuizQuestion = {
@@ -35,6 +44,7 @@ type Quiz = {
   mode: string;
   created_at: string;
   questions: QuizQuestion[];
+  metadata?: StudySourceMetadata;
 };
 
 type LibraryData = {
@@ -72,6 +82,59 @@ function formatWorkspaceDate(value?: string) {
     hour: 'numeric',
     minute: '2-digit',
   });
+}
+
+function getStudySourceMetaLabel(metadata?: StudySourceMetadata) {
+  const sourceKind = metadata?.sourceKind ?? 'manual';
+
+  if (sourceKind === 'native-file') {
+    return metadata?.sourceFileType === 'spreadsheet' ? 'Drive sheet' : 'Drive file';
+  }
+  if (sourceKind === 'asset') {
+    return 'Backpack note';
+  }
+  if (sourceKind === 'google') {
+    return 'Google workspace';
+  }
+  if (sourceKind === 'book') {
+    return 'Reader library';
+  }
+  return 'Manual notes';
+}
+
+function getStudySourceHint(metadata?: StudySourceMetadata) {
+  if (metadata?.sourceTitle?.trim()) {
+    return metadata.sourceTitle.trim();
+  }
+  if (metadata?.sourceKind === 'native-file') {
+    return 'Created from StudyClaw Drive';
+  }
+  if (metadata?.sourceKind === 'asset') {
+    return 'Created from Backpack context';
+  }
+  if (metadata?.sourceKind === 'google') {
+    return 'Created from Google workspace';
+  }
+  if (metadata?.sourceKind === 'book') {
+    return 'Created from reader content';
+  }
+  return 'Created from manual notes';
+}
+
+function getStudySourceAction(metadata?: StudySourceMetadata) {
+  if (metadata?.sourceKind === 'native-file') {
+    return { href: '/drive', label: 'Open Drive' };
+  }
+  if (metadata?.sourceKind === 'asset') {
+    return { href: '/coach', label: 'Open Backpack' };
+  }
+  if (metadata?.sourceKind === 'google') {
+    return { href: '/study', label: 'Open Google files' };
+  }
+  if (metadata?.sourceKind === 'book') {
+    return { href: '/reader', label: 'Open Reader' };
+  }
+  return null;
 }
 
 export default function StudyPage() {
@@ -373,7 +436,11 @@ export default function StudyPage() {
     const query = filter.trim().toLowerCase();
     return library.flashcardSets.filter((set) => {
       if (!query) return true;
-      return set.title.toLowerCase().includes(query) || set.cards.some((card) => `${card.front} ${card.back}`.toLowerCase().includes(query));
+      return (
+        set.title.toLowerCase().includes(query)
+        || (set.metadata?.sourceTitle ?? '').toLowerCase().includes(query)
+        || set.cards.some((card) => `${card.front} ${card.back}`.toLowerCase().includes(query))
+      );
     });
   }, [filter, library.flashcardSets]);
 
@@ -381,7 +448,11 @@ export default function StudyPage() {
     const query = filter.trim().toLowerCase();
     return library.quizzes.filter((quiz) => {
       if (!query) return true;
-      return quiz.title.toLowerCase().includes(query) || quiz.questions.some((question) => `${question.question_text} ${question.explanation}`.toLowerCase().includes(query));
+      return (
+        quiz.title.toLowerCase().includes(query)
+        || (quiz.metadata?.sourceTitle ?? '').toLowerCase().includes(query)
+        || quiz.questions.some((question) => `${question.question_text} ${question.explanation}`.toLowerCase().includes(query))
+      );
     });
   }, [filter, library.quizzes]);
 
@@ -753,12 +824,23 @@ export default function StudyPage() {
                   className={highlightedSetId === set.id ? 'study-set-card is-highlighted' : 'study-set-card'}
                 >
                   <div className="study-set-card__head">
-                    <input
-                      className="library-title-input"
-                      defaultValue={set.title}
-                      onBlur={(event) => void renameFlashcardSet(set.id, event.target.value)}
-                    />
-                    <div className="library-meta">{new Date(set.created_at).toLocaleDateString()} · {set.cards.length} cards</div>
+                    <div className="study-set-card__header-copy">
+                      <input
+                        className="library-title-input"
+                        defaultValue={set.title}
+                        onBlur={(event) => void renameFlashcardSet(set.id, event.target.value)}
+                      />
+                      <div className="library-meta">{new Date(set.created_at).toLocaleDateString()} · {set.cards.length} cards</div>
+                    </div>
+                    <div className="study-set-card__source">
+                      <span className="settings-badge">{getStudySourceMetaLabel(set.metadata)}</span>
+                      <span className="study-set-card__source-copy">{getStudySourceHint(set.metadata)}</span>
+                      {getStudySourceAction(set.metadata) ? (
+                        <Link className="study-set-card__source-link" href={getStudySourceAction(set.metadata)!.href}>
+                          {getStudySourceAction(set.metadata)!.label}
+                        </Link>
+                      ) : null}
+                    </div>
                   </div>
 
                   <div className="study-set-card__items">
@@ -813,12 +895,23 @@ export default function StudyPage() {
                   className={highlightedQuizId === quiz.id ? 'study-set-card is-highlighted' : 'study-set-card'}
                 >
                   <div className="study-set-card__head">
-                    <input
-                      className="library-title-input"
-                      defaultValue={quiz.title}
-                      onBlur={(event) => void renameQuiz(quiz.id, event.target.value)}
-                    />
-                    <div className="library-meta">{new Date(quiz.created_at).toLocaleDateString()} · {quiz.questions.length} questions</div>
+                    <div className="study-set-card__header-copy">
+                      <input
+                        className="library-title-input"
+                        defaultValue={quiz.title}
+                        onBlur={(event) => void renameQuiz(quiz.id, event.target.value)}
+                      />
+                      <div className="library-meta">{new Date(quiz.created_at).toLocaleDateString()} · {quiz.questions.length} questions</div>
+                    </div>
+                    <div className="study-set-card__source">
+                      <span className="settings-badge">{getStudySourceMetaLabel(quiz.metadata)}</span>
+                      <span className="study-set-card__source-copy">{getStudySourceHint(quiz.metadata)}</span>
+                      {getStudySourceAction(quiz.metadata) ? (
+                        <Link className="study-set-card__source-link" href={getStudySourceAction(quiz.metadata)!.href}>
+                          {getStudySourceAction(quiz.metadata)!.label}
+                        </Link>
+                      ) : null}
+                    </div>
                   </div>
 
                   <div className="study-set-card__items">
