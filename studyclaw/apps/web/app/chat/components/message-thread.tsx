@@ -8,6 +8,12 @@ type ChatEntry = {
   content: string;
   createdAt?: string;
   metadata?: {
+    attachments?: Array<{
+      name: string;
+      type: string;
+      sourceKind?: string | null;
+      sourceFileId?: string | null;
+    }>;
     capabilityBadges?: Array<{
       key: string;
       label: string;

@@ -6,6 +6,12 @@ type ChatEntry = {
   content: string;
   createdAt?: string;
   metadata?: {
+    attachments?: Array<{
+      name: string;
+      type: string;
+      sourceKind?: string | null;
+      sourceFileId?: string | null;
+    }>;
     capabilityBadges?: Array<{
       key: string;
       label: string;
@@ -88,6 +94,7 @@ export default function MessageBubble({
   const researchResult = entry.metadata?.researchResult;
   const researchUnavailable = Boolean(entry.metadata?.researchUnavailable);
   const capabilityBadges = entry.metadata?.capabilityBadges ?? [];
+  const attachments = entry.metadata?.attachments ?? [];
   const isSavingResearch = savingResearchId === entry.id;
   const alreadySaved = Boolean(researchResult?.savedToBackpack || researchResult?.savedAssetId);
   const sourceCount = researchResult?.sources.length ?? 0;
@@ -117,6 +124,15 @@ export default function MessageBubble({
         {timestampLabel ? <time className="study-chat-bubble__timestamp" dateTime={entry.createdAt}>{timestampLabel}</time> : null}
       </div>
       <div className="study-chat-bubble__content">{entry.content}</div>
+      {!isAssistant && attachments.length ? (
+        <div className="study-chat-bubble__capabilities">
+          {attachments.map((attachment, index) => (
+            <span key={`${entry.id}-attachment-${index}`} className="study-chat-bubble__capability">
+              {attachment.sourceKind === 'native-file' ? 'Drive' : 'Attachment'}: {attachment.name}
+            </span>
+          ))}
+        </div>
+      ) : null}
       {isAssistant && researchResult ? (
         <section className="study-chat-research-card">
           <div className="study-chat-research-card__top">

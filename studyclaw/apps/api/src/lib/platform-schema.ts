@@ -112,6 +112,14 @@ const statements = [
     )
   `,
   `
+    alter table flashcard_sets
+      add column if not exists metadata_json jsonb not null default '{}'::jsonb
+  `,
+  `
+    alter table quizzes
+      add column if not exists metadata_json jsonb not null default '{}'::jsonb
+  `,
+  `
     create index if not exists idx_agents_user_id on agents(user_id)
   `,
   `

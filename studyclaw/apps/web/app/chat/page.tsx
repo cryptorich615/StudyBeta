@@ -35,6 +35,8 @@ type PendingDocument = {
   name: string;
   type: string;
   extractedText: string;
+  sourceKind?: 'upload' | 'native-file';
+  sourceFileId?: string | null;
 };
 
 type NativeWorkspaceFile = {
@@ -57,6 +59,12 @@ type ChatMessage = {
   content: string;
   createdAt?: string;
   metadata?: {
+    attachments?: Array<{
+      name: string;
+      type: string;
+      sourceKind?: string | null;
+      sourceFileId?: string | null;
+    }>;
     capabilityBadges?: Array<{
       key: string;
       label: string;
@@ -708,6 +716,8 @@ export default function ChatPage() {
         name: file.name,
         type: file.type || 'application/octet-stream',
         extractedText: await extractDocumentText(file),
+        sourceKind: 'upload' as const,
+        sourceFileId: null,
       }))
     );
 
@@ -746,6 +756,8 @@ export default function ChatPage() {
       name: file.name,
       type: `StudyClaw ${file.fileType}`,
       extractedText,
+      sourceKind: 'native-file',
+      sourceFileId: file.id,
     };
 
     setPendingDocuments((current) => current.some((entry) => entry.id === nextDocument.id) ? current : [...current, nextDocument]);
@@ -1248,6 +1260,14 @@ export default function ChatPage() {
       role: 'user',
       content: [effectivePrompt, attachmentLabel].filter(Boolean).join('\n\n'),
       createdAt: new Date().toISOString(),
+      metadata: {
+        attachments: pendingDocuments.map((document) => ({
+          name: document.name,
+          type: document.type,
+          sourceKind: document.id.startsWith('native-') ? 'native-file' : 'upload',
+          sourceFileId: document.id.startsWith('native-') ? document.id.replace(/^native-/, '') : null,
+        })),
+      },
     };
     const baselineMessageCount = messages.length;
     const persistedUserMessage: ChatMessage = {
@@ -1255,6 +1275,7 @@ export default function ChatPage() {
       role: 'user',
       content: userMsg.content,
       createdAt: userMsg.createdAt,
+      metadata: userMsg.metadata,
     };
 
     setMessages((prev) => [...prev, userMsg]);
@@ -1282,6 +1303,8 @@ export default function ChatPage() {
             name: document.name,
             type: document.type,
             extractedText: document.extractedText,
+            sourceKind: document.sourceKind,
+            sourceFileId: document.sourceFileId,
           })),
         },
         (event) => {

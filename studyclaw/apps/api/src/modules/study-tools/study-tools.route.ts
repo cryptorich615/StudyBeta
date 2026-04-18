@@ -161,6 +161,7 @@ async function listFlashcardSets(userId: string) {
         `select
             fs.id,
             fs.title,
+            fs.metadata_json,
             fs.created_at,
             count(f.id)::int as card_count
          from flashcard_sets fs
@@ -180,6 +181,7 @@ async function listQuizzes(userId: string) {
             q.id,
             q.title,
             q.created_at,
+            q.metadata_json,
             count(qq.id)::int as question_count
          from quizzes q
          left join quiz_questions qq on qq.quiz_id = q.id
@@ -205,7 +207,7 @@ studyToolsRouter.get('/quizzes', async (req: AuthedRequest, res) => {
 studyToolsRouter.get('/library', async (req: AuthedRequest, res) => {
     const [setsResult, cardsResult, quizzesResult, questionsResult] = await Promise.all([
         db.query(
-            `select id, title, subject_id, source_asset_id, created_at
+            `select id, title, subject_id, source_asset_id, metadata_json, created_at
              from flashcard_sets
              where user_id = $1
              order by created_at desc`,
@@ -219,7 +221,7 @@ studyToolsRouter.get('/library', async (req: AuthedRequest, res) => {
             [req.user!.id]
         ),
         db.query(
-            `select id, title, mode, subject_id, source_asset_id, created_at
+            `select id, title, mode, subject_id, source_asset_id, metadata_json, created_at
              from quizzes
              where user_id = $1
              order by created_at desc`,
@@ -255,10 +257,12 @@ studyToolsRouter.get('/library', async (req: AuthedRequest, res) => {
     res.json({
         flashcardSets: setsResult.rows.map((set) => ({
             ...set,
+            metadata: set.metadata_json ?? {},
             cards: cardsBySet.get(set.id) ?? [],
         })),
         quizzes: quizzesResult.rows.map((quiz) => ({
             ...quiz,
+            metadata: quiz.metadata_json ?? {},
             questions: questionsByQuiz.get(quiz.id) ?? [],
         })),
     });
@@ -353,10 +357,16 @@ ${text}
     }
 
     const set = await db.query(
-        `insert into flashcard_sets (user_id, subject_id, source_asset_id, title)
-     values ($1, $2, $3, $4)
+        `insert into flashcard_sets (user_id, subject_id, source_asset_id, title, metadata_json)
+     values ($1, $2, $3, $4, $5)
      returning *`,
-        [req.user!.id, subjectId ?? null, sourceAssetId ?? null, title]
+        [req.user!.id, subjectId ?? null, sourceAssetId ?? null, title, JSON.stringify({
+            sourceKind: sourceKind ?? (nativeSource ? 'native-file' : sourceAssetId ? 'asset' : 'manual'),
+            sourceFileId: nativeSource?.id ?? null,
+            sourceFileType: nativeSource?.file_type ?? null,
+            sourceAssetId: sourceAssetId ?? null,
+            sourceTitle: nativeSource?.name ?? title,
+        })]
     );
 
     for (const card of cards) {
@@ -376,6 +386,7 @@ ${text}
     res.json({
         flashcardSetId: set.rows[0].id,
         sourceFileId: nativeSource?.id ?? null,
+        source: set.rows[0].metadata_json ?? {},
         cards,
     });
 });
@@ -497,10 +508,16 @@ ${text}
     }
 
     const quiz = await db.query(
-        `insert into quizzes (user_id, subject_id, source_asset_id, title, mode)
-         values ($1, $2, $3, $4, $5)
+        `insert into quizzes (user_id, subject_id, source_asset_id, title, mode, metadata_json)
+         values ($1, $2, $3, $4, $5, $6)
          returning *`,
-        [req.user!.id, subjectId ?? null, sourceAssetId ?? null, title, mode]
+        [req.user!.id, subjectId ?? null, sourceAssetId ?? null, title, mode, JSON.stringify({
+            sourceKind: sourceKind ?? (nativeSource ? 'native-file' : sourceAssetId ? 'asset' : 'manual'),
+            sourceFileId: nativeSource?.id ?? null,
+            sourceFileType: nativeSource?.file_type ?? null,
+            sourceAssetId: sourceAssetId ?? null,
+            sourceTitle: nativeSource?.name ?? title,
+        })]
     );
 
     for (const q of questions) {
@@ -529,6 +546,7 @@ ${text}
     res.json({
         quizId: quiz.rows[0].id,
         sourceFileId: nativeSource?.id ?? null,
+        source: quiz.rows[0].metadata_json ?? {},
         questions,
     });
 });

@@ -17,6 +17,34 @@ chatRouter.use(requireAuth);
 
 const openclaw = new OpenClawClient();
 
+function normalizeChatAttachments(attachments: unknown) {
+  if (!Array.isArray(attachments)) {
+    return [];
+  }
+
+  return attachments
+    .filter((attachment) => attachment && typeof attachment === 'object')
+    .map((attachment) => {
+      const entry = attachment as Record<string, unknown>;
+      return {
+        name: String(entry.name ?? 'Untitled attachment'),
+        type: String(entry.type ?? 'text/plain'),
+        extractedText: String(entry.extractedText ?? '').trim(),
+        sourceKind: typeof entry.sourceKind === 'string' ? entry.sourceKind : null,
+        sourceFileId: typeof entry.sourceFileId === 'string' ? entry.sourceFileId : null,
+      };
+    })
+    .filter((attachment) => attachment.name || attachment.extractedText);
+}
+
+function buildAttachmentContext(attachments: Array<{ name: string; extractedText: string }>) {
+  if (!attachments.length) {
+    return '';
+  }
+
+  return `\n\nAttached context:\n${attachments.map((attachment) => `## ${attachment.name}\n${attachment.extractedText}`).join('\n\n')}`;
+}
+
 function normalizeAssistantIdentity(replyText: string, personaName: string) {
   const trimmedPersona = personaName.trim();
   if (!trimmedPersona || trimmedPersona === 'StudyClaw') {
@@ -188,7 +216,7 @@ chatRouter.post('/research-note', async (_req: AuthedRequest, res) => {
 chatRouter.post('/stream', async (req: AuthedRequest, res) => {
   await ensurePlatformSchema();
 
-  const { threadId, message } = req.body as { threadId?: string; message?: string };
+  const { threadId, message, attachments } = req.body as { threadId?: string; message?: string; attachments?: unknown };
 
   if (!message?.trim()) {
     return res.status(400).json({ error: 'bad_request', message: 'message is required' });
@@ -260,7 +288,16 @@ chatRouter.post('/stream', async (req: AuthedRequest, res) => {
     openclawSessionId = created.rows[0].openclaw_session_id;
   }
 
-  await db.query(`insert into chat_messages (thread_id, role, content) values ($1, 'user', $2)`, [activeThreadId, message]);
+  const normalizedAttachments = normalizeChatAttachments(attachments);
+  const attachmentContext = buildAttachmentContext(normalizedAttachments);
+
+  await db.query(`insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'user', $2, $3)`, [
+    activeThreadId,
+    message,
+    JSON.stringify({
+      attachments: normalizedAttachments.map(({ extractedText: _ignored, ...attachment }) => attachment),
+    }),
+  ]);
 
   const context = await buildStudyContext(req.user!.id);
   const modelId = `openclaw/${agent.openclaw_agent_id}`;
@@ -294,13 +331,14 @@ chatRouter.post('/stream', async (req: AuthedRequest, res) => {
           body: JSON.stringify({
             model: modelId,
             instructions,
-            input: message,
+            input: `${message}${attachmentContext}`.trim(),
             user: req.user!.id,
             stream: true,
             metadata: {
               feature: 'chat',
               threadId: activeThreadId,
               sessionId: openclawSessionId,
+              attachments: normalizedAttachments.map(({ extractedText: _ignored, ...attachment }) => attachment),
               googleConnected: context.workspace.googleConnected,
               workspaceCalendarBackend: context.workspace.calendarBackend,
               workspaceDocumentBackend: context.workspace.documentBackend,
@@ -437,7 +475,7 @@ chatRouter.post('/stream', async (req: AuthedRequest, res) => {
 
 chatRouter.post('/send', async (req: AuthedRequest, res) => {
   await ensurePlatformSchema();
-  const { threadId, message } = req.body as { threadId?: string; message?: string };
+  const { threadId, message, attachments } = req.body as { threadId?: string; message?: string; attachments?: unknown };
 
   if (!message?.trim()) {
     return res.status(400).json({ error: 'bad_request', message: 'message is required' });
@@ -538,7 +576,16 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
     [activeThreadId]
   );
 
-  await db.query(`insert into chat_messages (thread_id, role, content) values ($1, 'user', $2)`, [activeThreadId, message]);
+  const normalizedAttachments = normalizeChatAttachments(attachments);
+  const attachmentContext = buildAttachmentContext(normalizedAttachments);
+
+  await db.query(`insert into chat_messages (thread_id, role, content, metadata_json) values ($1, 'user', $2, $3)`, [
+    activeThreadId,
+    message,
+    JSON.stringify({
+      attachments: normalizedAttachments.map(({ extractedText: _ignored, ...attachment }) => attachment),
+    }),
+  ]);
 
   try {
     const context = await buildStudyContext(req.user!.id);
@@ -546,11 +593,12 @@ chatRouter.post('/send', async (req: AuthedRequest, res) => {
       agentId: agent.openclaw_agent_id,
       instructions: buildStudyInstructions(agent.system_prompt, context),
       sessionId: openclawSessionId,
-      message: buildChatTranscript(historyResult.rows, message),
+      message: buildChatTranscript(historyResult.rows, `${message}${attachmentContext}`.trim()),
       model: `openclaw/${agent.openclaw_agent_id}`,
       metadata: {
         feature: 'chat',
         threadId: activeThreadId,
+        attachments: normalizedAttachments.map(({ extractedText: _ignored, ...attachment }) => attachment),
         googleConnected: context.workspace.googleConnected,
         workspaceCalendarBackend: context.workspace.calendarBackend,
         workspaceDocumentBackend: context.workspace.documentBackend,
