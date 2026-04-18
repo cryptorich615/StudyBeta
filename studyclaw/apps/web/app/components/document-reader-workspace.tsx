@@ -106,6 +106,17 @@ type GoogleWorkspaceFile = {
   webViewLink?: string;
 };
 
+type StudyClawWorkspaceFile = {
+  id: string;
+  name: string;
+  fileType: 'doc' | 'spreadsheet' | 'note';
+  content: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+  source: 'studyclaw';
+};
+
 type GoogleReaderDocument = {
   id: string;
   title: string;
@@ -115,6 +126,18 @@ type GoogleReaderDocument = {
   supported: boolean;
   supportMessage: string;
   format: 'pdf' | 'text' | 'html' | 'word' | 'spreadsheet' | 'presentation' | 'richtext' | 'unknown';
+  content: string;
+  summary: string | null;
+};
+
+type NativeFileReaderDocument = {
+  id: string;
+  title: string;
+  fileType: 'doc' | 'spreadsheet' | 'note';
+  modifiedTime: string | null;
+  supported: boolean;
+  supportMessage: string;
+  format: 'text' | 'word' | 'spreadsheet';
   content: string;
   summary: string | null;
 };
@@ -130,7 +153,8 @@ type Props = {
 type WorkspaceItem =
   | { kind: 'asset'; id: string; title: string; updatedAt: string; progress: number; typeLabel: string; icon: 'text' | 'pdf' | 'image' | 'audio' | 'file'; source: ReaderAsset }
   | { kind: 'book'; id: string; title: string; updatedAt: string; progress: number; typeLabel: string; icon: 'book'; source: SavedBook }
-  | { kind: 'google'; id: string; title: string; updatedAt: string; progress: number; typeLabel: string; icon: 'text' | 'file'; source: GoogleWorkspaceFile };
+  | { kind: 'google'; id: string; title: string; updatedAt: string; progress: number; typeLabel: string; icon: 'text' | 'file'; source: GoogleWorkspaceFile }
+  | { kind: 'native-file'; id: string; title: string; updatedAt: string; progress: number; typeLabel: string; icon: 'text' | 'file'; source: StudyClawWorkspaceFile };
 
 const CHAT_DRAFT_KEY = 'studyclaw-chat-draft';
 const EREADER_LIBRARY_KEY = 'ereader_books';
@@ -258,6 +282,7 @@ export default function DocumentReaderWorkspace({
   const [assets, setAssets] = useState<ReaderAsset[]>([]);
   const [savedBooks, setSavedBooks] = useState<SavedBook[]>([]);
   const [googleFiles, setGoogleFiles] = useState<GoogleWorkspaceFile[]>([]);
+  const [nativeFiles, setNativeFiles] = useState<StudyClawWorkspaceFile[]>([]);
   const [bookSearchQuery, setBookSearchQuery] = useState('');
   const [bookSearchLoading, setBookSearchLoading] = useState(false);
   const [bookSearchResults, setBookSearchResults] = useState<BookSearchResult[]>([]);
@@ -265,6 +290,7 @@ export default function DocumentReaderWorkspace({
   const [activeAsset, setActiveAsset] = useState<ReaderDocument | null>(null);
   const [activeBook, setActiveBook] = useState<SavedBook | null>(null);
   const [activeGoogleFile, setActiveGoogleFile] = useState<GoogleReaderDocument | null>(null);
+  const [activeNativeFile, setActiveNativeFile] = useState<NativeFileReaderDocument | null>(null);
   const [loadingAssets, setLoadingAssets] = useState(true);
   const [loadingDocument, setLoadingDocument] = useState(false);
   const [error, setError] = useState('');
@@ -284,6 +310,7 @@ export default function DocumentReaderWorkspace({
 
   useEffect(() => {
     void loadAssets();
+    void loadNativeFiles();
     void loadGoogleFiles();
     void loadSavedBooks();
   }, []);
@@ -401,7 +428,18 @@ export default function DocumentReaderWorkspace({
       source: file,
     }));
 
-    let items = [...documentItems, ...bookItems, ...googleItems];
+    const studyClawFileItems = nativeFiles.map((file) => ({
+      kind: 'native-file' as const,
+      id: file.id,
+      title: file.name,
+      updatedAt: String(file.updatedAt || file.createdAt || ''),
+      progress: 0,
+      typeLabel: `StudyClaw ${file.fileType}`,
+      icon: file.fileType === 'note' || file.fileType === 'doc' ? ('text' as const) : ('file' as const),
+      source: file,
+    }));
+
+    let items = [...documentItems, ...bookItems, ...studyClawFileItems, ...googleItems];
     const normalizedQuery = query.trim().toLowerCase();
     if (normalizedQuery) {
       items = items.filter((item) => item.title.toLowerCase().includes(normalizedQuery));
@@ -413,6 +451,8 @@ export default function DocumentReaderWorkspace({
       items = items.filter((item) =>
         item.kind === 'asset'
           ? ['DOC/DOCX', 'XLS/XLSX', 'PPT/PPTX', 'RTF'].includes(item.typeLabel)
+          : item.kind === 'native-file'
+            ? /StudyClaw (doc|spreadsheet)/i.test(item.typeLabel)
           : item.kind === 'google'
             ? /Google (Doc|Sheet|Slides)|DOCX in Google Drive|XLSX in Google Drive|PPTX in Google Drive/.test(item.typeLabel)
             : false
@@ -422,6 +462,8 @@ export default function DocumentReaderWorkspace({
       items = items.filter((item) =>
         item.kind === 'google'
           ? !/DOCX in Google Drive|XLSX in Google Drive|PPTX in Google Drive|PDF in Google Drive/.test(item.typeLabel)
+          : item.kind === 'native-file'
+            ? !/StudyClaw spreadsheet/i.test(item.typeLabel)
           : item.kind === 'asset' && !['PDF', 'DOC/DOCX', 'XLS/XLSX', 'PPT/PPTX', 'RTF'].includes(item.typeLabel)
       );
     }
@@ -433,7 +475,7 @@ export default function DocumentReaderWorkspace({
     });
 
     return items;
-  }, [assets, savedBooks, googleFiles, query, typeFilter, sort]);
+  }, [assets, savedBooks, googleFiles, nativeFiles, query, typeFilter, sort]);
 
   const recentDocuments = useMemo(() => {
     return [...assets]
@@ -516,6 +558,23 @@ export default function DocumentReaderWorkspace({
       setGoogleFiles(Array.isArray(payload) ? payload : []);
     } catch {
       setGoogleFiles([]);
+    }
+  }
+
+  async function loadNativeFiles() {
+    try {
+      const response = await apiFetch('/api/files');
+      const payload = await readApiPayload(response);
+      if (!response.ok) {
+        throw new Error(getApiErrorMessage(payload, 'Failed to load StudyClaw files'));
+      }
+
+      const files = payload && typeof payload === 'object' && Array.isArray((payload as { files?: unknown[] }).files)
+        ? (payload as { files: StudyClawWorkspaceFile[] }).files
+        : [];
+      setNativeFiles(files);
+    } catch {
+      setNativeFiles([]);
     }
   }
 
@@ -650,6 +709,7 @@ export default function DocumentReaderWorkspace({
     setError('');
     setActiveBook(null);
     setActiveGoogleFile(null);
+    setActiveNativeFile(null);
     try {
       const response = await apiFetch(`/api/coach/assets/${assetId}/reader`);
       const data = (await readApiPayload(response)) as ReaderDocument;
@@ -670,6 +730,7 @@ export default function DocumentReaderWorkspace({
     setError('');
     setActiveAsset(null);
     setActiveBook(null);
+    setActiveNativeFile(null);
     try {
       const response = await apiFetch(`/api/google/drive/${fileId}/reader`);
       const data = (await readApiPayload(response)) as GoogleReaderDocument;
@@ -680,6 +741,38 @@ export default function DocumentReaderWorkspace({
       setMobileExplorerOpen(false);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Failed to open this Google file');
+    } finally {
+      setLoadingDocument(false);
+    }
+  }
+
+  async function openNativeFile(fileId: string) {
+    setLoadingDocument(true);
+    setError('');
+    setActiveAsset(null);
+    setActiveBook(null);
+    setActiveGoogleFile(null);
+
+    try {
+      const file = nativeFiles.find((item) => item.id === fileId);
+      if (!file) {
+        throw new Error('StudyClaw file not found');
+      }
+
+      setActiveNativeFile({
+        id: file.id,
+        title: file.name,
+        fileType: file.fileType,
+        modifiedTime: file.updatedAt ?? file.createdAt ?? null,
+        supported: true,
+        supportMessage: 'StudyClaw files open directly in the reader.',
+        format: file.fileType === 'spreadsheet' ? 'spreadsheet' : file.fileType === 'doc' ? 'word' : 'text',
+        content: file.content || '',
+        summary: null,
+      });
+      setMobileExplorerOpen(false);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Failed to open this StudyClaw file');
     } finally {
       setLoadingDocument(false);
     }
@@ -789,6 +882,7 @@ export default function DocumentReaderWorkspace({
 
     setActiveAsset(null);
     setActiveGoogleFile(null);
+    setActiveNativeFile(null);
     setActiveBook(book);
     setError('');
     setMobileExplorerOpen(false);
@@ -819,6 +913,20 @@ export default function DocumentReaderWorkspace({
         CHAT_DRAFT_KEY,
         JSON.stringify({
           message: `Help me study this Google file:\n\nTitle: ${activeGoogleFile.title}\nType: ${labelForGoogleMimeType(activeGoogleFile.mimeType)}\n\n${(activeGoogleFile.summary || activeGoogleFile.content).slice(0, 2800)}`,
+          mode: 'general',
+        })
+      );
+      window.location.assign('/chat');
+    }
+  }
+
+  function handoffNativeFileToChat() {
+    if (!activeNativeFile) return;
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(
+        CHAT_DRAFT_KEY,
+        JSON.stringify({
+          message: `Help me study this StudyClaw file:\n\nTitle: ${activeNativeFile.title}\nType: ${activeNativeFile.fileType}\n\n${(activeNativeFile.summary || activeNativeFile.content).slice(0, 2800)}`,
           mode: 'general',
         })
       );
@@ -974,6 +1082,8 @@ export default function DocumentReaderWorkspace({
             const isActive =
               item.kind === 'asset'
                 ? activeAsset?.id === item.id
+                : item.kind === 'native-file'
+                  ? activeNativeFile?.id === item.id
                 : item.kind === 'google'
                   ? activeGoogleFile?.id === item.id
                   : activeBook && (activeBook.key || activeBook.gb_id || activeBook.title) === item.id;
@@ -985,6 +1095,8 @@ export default function DocumentReaderWorkspace({
                 onClick={() =>
                   item.kind === 'asset'
                     ? void openAsset(item.id)
+                    : item.kind === 'native-file'
+                      ? void openNativeFile(item.id)
                     : item.kind === 'google'
                       ? void openGoogleFile(item.id)
                       : void openSavedBook(item.source)
@@ -997,6 +1109,8 @@ export default function DocumentReaderWorkspace({
                   <small>
                     {item.kind === 'asset'
                       ? `${Math.round(item.progress)}% read · ${formatTimestamp(item.updatedAt)}`
+                      : item.kind === 'native-file'
+                        ? `${item.typeLabel} · ${formatTimestamp(item.updatedAt)}`
                       : item.kind === 'google'
                         ? `${item.typeLabel} · ${formatTimestamp(item.updatedAt)}`
                         : item.source.author_name?.[0] || 'Saved book'}
@@ -1234,6 +1348,84 @@ export default function DocumentReaderWorkspace({
                 </div>
               </section>
             ) : null}
+          </>
+        ) : activeNativeFile ? (
+          <>
+            <header className="reader-workspace__reader-head">
+              <div>
+                <p className="eyebrow">StudyClaw file</p>
+                <h2 className="section-title">{activeNativeFile.title}</h2>
+                <p className="muted-copy">
+                  StudyClaw {activeNativeFile.fileType} · {activeNativeFile.supported ? 'Ready to read' : 'Preview only'}
+                </p>
+              </div>
+              <div className="reader-workspace__reader-actions">
+                <Link href="/drive" className="ghost-button">
+                  Open in Drive
+                </Link>
+              </div>
+            </header>
+
+            <section className="reader-workspace__reader-panel theme-paper">
+              <div className="reader-workspace__document-meta">
+                <article>
+                  <span>Modified</span>
+                  <strong>{formatTimestamp(activeNativeFile.modifiedTime)}</strong>
+                </article>
+                <article>
+                  <span>Type</span>
+                  <strong>StudyClaw {activeNativeFile.fileType}</strong>
+                </article>
+                <article>
+                  <span>Support</span>
+                  <strong>{activeNativeFile.supported ? 'Ready to read' : 'Preview only'}</strong>
+                </article>
+              </div>
+
+              <div
+                ref={readerContentRef}
+                className="reader-workspace__document reader-workspace__document--scroll"
+                style={{
+                  fontSize: '18px',
+                  lineHeight: 1.7,
+                  maxWidth: '880px',
+                }}
+              >
+                {splitPages(activeNativeFile.content).map((page, index) => (
+                  <article key={`${activeNativeFile.id}-page-${index}`} className="reader-workspace__page">
+                    <header><span>Page {index + 1}</span></header>
+                    {page.split('\n').filter(Boolean).map((paragraph, paragraphIndex) => (
+                      <p key={`${index}-${paragraphIndex}`}>{paragraph}</p>
+                    ))}
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            <section className="reader-workspace__ai-tools">
+              <div>
+                <p className="eyebrow">AI actions</p>
+                <h3>Use this StudyClaw file without leaving your place</h3>
+              </div>
+              <div className="reader-workspace__ai-actions">
+                {onUseForFlashcards ? (
+                  <button type="button" onClick={() => onUseForFlashcards({ title: activeNativeFile.title, text: activeNativeFile.content || activeNativeFile.summary || '' })}>
+                    <Sparkles className="w-4 h-4" />
+                    Use for flashcards
+                  </button>
+                ) : null}
+                {onUseForQuiz ? (
+                  <button type="button" onClick={() => onUseForQuiz({ title: activeNativeFile.title, text: activeNativeFile.content || activeNativeFile.summary || '' })}>
+                    <Sparkles className="w-4 h-4" />
+                    Use for quiz
+                  </button>
+                ) : null}
+                <button type="button" onClick={handoffNativeFileToChat}>
+                  <MessageSquare className="w-4 h-4" />
+                  Ask StudyClaw about this
+                </button>
+              </div>
+            </section>
           </>
         ) : activeGoogleFile ? (
           <>

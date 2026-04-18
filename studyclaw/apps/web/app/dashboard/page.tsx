@@ -59,6 +59,7 @@ type DashboardData = {
     conversations: number;
     knowledgeItems: number;
     gradeItems: number;
+    driveFiles?: number;
     scheduleEntries?: number;
   };
   scheduleSummary: {
@@ -155,6 +156,7 @@ function normalizeDashboardData(payload: Partial<DashboardData>): DashboardData 
       conversations: payload.counts?.conversations ?? 0,
       knowledgeItems: payload.counts?.knowledgeItems ?? 0,
       gradeItems: payload.counts?.gradeItems ?? 0,
+      driveFiles: payload.counts?.driveFiles ?? 0,
       scheduleEntries: payload.counts?.scheduleEntries ?? 0,
     },
     scheduleSummary: {
@@ -296,8 +298,8 @@ function DashboardHeader({ data }: Pick<DashboardRenderProps, 'data'>) {
           <strong>{data?.counts.quizzes ?? 0}</strong>
         </div>
         <div className="student-dashboard-header__meta-card">
-          <span>Knowledge</span>
-          <strong>{data?.counts.knowledgeItems ?? 0}</strong>
+          <span>Drive</span>
+          <strong>{data?.counts.driveFiles ?? 0}</strong>
         </div>
         <div className="student-dashboard-header__meta-card">
           <span>Grades</span>

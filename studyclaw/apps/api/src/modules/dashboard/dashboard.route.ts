@@ -23,6 +23,14 @@ type NativeCalendarEventRow = {
   metadata_json?: Record<string, unknown> | null;
 };
 
+type NativeFileRow = {
+  id: string;
+  name: string;
+  file_type: string;
+  updated_at: string;
+  created_at: string;
+};
+
 function mapNativeCalendarEvent(row: NativeCalendarEventRow) {
   return {
     id: row.id,
@@ -114,6 +122,7 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
     activityResult,
     googleStatus,
     nativeCalendarResult,
+    nativeFilesResult,
   ] = await Promise.all([
     db.query(
       `select id, title, type, status, reminder_at, metadata_json
@@ -153,6 +162,14 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
        limit 12`,
       [userId]
     ).catch(() => ({ rows: [] })),
+    db.query(
+      `select id, name, file_type, updated_at, created_at
+       from studyclaw_files
+       where user_id = $1
+       order by updated_at desc
+       limit 6`,
+      [userId]
+    ).catch(() => ({ rows: [] })),
   ]);
 
   const reminders = (remindersResult.rows as ReminderRow[])
@@ -168,6 +185,7 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
     quizzes: quizzesResult.rows[0]?.count ?? 0,
     conversations: threadsResult.rows[0]?.count ?? 0,
     knowledgeItems: knowledgeItemsResult.rows[0]?.count ?? 0,
+    driveFiles: nativeFilesResult.rows.length ?? 0,
   };
 
   const nativeCalendarEvents = (nativeCalendarResult.rows as NativeCalendarEventRow[]).map(mapNativeCalendarEvent);
@@ -202,6 +220,15 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
         : nativeCalendarEvents.length
           ? 'StudyClaw Calendar active'
           : 'Calendar not connected';
+  const continueReading = (nativeFilesResult.rows as NativeFileRow[]).map((file) => ({
+    kind: 'asset' as const,
+    id: file.id,
+    title: file.name,
+    progressPercent: 0,
+    lastOpenedAt: file.updated_at ?? file.created_at ?? null,
+    href: '/drive',
+    detail: `StudyClaw ${file.file_type}`,
+  }));
 
   res.json({
     generatedAt: new Date().toISOString(),
@@ -252,11 +279,13 @@ dashboardRouter.get('/', async (req: AuthedRequest, res) => {
           urgencyLabel: describeUrgency(nextExam.reminder_at),
         }
       : null,
+    continueReading,
     recommendations: buildRecommendations(reminders, counts),
     calendarEvents,
     activityFeed: activityResult.rows,
     quickActions: [
       { label: 'Open Coach', href: '/coach' },
+      { label: 'Open Drive', href: '/drive' },
       { label: 'Generate flashcards', href: '/study' },
       { label: 'Complete setup', href: '/onboarding' },
       { label: 'Review settings', href: '/settings' },

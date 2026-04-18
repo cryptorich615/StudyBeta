@@ -109,13 +109,17 @@ export function NotificationSettingsDetail() {
         <div className="settings-stack compact" style={{ marginTop: 14 }}>
           <div className="settings-row">
             <span className="muted-copy">StudyClaw Services</span>
-            <strong>Calendar, Drive, Notes ready</strong>
+            <strong>Calendar, Drive, Notes active</strong>
           </div>
           <p className="muted-copy" style={{ marginTop: 8 }}>
             Every account gets StudyClaw-native planning and workspace services. Google adds an extra external layer instead of replacing them.
           </p>
           <div className="settings-row">
-            <span className="muted-copy">Google Calendar / Drive</span>
+            <span className="muted-copy">Native workspace</span>
+            <strong>StudyClaw Calendar + StudyClaw Drive</strong>
+          </div>
+          <div className="settings-row">
+            <span className="muted-copy">Google Services</span>
             <strong>
               {googleStatus?.connected
                 ? googleStatus.googleEmail || googleStatus.account || 'Connected'
