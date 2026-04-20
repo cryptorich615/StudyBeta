@@ -35,6 +35,66 @@ function parseJsonBlock(value: string) {
   return JSON.parse(cleaned);
 }
 
+function resolveActionItemReminderAt(preset: string) {
+  const now = new Date();
+  const target = new Date(now);
+
+  if (preset === 'tomorrow_evening') {
+    target.setDate(target.getDate() + 1);
+    target.setHours(18, 0, 0, 0);
+    return target.toISOString();
+  }
+
+  if (preset === 'this_weekend') {
+    const day = target.getDay();
+    const daysUntilSaturday = (6 - day + 7) % 7 || 7;
+    target.setDate(target.getDate() + daysUntilSaturday);
+    target.setHours(10, 0, 0, 0);
+    return target.toISOString();
+  }
+
+  target.setHours(18, 0, 0, 0);
+  if (target.getTime() <= now.getTime()) {
+    target.setDate(target.getDate() + 1);
+  }
+  return target.toISOString();
+}
+
+async function persistCoachAsset(input: {
+  userId: string;
+  title: string;
+  originalText: string;
+  processedText: string;
+  sourceType: string;
+  summary?: string | null;
+  actionItems?: string[];
+  knowledge?: Array<Record<string, unknown>>;
+  attachments?: Array<{ name?: string; type?: string }>;
+}) {
+  const result = await db.query(
+    `insert into study_assets (user_id, title, original_text, processed_text, asset_type, metadata_json)
+     values ($1, $2, $3, $4, $5, $6)
+     returning id`,
+    [
+      input.userId,
+      input.title,
+      input.originalText,
+      input.processedText,
+      'typed_note',
+      JSON.stringify({
+        source: 'coach_process',
+        sourceType: input.sourceType,
+        summary: input.summary ?? null,
+        actionItems: input.actionItems ?? [],
+        knowledge: input.knowledge ?? [],
+        attachments: input.attachments ?? [],
+      }),
+    ]
+  );
+
+  return String(result.rows[0]?.id ?? '');
+}
+
 export const coachRouter = Router();
 
 coachRouter.use(requireAuth);
@@ -223,6 +283,21 @@ ${text}
     });
 
     const parsed = parseJsonBlock(reply.text);
+    const transcript = parsed.transcript || text.trim();
+    const summary = parsed.summary || text.trim().slice(0, 280);
+    const actionItems = parsed.actionItems ?? [];
+    const knowledge = parsed.knowledge ?? [];
+    const assetId = await persistCoachAsset({
+      userId: req.user!.id,
+      title,
+      originalText: text.trim(),
+      processedText: transcript,
+      sourceType,
+      summary,
+      actionItems,
+      knowledge,
+      attachments,
+    });
     await db.query(
       `insert into agent_actions (agent_id, action_type, summary, payload)
        values ($1, $2, $3, $4)`,
@@ -234,12 +309,30 @@ ${text}
       ]
     );
     res.json({
-      transcript: parsed.transcript || text.trim(),
-      summary: parsed.summary || text.trim().slice(0, 280),
-      actionItems: parsed.actionItems ?? [],
-      knowledge: parsed.knowledge ?? [],
+      assetId,
+      transcript,
+      summary,
+      actionItems,
+      knowledge,
     });
   } catch {
+    const transcript = text.trim();
+    const summary = text.trim().slice(0, 280);
+    const actionItems = [
+      'Review the cleaned note and split it into one due item and one study block.',
+      'Save any course rule, schedule, or exam detail into coach knowledge.',
+    ];
+    const assetId = await persistCoachAsset({
+      userId: req.user!.id,
+      title,
+      originalText: text.trim(),
+      processedText: transcript,
+      sourceType,
+      summary,
+      actionItems,
+      knowledge: [],
+      attachments,
+    });
     await db.query(
       `insert into agent_actions (agent_id, action_type, summary, payload)
        values ($1, $2, $3, $4)`,
@@ -251,13 +344,61 @@ ${text}
       ]
     );
     res.json({
-      transcript: text.trim(),
-      summary: text.trim().slice(0, 280),
-      actionItems: [
-        'Review the cleaned note and split it into one due item and one study block.',
-        'Save any course rule, schedule, or exam detail into coach knowledge.',
-      ],
+      assetId,
+      transcript,
+      summary,
+      actionItems,
       knowledge: [],
     });
   }
+});
+
+coachRouter.post('/assets/:assetId/action-items/reminder', async (req: AuthedRequest, res) => {
+  await ensurePlatformSchema();
+
+  const assetId = String(req.params.assetId ?? '').trim();
+  const actionItem = String(req.body?.actionItem ?? '').trim();
+  const schedulePreset = String(req.body?.schedulePreset ?? 'today_evening').trim();
+
+  if (!assetId || !actionItem) {
+    return res.status(400).json({ error: 'bad_request', message: 'assetId and actionItem are required' });
+  }
+
+  const assetResult = await db.query(
+    `select id, title
+     from study_assets
+     where id = $1 and user_id = $2
+     limit 1`,
+    [assetId, req.user!.id]
+  );
+
+  if (!assetResult.rows[0]) {
+    return res.status(404).json({ error: 'not_found', message: 'Backpack asset not found' });
+  }
+
+  const reminderAt = resolveActionItemReminderAt(schedulePreset);
+  const reminderResult = await db.query(
+    `insert into reminders (user_id, title, reminder_at, type, metadata_json)
+     values ($1, $2, $3, $4, $5)
+     returning id`,
+    [
+      req.user!.id,
+      actionItem,
+      reminderAt,
+      'assignment',
+      JSON.stringify({
+        source: 'coach_action_item',
+        sourceAssetId: assetId,
+        sourceAssetTitle: assetResult.rows[0].title,
+        schedulePreset,
+      }),
+    ]
+  );
+
+  res.status(201).json({
+    ok: true,
+    reminderId: reminderResult.rows[0]?.id ?? null,
+    reminderAt,
+    message: 'Added to your task list.',
+  });
 });

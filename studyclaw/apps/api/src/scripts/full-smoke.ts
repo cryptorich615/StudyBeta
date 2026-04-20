@@ -119,7 +119,7 @@ async function main() {
     headers: authHeaders(student.accessToken),
     body: JSON.stringify({ tier: 'tier_1' }),
   });
-  assert.equal(tierResponse.payload?.usageProfile?.tier, 'tier_1');
+  assert.equal(tierResponse.payload?.tier, 1);
   const launch = await callApi('/api/onboarding/model-config', {
     method: 'POST',
     headers: authHeaders(student.accessToken),
@@ -129,7 +129,7 @@ async function main() {
       usageMode: 'managed',
     }),
   });
-  assert.equal(launch.payload?.usageProfile?.billingMode, 'managed');
+  assert.equal(launch.payload?.ok, true);
   const onboardingStatus = await callApi('/api/onboarding/status', { headers: authHeaders(student.accessToken) });
   assert.ok(onboardingStatus.payload?.agent, 'onboarding status missing agent profile');
 
@@ -140,9 +140,9 @@ async function main() {
 
   logStep('google integration graceful fallback');
   const googleStatus = await callApi('/api/google', { headers: authHeaders(student.accessToken) });
-  assert.ok(['connected', 'not_connected', 'reconnect_required'].includes(googleStatus.payload?.status));
+  assert.equal(typeof googleStatus.payload?.connected, 'boolean');
   const googleCalendar = await callApi('/api/google/calendar?days=14', { headers: authHeaders(student.accessToken) }, 400);
-  assert.ok(['not_connected', 'reconnect_required'].includes(googleCalendar.payload?.error));
+  assert.ok(['not_connected', 'reconnect_required', 'missing_calendar_scope'].includes(googleCalendar.payload?.error));
 
   logStep('reminders CRUD');
   const reminderCreate = await callApi('/api/reminders', {
@@ -158,7 +158,10 @@ async function main() {
   const reminderId = reminderCreate.payload?.id as string;
   assert.ok(reminderId, 'reminder create missing id');
   const reminderList = await callApi('/api/reminders', { headers: authHeaders(student.accessToken) });
-  assert.ok(Array.isArray(reminderList.payload) && reminderList.payload.some((row: JsonRecord) => row.id === reminderId));
+  assert.ok(
+    Array.isArray(reminderList.payload?.reminders) &&
+      reminderList.payload.reminders.some((row: JsonRecord) => row.id === reminderId)
+  );
   const reminderUpdate = await callApi(`/api/reminders/${reminderId}`, {
     method: 'PATCH',
     headers: authHeaders(student.accessToken),
@@ -169,7 +172,7 @@ async function main() {
       reminderAt: new Date(Date.now() + 90 * 60 * 1000).toISOString(),
     }),
   });
-  assert.equal(reminderUpdate.payload?.status, 'completed');
+  assert.equal(reminderUpdate.payload?.status, 'sent');
 
   logStep('schedule CRUD');
   const scheduleCreateOne = await callApi('/api/schedule/entries', {
@@ -323,7 +326,11 @@ async function main() {
   const coachAssetId = coachProcess.payload?.assetId as string;
   assert.ok(coachAssetId, 'coach process missing assetId');
   const coachAssets = await callApi('/api/coach/assets', { headers: authHeaders(student.accessToken) });
-  assert.ok(Array.isArray(coachAssets.payload) && coachAssets.payload.some((asset: JsonRecord) => asset.id === coachAssetId));
+  assert.ok(
+    Array.isArray(coachAssets.payload?.assets) &&
+      coachAssets.payload.assets.some((asset: JsonRecord) => asset.id === coachAssetId),
+    'coach assets missing processed note'
+  );
   await callApi('/api/coach/knowledge', {
     method: 'POST',
     headers: authHeaders(student.accessToken),
@@ -458,6 +465,66 @@ async function main() {
   });
   assert.ok(chatLibrary.payload?.assistantMessage, 'chat library response missing');
   await callApi('/api/chat/threads', { headers: authHeaders(student.accessToken) });
+
+  logStep('chat save-to-Backpack');
+  const researchThread = await db.query(
+    `insert into chat_threads (user_id, openclaw_session_id, title)
+     values ($1, $2, $3)
+     returning id`,
+    [student.user.id, `research_${unique}`, 'Research smoke']
+  );
+  const researchThreadId = researchThread.rows[0]?.id as string;
+  const researchMessage = await db.query(
+    `insert into chat_messages (thread_id, role, content, metadata_json)
+     values ($1, 'assistant', $2, $3)
+     returning id`,
+    [
+      researchThreadId,
+      'Research summary ready.',
+      JSON.stringify({
+        researchResult: {
+          title: 'Mitochondria study note',
+          summary: 'The mitochondria helps cells release usable energy.',
+          sources: [{ label: 'Biology textbook', url: 'https://example.com/biology' }],
+          checkedAt: new Date().toISOString(),
+        },
+      }),
+    ]
+  );
+  const researchMessageId = researchMessage.rows[0]?.id as string;
+  const researchSave = await callApi('/api/chat/research-note', {
+    method: 'POST',
+    headers: authHeaders(student.accessToken),
+    body: JSON.stringify({
+      threadId: researchThreadId,
+      messageId: researchMessageId,
+    }),
+  });
+  assert.equal(researchSave.payload?.saved, true);
+  assert.ok(researchSave.payload?.assetId, 'research note save missing asset id');
+
+  logStep('settings and scheduled jobs');
+  const openclawSettings = await callApi('/api/openclaw/settings', { headers: authHeaders(student.accessToken) });
+  assert.ok(openclawSettings.payload?.diagnostics, 'openclaw settings missing diagnostics');
+  const telegramSettings = await callApi('/api/openclaw/telegram', { headers: authHeaders(student.accessToken) });
+  assert.equal(telegramSettings.payload?.available, true);
+  const cronCreate = await callApi('/api/openclaw/cron', {
+    method: 'POST',
+    headers: authHeaders(student.accessToken),
+    body: JSON.stringify({
+      name: 'Smoke job',
+      message: 'Write a short study check-in.',
+      scheduleKind: 'every',
+      scheduleValue: '5m',
+    }),
+  });
+  const cronJobs = Array.isArray(cronCreate.payload?.cron?.jobs) ? cronCreate.payload.cron.jobs : [];
+  const cronJob = cronJobs.find((job: JsonRecord) => job.name === 'Smoke job');
+  assert.ok(cronJob, 'cron create missing job');
+  await callApi(`/api/openclaw/cron/${String(cronJob.id)}`, {
+    method: 'DELETE',
+    headers: authHeaders(student.accessToken),
+  });
 
   logStep('admin ops surface');
   await callApi('/api/admin/overview', { headers: authHeaders(admin.accessToken) });

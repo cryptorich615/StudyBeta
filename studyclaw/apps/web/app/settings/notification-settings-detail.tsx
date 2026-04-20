@@ -195,8 +195,8 @@ export function NotificationSettingsDetail() {
                 <input
                   id="telegram-pairing-code"
                   value={telegramCode}
-                  onChange={(event) => setTelegramCode(event.target.value.toUpperCase())}
-                  placeholder="ABCD1234"
+                  onChange={(event) => setTelegramCode(event.target.value)}
+                  placeholder="Pairing code or chat ID"
                 />
               </div>
             </div>
@@ -206,7 +206,7 @@ export function NotificationSettingsDetail() {
               {' '}
               2. Send any message or <strong>/start</strong>.
               {' '}
-              3. Paste the pairing code you receive here.
+              3. Paste the pairing code you receive here, or the numeric chat ID if your bot shows that directly.
               {' '}
               4. After approval, your Telegram DMs will route to your own StudyClaw agent.
             </p>

@@ -317,24 +317,26 @@ Do not include any text outside the JSON.
 Notes:
 ${text}
 `;
+    const generationMetadata = {
+        feature: 'flashcards',
+        ...(sourceAssetId ? { sourceAssetId } : {}),
+        ...(nativeSource?.id ? { sourceFileId: nativeSource.id } : {}),
+        ...(nativeSource?.file_type ? { sourceFileType: nativeSource.file_type } : {}),
+        ...(sourceKind ?? (nativeSource ? 'native-file' : null) ? { sourceKind: sourceKind ?? 'native-file' } : {}),
+        ...(subjectId ? { subjectId } : {}),
+        googleConnected: context.workspace.googleConnected,
+        workspaceCalendarBackend: context.workspace.calendarBackend,
+        workspaceDocumentBackend: context.workspace.documentBackend,
+        nativeCalendarEvents: context.workspace.nativeCalendarEvents,
+        nativeFiles: context.workspace.nativeFiles,
+    };
+
     const reply = await openclaw.sendMessage({
         agentId: agent.openclaw_agent_id,
         instructions: buildStudyInstructions(agent.system_prompt, context),
         message: prompt,
         model: agent.model_key,
-        metadata: {
-            feature: 'flashcards',
-            sourceAssetId,
-            sourceFileId: nativeSource?.id ?? null,
-            sourceFileType: nativeSource?.file_type ?? null,
-            sourceKind: sourceKind ?? (nativeSource ? 'native-file' : null),
-            subjectId,
-            googleConnected: context.workspace.googleConnected,
-            workspaceCalendarBackend: context.workspace.calendarBackend,
-            workspaceDocumentBackend: context.workspace.documentBackend,
-            nativeCalendarEvents: context.workspace.nativeCalendarEvents,
-            nativeFiles: context.workspace.nativeFiles,
-        },
+        metadata: generationMetadata,
         userId: req.user!.id,
     });
 
@@ -450,26 +452,28 @@ Do not include any text outside the JSON.
 Notes:
 ${text}
 `;
+    const generationMetadata = {
+        feature: 'quiz',
+        ...(sourceAssetId ? { sourceAssetId } : {}),
+        ...(nativeSource?.id ? { sourceFileId: nativeSource.id } : {}),
+        ...(nativeSource?.file_type ? { sourceFileType: nativeSource.file_type } : {}),
+        ...(sourceKind ?? (nativeSource ? 'native-file' : null) ? { sourceKind: sourceKind ?? 'native-file' } : {}),
+        ...(subjectId ? { subjectId } : {}),
+        questionCount,
+        mode,
+        googleConnected: context.workspace.googleConnected,
+        workspaceCalendarBackend: context.workspace.calendarBackend,
+        workspaceDocumentBackend: context.workspace.documentBackend,
+        nativeCalendarEvents: context.workspace.nativeCalendarEvents,
+        nativeFiles: context.workspace.nativeFiles,
+    };
+
     const reply = await openclaw.sendMessage({
         agentId: agent.openclaw_agent_id,
         instructions: buildStudyInstructions(agent.system_prompt, context),
         message: prompt,
         model: agent.model_key,
-        metadata: {
-            feature: 'quiz',
-            sourceAssetId,
-            sourceFileId: nativeSource?.id ?? null,
-            sourceFileType: nativeSource?.file_type ?? null,
-            sourceKind: sourceKind ?? (nativeSource ? 'native-file' : null),
-            subjectId,
-            questionCount,
-            mode,
-            googleConnected: context.workspace.googleConnected,
-            workspaceCalendarBackend: context.workspace.calendarBackend,
-            workspaceDocumentBackend: context.workspace.documentBackend,
-            nativeCalendarEvents: context.workspace.nativeCalendarEvents,
-            nativeFiles: context.workspace.nativeFiles,
-        },
+        metadata: generationMetadata,
         userId: req.user!.id,
     });
 

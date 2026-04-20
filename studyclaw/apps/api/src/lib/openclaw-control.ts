@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { buildUserAgentId } from './user-agent';
 
 const execFileAsync = promisify(execFile);
-const OPENCLAW_HOME = process.env.OPENCLAW_HOME ?? '/home/ubuntu/.openclaw';
+const OPENCLAW_HOME = process.env.OPENCLAW_HOME ?? join(process.env.HOME ?? '/tmp', '.openclaw');
 const OPENCLAW_CONFIG_PATH = join(OPENCLAW_HOME, 'openclaw.json');
 const CRON_JOBS_PATH = join(OPENCLAW_HOME, 'cron', 'jobs.json');
 const GATEWAY_LOG_PATH = join(OPENCLAW_HOME, 'gateway.log');
@@ -250,6 +250,7 @@ export async function getOpenClawSettingsSnapshot(userId: string) {
   const usage = summarizeUsage(ownSessions);
   const skillData = parseSkillRows(skillsResult.stdout);
   const capabilities = parseCapabilities(capabilitiesResult.stdout);
+  const ownCronJobs = (cronFile.jobs ?? []).filter((job) => String(job.agentId ?? '') === agentId);
 
   const channelIds = ['telegram', 'discord', 'whatsapp'];
   const channels = channelIds.map((channelId) => {
@@ -279,8 +280,8 @@ export async function getOpenClawSettingsSnapshot(userId: string) {
     sessions: ownSessions,
     usage,
     cron: {
-      jobs: cronFile.jobs ?? [],
-      status: (cronFile.jobs ?? []).length ? 'Configured' : 'No jobs configured',
+      jobs: ownCronJobs,
+      status: ownCronJobs.length ? 'Configured' : 'No jobs configured',
     },
     skills,
     logs: {

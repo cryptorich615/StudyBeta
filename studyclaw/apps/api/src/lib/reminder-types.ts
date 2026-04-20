@@ -4,35 +4,27 @@ const ALLOWED_REMINDER_TYPES = new Set([
   'study_session',
   'meeting',
   'custom',
-  'quiz',
-  'test',
-  'project',
-  'paper',
-  'essay',
-  'lab',
-  'homework',
-  'participation',
 ]);
 
 const REMINDER_TYPE_ALIASES: Record<string, string> = {
   exam: 'exam',
   final: 'exam',
   midterm: 'exam',
-  quiz: 'quiz',
-  test: 'test',
+  quiz: 'exam',
+  test: 'exam',
   assignment: 'assignment',
-  homework: 'homework',
-  project: 'project',
-  paper: 'paper',
-  essay: 'essay',
-  lab: 'lab',
+  homework: 'assignment',
+  project: 'assignment',
+  paper: 'assignment',
+  essay: 'assignment',
+  lab: 'assignment',
   meeting: 'meeting',
   office_hours: 'meeting',
   officehour: 'meeting',
   study: 'study_session',
   study_session: 'study_session',
   session: 'study_session',
-  participation: 'participation',
+  participation: 'assignment',
   custom: 'custom',
 };
 
@@ -63,16 +55,37 @@ const ALLOWED_REMINDER_STATUSES = new Set([
 export function normalizeReminderStatus(value: string | null | undefined) {
   const raw = `${value ?? ''}`.trim().toLowerCase();
   if (!raw) {
-    return 'pending';
+    return 'scheduled';
   }
 
-  if (raw === 'scheduled') {
-    return 'pending';
+  if (raw === 'pending' || raw === 'scheduled') {
+    return 'scheduled';
+  }
+
+  if (raw === 'completed' || raw === 'sent') {
+    return 'sent';
   }
 
   if (ALLOWED_REMINDER_STATUSES.has(raw)) {
     return raw;
   }
 
-  throw new Error('status must be one of pending, sent, completed, or cancelled');
+  throw new Error('status must be one of pending, scheduled, sent, completed, or cancelled');
+}
+
+export function presentReminderStatus(value: string | null | undefined) {
+  const raw = `${value ?? ''}`.trim().toLowerCase();
+  if (!raw || raw === 'scheduled') {
+    return 'pending';
+  }
+
+  if (raw === 'sent') {
+    return 'sent';
+  }
+
+  if (raw === 'cancelled') {
+    return 'cancelled';
+  }
+
+  return raw;
 }
