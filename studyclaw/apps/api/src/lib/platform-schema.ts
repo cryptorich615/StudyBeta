@@ -243,6 +243,20 @@ const statements = [
     )
   `,
   `
+    create table if not exists admin_audit_events (
+      id uuid primary key default gen_random_uuid(),
+      actor_user_id uuid references users(id) on delete set null,
+      target_user_id uuid references users(id) on delete set null,
+      event_type text not null,
+      entity_type text not null,
+      entity_id text,
+      summary text not null,
+      metadata_json jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    )
+  `,
+  `
     alter table flashcard_sets
       add column if not exists metadata_json jsonb not null default '{}'::jsonb
   `,
@@ -329,6 +343,15 @@ const statements = [
     create index if not exists idx_memory_summaries_type on memory_summaries(summary_type)
   `,
   `
+    create index if not exists idx_admin_audit_events_created_at on admin_audit_events(created_at desc)
+  `,
+  `
+    create index if not exists idx_admin_audit_events_actor_user_id on admin_audit_events(actor_user_id)
+  `,
+  `
+    create index if not exists idx_admin_audit_events_target_user_id on admin_audit_events(target_user_id)
+  `,
+  `
     do $$
     begin
       if not exists (select 1 from pg_trigger where tgname = 'trg_agents_updated_at') then
@@ -366,6 +389,9 @@ const statements = [
       end if;
       if not exists (select 1 from pg_trigger where tgname = 'trg_memory_summaries_updated_at') then
         create trigger trg_memory_summaries_updated_at before update on memory_summaries for each row execute function set_updated_at();
+      end if;
+      if not exists (select 1 from pg_trigger where tgname = 'trg_admin_audit_events_updated_at') then
+        create trigger trg_admin_audit_events_updated_at before update on admin_audit_events for each row execute function set_updated_at();
       end if;
     end $$;
   `,

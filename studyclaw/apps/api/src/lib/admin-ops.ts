@@ -30,46 +30,60 @@ type UserListFilters = {
 };
 
 export async function logAdminAuditEvent(input: AuditInput) {
-  await db.query(
-    `insert into admin_audit_events (
-       actor_user_id,
-       target_user_id,
-       event_type,
-       entity_type,
-       entity_id,
-       summary,
-       metadata_json
-     ) values ($1, $2, $3, $4, $5, $6, $7)`,
-    [
-      input.actorUserId ?? null,
-      input.targetUserId ?? null,
-      input.eventType,
-      input.entityType,
-      input.entityId ?? null,
-      input.summary,
-      JSON.stringify(input.metadata ?? {}),
-    ]
-  );
+  try {
+    await db.query(
+      `insert into admin_audit_events (
+         actor_user_id,
+         target_user_id,
+         event_type,
+         entity_type,
+         entity_id,
+         summary,
+         metadata_json
+       ) values ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        input.actorUserId ?? null,
+        input.targetUserId ?? null,
+        input.eventType,
+        input.entityType,
+        input.entityId ?? null,
+        input.summary,
+        JSON.stringify(input.metadata ?? {}),
+      ]
+    );
+  } catch (error: any) {
+    if (error?.code !== '42P01') {
+      throw error;
+    }
+  }
 }
 
 export async function listAdminAuditEvents(limit = 50) {
-  const result = await db.query(
-    `select a.id,
-            a.event_type,
-            a.entity_type,
-            a.entity_id,
-            a.summary,
-            a.metadata_json,
-            a.created_at,
-            actor.email as actor_email,
-            target.email as target_email
-     from admin_audit_events a
-     left join users actor on actor.id = a.actor_user_id
-     left join users target on target.id = a.target_user_id
-     order by a.created_at desc
-     limit $1`,
-    [limit]
-  );
+  let result;
+  try {
+    result = await db.query(
+      `select a.id,
+              a.event_type,
+              a.entity_type,
+              a.entity_id,
+              a.summary,
+              a.metadata_json,
+              a.created_at,
+              actor.email as actor_email,
+              target.email as target_email
+       from admin_audit_events a
+       left join users actor on actor.id = a.actor_user_id
+       left join users target on target.id = a.target_user_id
+       order by a.created_at desc
+       limit $1`,
+      [limit]
+    );
+  } catch (error: any) {
+    if (error?.code === '42P01') {
+      return [];
+    }
+    throw error;
+  }
 
   return result.rows.map((row) => ({
     id: String(row.id),

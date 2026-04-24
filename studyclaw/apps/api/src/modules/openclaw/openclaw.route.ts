@@ -156,8 +156,13 @@ async function getTelegramProfile(userId: string) {
 }
 
 function normalizeTelegramPeerId(value: string) {
-  const match = value.match(/-?\d{5,}/);
-  return match ? match[0] : null;
+  const unsignedMatch = value.match(/\d{5,}/);
+  if (unsignedMatch) {
+    return unsignedMatch[0];
+  }
+
+  const signedMatch = value.match(/-\d{5,}/);
+  return signedMatch ? signedMatch[0] : null;
 }
 
 async function buildTelegramSettings(userId: string) {
@@ -345,7 +350,7 @@ openclawRouter.get('/telegram', async (req: AuthedRequest, res) => {
 });
 
 openclawRouter.post('/telegram/approve', async (req: AuthedRequest, res) => {
-  const code = String(req.body?.code ?? '').trim();
+  const code = String(req.body?.code ?? req.body?.pairingCode ?? '').trim();
   if (!code) {
     return res.status(400).json({ error: 'bad_request', message: 'Telegram pairing code is required' });
   }

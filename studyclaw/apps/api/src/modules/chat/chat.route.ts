@@ -261,7 +261,7 @@ chatRouter.post('/research-note', async (_req: AuthedRequest, res) => {
       title,
       detail,
       detail,
-      'research_note',
+      'typed_note',
       JSON.stringify({
         source: 'chat_research',
         threadId,

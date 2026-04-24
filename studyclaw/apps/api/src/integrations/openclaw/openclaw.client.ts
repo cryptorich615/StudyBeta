@@ -14,6 +14,52 @@ export type OpenClawSendMessageResult = {
   raw: unknown;
 };
 
+function serializeMetadataValue(value: unknown): string | undefined {
+  if (value === null || typeof value === 'undefined') {
+    return undefined;
+  }
+
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function normalizeMetadata(metadata?: Record<string, unknown>, sessionId?: string) {
+  const entries = Object.entries({
+    ...(metadata ?? {}),
+    sessionId,
+  }).flatMap(([key, value]) => {
+    const normalized = serializeMetadataValue(value);
+    return typeof normalized === 'undefined' ? [] : [[key, normalized] as const];
+  });
+
+  return Object.fromEntries(entries);
+}
+
+function resolveGatewayModel(model: string | undefined, agentId: string | undefined, fallback: string) {
+  const requested = String(model ?? '').trim();
+
+  if (requested.startsWith('openclaw')) {
+    return requested;
+  }
+
+  if (agentId) {
+    return `openclaw/${agentId}`;
+  }
+
+  return requested || fallback;
+}
+
 export class OpenClawClient {
   constructor(
     private readonly baseUrl = process.env.OPENCLAW_BASE_URL ?? 'http://localhost:18789',
@@ -34,14 +80,11 @@ export class OpenClawClient {
         ...(input.agentId ? { 'X-OpenClaw-Agent-Id': input.agentId } : {}),
       },
       body: JSON.stringify({
-        model: input.model ?? this.defaultModel,
+        model: resolveGatewayModel(input.model, input.agentId, this.defaultModel),
         instructions: input.instructions,
         input: input.message,
         user: input.userId,
-        metadata: {
-          ...input.metadata,
-            sessionId: input.sessionId,
-        },
+        metadata: normalizeMetadata(input.metadata, input.sessionId),
       }),
     });
 
@@ -95,15 +138,12 @@ export class OpenClawClient {
               ...(input.agentId ? { 'X-OpenClaw-Agent-Id': input.agentId } : {}),
             },
             body: JSON.stringify({
-              model: input.model ?? defaultModel,
+              model: resolveGatewayModel(input.model, input.agentId, defaultModel),
               instructions: input.instructions,
               input: input.message,
               user: input.userId,
               stream: true,
-              metadata: {
-                ...input.metadata,
-                sessionId: input.sessionId,
-              },
+              metadata: normalizeMetadata(input.metadata, input.sessionId),
             }),
           });
 

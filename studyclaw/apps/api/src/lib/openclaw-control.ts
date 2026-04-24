@@ -81,6 +81,25 @@ function getAgentSkillFilter(config: OpenClawConfig, agentId: string) {
   return Array.isArray(entry?.skills) ? entry.skills.map((value) => String(value)) : null;
 }
 
+async function readAgentSessions(agentId: string): Promise<SessionsResponse> {
+  const sessionsPath = join(OPENCLAW_HOME, 'agents', agentId, 'sessions', 'sessions.json');
+  const fallback: SessionsResponse = { sessions: [] };
+
+  try {
+    const raw = await readFile(sessionsPath, 'utf8');
+    const parsed = JSON.parse(raw) as Record<string, Record<string, unknown>>;
+    const sessions = Object.entries(parsed).map(([key, value]) => ({
+      key,
+      ...value,
+      agentId,
+    })) as SessionRecord[];
+
+    return { sessions };
+  } catch {
+    return fallback;
+  }
+}
+
 async function runOpenClaw(args: string[]) {
   try {
     const { stdout, stderr } = await execFileAsync('openclaw', args, {
@@ -232,20 +251,18 @@ function parseCapabilities(output: string) {
 }
 
 export async function getOpenClawSettingsSnapshot(userId: string) {
-  const [config, sessionsResult, skillsResult, cronFile, gatewayLog, capabilitiesResult] = await Promise.all([
+  const agentId = buildUserAgentId(userId);
+  const [config, ownSessionsResult, skillsResult, cronFile, gatewayLog, capabilitiesResult] = await Promise.all([
     readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH, {}),
-    runOpenClaw(['sessions', '--all-agents', '--json']),
+    readAgentSessions(agentId),
     runOpenClaw(['skills', 'list']),
     readJsonFile<CronJobsFile>(CRON_JOBS_PATH, { jobs: [] }),
     readFile(GATEWAY_LOG_PATH, 'utf8').catch(() => ''),
     runOpenClaw(['channels', 'capabilities']),
   ]);
 
-  const agentId = buildUserAgentId(userId);
   const agentSkillFilter = getAgentSkillFilter(config, agentId);
-  const sessionsJson = sessionsResult.ok ? (JSON.parse(sessionsResult.stdout || '{}') as SessionsResponse) : { sessions: [] };
-  const ownSessions = (sessionsJson.sessions ?? [])
-    .filter((session) => session.agentId === agentId)
+  const ownSessions = (ownSessionsResult.sessions ?? [])
     .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0));
   const usage = summarizeUsage(ownSessions);
   const skillData = parseSkillRows(skillsResult.stdout);
@@ -289,7 +306,7 @@ export async function getOpenClawSettingsSnapshot(userId: string) {
       lines: logs,
     },
     diagnostics: {
-      sessionsOk: sessionsResult.ok,
+      sessionsOk: true,
       skillsOk: skillsResult.ok,
       channelsProbe: capabilitiesResult.ok ? capabilities.probe : capabilitiesResult.stderr || 'Unavailable',
     },

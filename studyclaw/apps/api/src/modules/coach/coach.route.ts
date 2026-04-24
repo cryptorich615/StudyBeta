@@ -10,6 +10,7 @@ import {
 import { ensurePlatformSchema } from '../../lib/platform-schema';
 
 const openclaw = new OpenClawClient();
+const COACH_PROCESS_TIMEOUT_MS = 15_000;
 
 async function ensureCoachKnowledgeTable() {
   await db.query(`
@@ -264,23 +265,30 @@ ${text}
   const context = await buildStudyContext(req.user!.id);
 
   try {
-    const reply = await openclaw.sendMessage({
-      agentId: agent.openclaw_agent_id,
-      instructions: buildStudyInstructions(agent.system_prompt, context),
-      message: prompt,
-      model: agent.model_key,
-      metadata: {
-        feature: 'coach-process',
-        sourceType,
-        attachmentCount: attachments.length,
-        googleConnected: context.workspace.googleConnected,
-        workspaceCalendarBackend: context.workspace.calendarBackend,
-        workspaceDocumentBackend: context.workspace.documentBackend,
-        nativeCalendarEvents: context.workspace.nativeCalendarEvents,
-        nativeFiles: context.workspace.nativeFiles,
-      },
-      userId: req.user!.id,
-    });
+    const reply = await Promise.race([
+      openclaw.sendMessage({
+        agentId: agent.openclaw_agent_id,
+        instructions: buildStudyInstructions(agent.system_prompt, context),
+        message: prompt,
+        model: agent.model_key,
+        metadata: {
+          feature: 'coach-process',
+          sourceType,
+          attachmentCount: attachments.length,
+          googleConnected: context.workspace.googleConnected,
+          workspaceCalendarBackend: context.workspace.calendarBackend,
+          workspaceDocumentBackend: context.workspace.documentBackend,
+          nativeCalendarEvents: context.workspace.nativeCalendarEvents,
+          nativeFiles: context.workspace.nativeFiles,
+        },
+        userId: req.user!.id,
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error(`Coach processing timed out after ${COACH_PROCESS_TIMEOUT_MS}ms`));
+        }, COACH_PROCESS_TIMEOUT_MS);
+      }),
+    ]);
 
     const parsed = parseJsonBlock(reply.text);
     const transcript = parsed.transcript || text.trim();
