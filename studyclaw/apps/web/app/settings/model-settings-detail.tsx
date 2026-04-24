@@ -147,6 +147,10 @@ export function ModelSettingsDetail() {
   }
 
   async function loadModelSettings(nextSelectedId?: string) {
+    if (!readStoredSession()?.accessToken) {
+      return;
+    }
+
     const response = await apiFetch('/api/openclaw/model-settings');
     const data = await response.json();
 

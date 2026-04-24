@@ -24,6 +24,10 @@ export function UsageOverviewDetail() {
   }, []);
 
   async function loadUsageState(adminOverride = isAdmin) {
+    if (!readStoredSession()?.accessToken) {
+      return;
+    }
+
     const modelResponse = await apiFetch('/api/openclaw/model-settings');
     const modelData = await modelResponse.json().catch(() => ({}));
     if (modelResponse.ok) {

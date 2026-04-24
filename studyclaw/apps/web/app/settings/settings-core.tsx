@@ -262,6 +262,12 @@ export function SettingsUsageRail() {
     let active = true;
 
     const loadAccessProfile = async () => {
+      if (!readStoredSession()?.accessToken) {
+        setAccessProfile(null);
+        setRailStatus('');
+        return;
+      }
+
       const response = await apiFetch('/api/openclaw/model-settings');
       const data = await response.json().catch(() => ({}));
 

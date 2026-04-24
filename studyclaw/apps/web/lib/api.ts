@@ -55,12 +55,13 @@ export function resolveApiUrl(path: string) {
 export async function apiFetch(path: string, init: RequestInit = {}) {
   const session = readStoredSession();
   const headers = new Headers(init.headers || {});
+  const hasBearerToken = Boolean(session?.accessToken);
 
   if (!headers.has('Content-Type') && init.body) {
     headers.set('Content-Type', 'application/json');
   }
 
-  if (session?.user?.id) {
+  if (hasBearerToken) {
     headers.set('Authorization', `Bearer ${session.accessToken}`);
   }
 
@@ -69,7 +70,7 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
     headers,
   });
 
-  if (response.status === 401) {
+  if (response.status === 401 && hasBearerToken) {
     clearStoredSession();
   }
 
